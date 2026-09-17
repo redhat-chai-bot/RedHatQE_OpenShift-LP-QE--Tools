@@ -800,6 +800,78 @@ func TestErrorInjection(t *testing.T) {
 			t.Errorf("Expected retry to trigger another HTTP call, got %d total calls", callCount)
 		}
 	})
+
+	t.Run("io.ReadAll error in initializeSession", func(t *testing.T) {
+		a := &Analyzer{
+			mcpURL:   "http://test.com",
+			token:    "token",
+			template: "template",
+			client: &mockHTTPClient{
+				doFunc: func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: 200,
+						Body:       &errorReader{}, // Body that fails on Read
+						Header:     make(http.Header),
+					}, nil
+				},
+			},
+			jsonMarshal: json.Marshal,
+			newRequest:  http.NewRequestWithContext,
+		}
+
+		err := a.initializeSession(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "read response") {
+			t.Errorf("Expected 'read response' error, got: %v", err)
+		}
+	})
+
+	t.Run("session re-init fails after expiry", func(t *testing.T) {
+		initCount := 0
+
+		mockClient := &mockHTTPClient{
+			doFunc: func(req *http.Request) (*http.Response, error) {
+				var mcpReq MCPRequest
+				json.NewDecoder(req.Body).Decode(&mcpReq)
+
+				if mcpReq.Method == "initialize" {
+					initCount++
+					if initCount == 1 {
+						resp := &http.Response{
+							StatusCode: 200,
+							Body:       io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":0}`)),
+							Header:     make(http.Header),
+						}
+						resp.Header.Set("Mcp-Session-Id", "session-1")
+						return resp, nil
+					}
+					// Second init fails
+					return nil, errors.New("network error on re-init")
+				}
+
+				// tools/call returns "Session not found" to trigger retry
+				body := `{"jsonrpc":"2.0","id":"err","error":{"code":-32600,"message":"Session not found"}}`
+				return &http.Response{
+					StatusCode: 404,
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Header:     make(http.Header),
+				}, nil
+			},
+		}
+
+		a := &Analyzer{
+			mcpURL:      "http://test.com",
+			token:       "token",
+			client:      mockClient,
+			template:    "template",
+			jsonMarshal: json.Marshal,
+			newRequest:  http.NewRequestWithContext,
+		}
+
+		_, err := a.AnalyzeFailure(context.Background(), "url")
+		if err == nil || !strings.Contains(err.Error(), "initialize session") {
+			t.Errorf("Expected 'initialize session' error, got: %v", err)
+		}
+	})
 }
 
 func TestFinishedJSONURL(t *testing.T) {
@@ -831,6 +903,16 @@ func TestFinishedJSONURL(t *testing.T) {
 		{
 			name:     "deck-internal view (not storage) has no derivable build",
 			input:    "https://deck-internal-ci.apps.ci.l2s4.p1.openshiftapps.com/view/job/123",
+			expected: "",
+		},
+		{
+			name:     "empty path after gs marker",
+			input:    "https://prow.ci.openshift.org/view/gs/",
+			expected: "",
+		},
+		{
+			name:     "gcsweb-ci URL without view prefix",
+			input:    "https://gcsweb-ci.apps.ci.l2s4.p1.openshiftapps.com/gcs/bucket/logs/job/1",
 			expected: "",
 		},
 	}
@@ -921,4 +1003,96 @@ func TestJobOutcomeFor(t *testing.T) {
 			t.Error("expected no HTTP request for a non-view URL")
 		}
 	})
+
+	t.Run("FAILURE result without boolean is failed", func(t *testing.T) {
+		a := NewAnalyzer("mcp", "tok", "tmpl")
+		a.client = &mockHTTPClient{doFunc: jsonResp(200, `{"result":"FAILURE"}`)}
+		if got := a.JobOutcomeFor(context.Background(), viewURL); got != OutcomeFailed {
+			t.Errorf("outcome = %v, want OutcomeFailed", got)
+		}
+	})
+
+	t.Run("empty JSON returns unknown", func(t *testing.T) {
+		a := NewAnalyzer("mcp", "tok", "tmpl")
+		a.client = &mockHTTPClient{doFunc: jsonResp(200, `{}`)}
+		if got := a.JobOutcomeFor(context.Background(), viewURL); got != OutcomeUnknown {
+			t.Errorf("outcome = %v, want OutcomeUnknown", got)
+		}
+	})
+
+	t.Run("malformed JSON returns unknown", func(t *testing.T) {
+		a := NewAnalyzer("mcp", "tok", "tmpl")
+		a.client = &mockHTTPClient{doFunc: jsonResp(200, `{invalid`)}
+		if got := a.JobOutcomeFor(context.Background(), viewURL); got != OutcomeUnknown {
+			t.Errorf("outcome = %v, want OutcomeUnknown", got)
+		}
+	})
+
+	t.Run("newRequest error returns unknown", func(t *testing.T) {
+		a := &Analyzer{
+			mcpURL:      "mcp",
+			token:       "tok",
+			template:    "tmpl",
+			client:      &mockHTTPClient{},
+			jsonMarshal: json.Marshal,
+			newRequest:  mockNewRequestError,
+		}
+		if got := a.JobOutcomeFor(context.Background(), viewURL); got != OutcomeUnknown {
+			t.Errorf("outcome = %v, want OutcomeUnknown", got)
+		}
+	})
+}
+
+func TestPersonaFromURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "standard persona URL with trailing path",
+			url:  "https://ship-help.example.com/personas/ship_public/mcp",
+			want: "ship_public",
+		},
+		{
+			name: "no personas segment",
+			url:  "https://example.com/api/mcp",
+			want: "unknown",
+		},
+		{
+			name: "empty persona after marker",
+			url:  "https://example.com/personas/",
+			want: "unknown",
+		},
+		{
+			name: "persona without trailing path",
+			url:  "https://example.com/personas/custom-persona",
+			want: "custom-persona",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := personaFromURL(tt.url); got != tt.want {
+				t.Errorf("personaFromURL(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewAnalyzer_TLSInsecureSkipVerify(t *testing.T) {
+	t.Setenv("TLS_INSECURE_SKIP_VERIFY", "true")
+
+	a := NewAnalyzer("https://example.com/mcp", "token", "template")
+
+	httpClient, ok := a.client.(*http.Client)
+	if !ok {
+		t.Fatal("Expected client to be *http.Client")
+	}
+	transport, ok := httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("Expected transport to be *http.Transport when TLS_INSECURE_SKIP_VERIFY=true")
+	}
+	if transport.TLSClientConfig == nil || !transport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("Expected InsecureSkipVerify to be true")
+	}
 }

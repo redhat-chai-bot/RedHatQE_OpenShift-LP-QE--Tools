@@ -3,11 +3,15 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -679,6 +683,225 @@ func TestSeenRecently(t *testing.T) {
 	if h.seenRecently("k2") {
 		t.Error("An entry older than dedupTTL must not be reported as seen")
 	}
+}
+
+// httpDoerMock implements analyzer.HTTPDoer for handler tests.
+type httpDoerMock struct {
+	doFunc func(req *http.Request) (*http.Response, error)
+}
+
+func (m *httpDoerMock) Do(req *http.Request) (*http.Response, error) {
+	return m.doFunc(req)
+}
+
+// overrideAnalyzerClient sets the unexported client field on an analyzer.Analyzer
+// using reflect+unsafe. This is a standard Go testing pattern for accessing
+// unexported fields in cross-package tests without modifying production code.
+func overrideAnalyzerClient(t *testing.T, a *analyzer.Analyzer, mock *httpDoerMock) {
+	t.Helper()
+	v := reflect.ValueOf(a).Elem()
+	f := v.FieldByName("client")
+	reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem().Set(reflect.ValueOf(mock))
+}
+
+func TestActorOf(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *slackevents.MessageEvent
+		want string
+	}{
+		{
+			name: "human user",
+			msg:  &slackevents.MessageEvent{User: "U123"},
+			want: "U123",
+		},
+		{
+			name: "bot with username",
+			msg:  &slackevents.MessageEvent{Username: "chai-bot"},
+			want: "chai-bot",
+		},
+		{
+			name: "bot with ID only",
+			msg:  &slackevents.MessageEvent{BotID: "B456"},
+			want: "B456",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := actorOf(tt.msg); got != tt.want {
+				t.Errorf("actorOf() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandle_QueueFull(t *testing.T) {
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true,"ts":"123"}`))
+	}))
+	defer slackServer.Close()
+
+	slackClient := slack.New("test-token", slack.OptionAPIURL(slackServer.URL+"/"))
+
+	h := &handler{
+		client:            slackClient,
+		analyzer:          analyzer.NewAnalyzer("", "", ""),
+		monitoredChannels: map[string]bool{"C123": true},
+		allowedBotIDs:     make(map[string]bool),
+		semaphore:         make(chan struct{}, 1),
+		recentlySeen:      make(map[string]time.Time),
+	}
+	h.semaphore <- struct{}{} // Fill the semaphore
+
+	callback := &slackevents.EventsAPIEvent{
+		Type: slackevents.CallbackEvent,
+		InnerEvent: slackevents.EventsAPIInnerEvent{
+			Type: string(slackevents.Message),
+			Data: &slackevents.MessageEvent{
+				Channel:   "C123",
+				TimeStamp: "900.001",
+				Text:      "https://prow.ci.openshift.org/view/gs/test/job/900",
+			},
+		},
+	}
+
+	handled, err := h.Handle(callback, slog.Default())
+
+	if !handled {
+		t.Error("Expected event to be handled even when queue is full")
+	}
+	if err != nil {
+		t.Errorf("Expected no error, got %v", err)
+	}
+
+	<-h.semaphore // Release
+}
+
+func TestHandle_QueueFull_PostError(t *testing.T) {
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":false,"error":"test_error"}`))
+	}))
+	defer slackServer.Close()
+
+	slackClient := slack.New("test-token", slack.OptionAPIURL(slackServer.URL+"/"))
+
+	h := &handler{
+		client:            slackClient,
+		analyzer:          analyzer.NewAnalyzer("", "", ""),
+		monitoredChannels: map[string]bool{"C123": true},
+		allowedBotIDs:     make(map[string]bool),
+		semaphore:         make(chan struct{}, 1),
+		recentlySeen:      make(map[string]time.Time),
+	}
+	h.semaphore <- struct{}{} // Fill the semaphore
+
+	callback := &slackevents.EventsAPIEvent{
+		Type: slackevents.CallbackEvent,
+		InnerEvent: slackevents.EventsAPIInnerEvent{
+			Type: string(slackevents.Message),
+			Data: &slackevents.MessageEvent{
+				Channel:   "C123",
+				TimeStamp: "901.001",
+				Text:      "https://prow.ci.openshift.org/view/gs/test/job/901",
+			},
+		},
+	}
+
+	handled, err := h.Handle(callback, slog.Default())
+
+	if !handled {
+		t.Error("Expected event to be handled even when queue is full and post fails")
+	}
+	if err != nil {
+		t.Errorf("Expected no error, got %v", err)
+	}
+
+	<-h.semaphore // Release
+}
+
+func TestAnalyzeAndRespond_JobPassed(t *testing.T) {
+	postChan := make(chan bool, 1)
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/chat.postMessage" {
+			postChan <- true
+		}
+		w.Write([]byte(`{"ok":true,"ts":"123"}`))
+	}))
+	defer slackServer.Close()
+
+	slackClient := slack.New("test-token", slack.OptionAPIURL(slackServer.URL+"/"))
+
+	anal := analyzer.NewAnalyzer("http://mcp-unused", "token", "template")
+	overrideAnalyzerClient(t, anal, &httpDoerMock{
+		doFunc: func(req *http.Request) (*http.Response, error) {
+			// Return "passed: true" for any request (the finished.json fetch)
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(`{"passed":true}`)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	})
+
+	h := &handler{
+		client:       slackClient,
+		analyzer:     anal,
+		semaphore:    make(chan struct{}, 5),
+		recentlySeen: make(map[string]time.Time),
+	}
+
+	event := &slackevents.MessageEvent{
+		Channel:   "C123",
+		TimeStamp: "123.456",
+	}
+
+	h.semaphore <- struct{}{} // Pre-acquire semaphore (mimics Handle behavior)
+	h.analyzeAndRespond(context.Background(), event,
+		"https://prow.ci.openshift.org/view/gs/bucket/job/1", slog.Default())
+
+	select {
+	case <-postChan:
+		// Success — "job passed" skip notice was posted
+	case <-time.After(2 * time.Second):
+		t.Error("Expected 'job passed' skip notice to be posted")
+	}
+}
+
+func TestAnalyzeAndRespond_JobPassed_PostError(t *testing.T) {
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":false,"error":"channel_not_found"}`))
+	}))
+	defer slackServer.Close()
+
+	slackClient := slack.New("test-token", slack.OptionAPIURL(slackServer.URL+"/"))
+
+	anal := analyzer.NewAnalyzer("http://mcp-unused", "token", "template")
+	overrideAnalyzerClient(t, anal, &httpDoerMock{
+		doFunc: func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(`{"passed":true}`)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	})
+
+	h := &handler{
+		client:       slackClient,
+		analyzer:     anal,
+		semaphore:    make(chan struct{}, 5),
+		recentlySeen: make(map[string]time.Time),
+	}
+
+	event := &slackevents.MessageEvent{
+		Channel:   "C123",
+		TimeStamp: "123.789",
+	}
+
+	h.semaphore <- struct{}{} // Pre-acquire semaphore
+	// Should not panic — just logs the post error
+	h.analyzeAndRespond(context.Background(), event,
+		"https://prow.ci.openshift.org/view/gs/bucket/job/2", slog.Default())
 }
 
 // Interface compliance check
