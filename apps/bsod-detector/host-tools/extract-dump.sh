@@ -46,6 +46,10 @@ while [[ $# -gt 0 ]]; do
     --windows-root) winRoot="$2"; shift 2 ;;
     -h|--help)
       sed -n '/^#!/,/^####$/{/^#!/d;/^####$/d;s/^# \{0,1\}//p;}' "$0"; exit 0 ;;
+    --)
+      shift
+      break
+      ;;
     *) warn "unknown arg: $1"; exit 2 ;;
   esac
 done

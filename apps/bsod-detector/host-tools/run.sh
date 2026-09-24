@@ -57,5 +57,4 @@ exec podman run --rm \
   -v "${disk}":/images/"$(basename "${disk}")":ro \
   -v "${out}":/out:Z \
   "${image}" \
-  -- \
   --disk /images/"$(basename "${disk}")" --out /out
