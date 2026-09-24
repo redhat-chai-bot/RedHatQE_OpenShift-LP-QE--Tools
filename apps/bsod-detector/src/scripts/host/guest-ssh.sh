@@ -30,6 +30,7 @@ typeset VM_NAME="${VM_NAME:-bsod-test}"
 typeset scriptDir=""; scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 typeset GUEST_KEY="${GUEST_KEY:-${scriptDir}/../../../.ssh/bsod-test}"   # src/scripts/host -> src/scripts -> src -> app root/.ssh
 
+# Die — print a fatal error and exit.
 function Die () { echo "guest-ssh: $*" >&2; exit 1; }
 
 typeset GUEST_IP="${GUEST_IP:-}"

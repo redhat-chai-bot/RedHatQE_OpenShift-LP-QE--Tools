@@ -94,14 +94,18 @@ pod="$(printf '%s\n' "${podRaw}" | sed -n "/virt-launcher-${vm}-/p" | head -n1 |
 typeset dom="${ns}_${vm}"
 export GA_NS="${ns}" GA_POD="${pod}" GA_DOM="${dom}"
 
+# Log — emit a UTC-timestamped diagnostic line to stdout.
 function Log () { echo "[$(date -u +%H:%M:%S)] $*"; true; }
+# Ga — invoke guest-agent.py with the given subcommand and arguments.
 function Ga () { python3 "${scriptDir}/guest-agent.py" "$@"; }
 # PingOk — check guest-agent reachability with a short timeout.
 # Without the timeout, a crashed guest's orphaned QGA socket can block
 # for up to 300 seconds before the kernel returns ETIMEDOUT.
 function PingOk () { timeout 10 Ga ping >/dev/null 2>&1; }
+# Domstate — query the libvirt domain state via the virt-launcher pod.
 function Domstate () { oc exec -n "${ns}" "${pod}" -- virsh domstate "${dom}" 2>/dev/null | tr -d '[:space:]'; }
 
+# CaptureScreens — burst-capture VM framebuffer screenshots and select the best BSOD frame.
 function CaptureScreens () {  # $1 = destination dir
   typeset dst="$1"; mkdir -p "${dst}"
   oc exec -n "${ns}" "${pod}" -- bash -c "
@@ -131,6 +135,7 @@ function CaptureScreens () {  # $1 = destination dir
   true
 }
 
+# CaptureHostSignals — capture host-side crash correlation evidence (kernel log, domain XML).
 function CaptureHostSignals () {  # host kernel log (split-lock #AC) + domain XML
   [ -n "${node}" ] || node="$(oc get vmi "${vm}" -n "${ns}" -o jsonpath='{.status.nodeName}' 2>/dev/null || true)"
   oc exec -n "${ns}" "${pod}" -- virsh dumpxml "${dom}" > "${outDir}/dom.xml" 2>/dev/null || true
@@ -155,6 +160,7 @@ function CaptureHostSignals () {  # host kernel log (split-lock #AC) + domain XM
 typeset rebooted=false
 typeset bugCheck=""
 
+# CollectAfterReboot — wait for the guest to reboot, then pull crash dumps and cross-check.
 function CollectAfterReboot () {
   Log "waiting up to ${rebootWait}s for the guest agent to return ..."
   typeset t=0
@@ -192,6 +198,7 @@ function CollectAfterReboot () {
   true
 }
 
+# WriteSummary — write the evidence-summary.json tying all collected artifacts together.
 function WriteSummary () {  # $1 = domstate seen at detection
   typeset splitLock="null"
   [ -s "${outDir}/host-signals.json" ] && splitLock="$(jq -c '.splitLockDetected // null' "${outDir}/host-signals.json" 2>/dev/null || echo null)"

@@ -52,6 +52,7 @@ done
 
 mkdir -p "${outDir}"
 
+# Log — emit a diagnostic message to stderr.
 function Log () { echo "[collect-all] $*" >&2; true; }
 
 # --- Phase 1: Capture BSOD screenshot (background) ---

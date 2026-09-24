@@ -52,8 +52,11 @@ typeset winRoot="/Windows"
 typeset force=0
 typeset virshDump=0
 
+# Warn — print a diagnostic message to stderr.
 function Warn () { echo "collect-from-host: $*" >&2; true; }
+# Die — print a fatal error and exit.
 function Die  () { Warn "$*"; exit 2; }
+# Have — return 0 if the named command is on PATH.
 function Have () { command -v "$1" >/dev/null 2>&1; }
 
 while [[ $# -gt 0 ]]; do
@@ -116,6 +119,7 @@ typeset crashDetected="false"
 typeset method="none"
 typeset filesJson="[]"
 
+# Emit — write the final JSON result object to stdout.
 function Emit () {
   typeset outField="${out}"
   jq -n \

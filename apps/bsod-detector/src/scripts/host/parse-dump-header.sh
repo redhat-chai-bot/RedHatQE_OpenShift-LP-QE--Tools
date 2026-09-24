@@ -24,6 +24,7 @@ typeset scriptDir; scriptDir="$(cd "$(dirname "$0")" && pwd)"
 typeset repoRoot; repoRoot="$(cd "${scriptDir}/../../.." && pwd)"
 typeset codesFile="${repoRoot}/src/data/bugcheck-codes.json"
 
+# Die — print a fatal error and exit.
 function Die () { echo "parse-dump-header: $*" >&2; exit 2; }
 typeset -a warnList=()
 

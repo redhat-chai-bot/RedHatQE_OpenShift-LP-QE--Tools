@@ -53,8 +53,11 @@ typeset useDmesg=0
 typeset logFile=""
 typeset domainXmlFile=""
 
+# Warn — print a diagnostic message to stderr.
 function Warn () { echo "collect-host-signals: $*" >&2; true; }
+# Die — print a fatal error and exit.
 function Die ()  { Warn "$*"; exit 2; }
+# Have — return 0 if the named command is on PATH.
 function Have () { command -v "$1" >/dev/null 2>&1; }
 
 Have jq || Die "jq not found"

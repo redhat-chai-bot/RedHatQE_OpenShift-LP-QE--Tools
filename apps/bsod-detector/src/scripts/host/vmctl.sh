@@ -23,7 +23,9 @@ typeset snapName="${SNAP_NAME:-clean-baseline}"
 typeset here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 typeset xml="${here}/bsod-test.domain.xml"
 
+# Die — print a fatal error and exit.
 function Die () { echo "vmctl: $*" >&2; exit 1; }
+# Have — return 0 if the named command is on PATH.
 function Have () { command -v "$1" >/dev/null 2>&1; }
 
 Have virsh || Die "virsh not found; install libvirt-client"
