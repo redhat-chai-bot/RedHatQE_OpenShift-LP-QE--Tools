@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # run.sh - run the bsod-host-tools container with the right podman mounts.
 #
-# Wraps `podman run` so the containerized libguestfs can read the guest qcow2
-# and write recovered dumps into the project's git-ignored output dir.
-# See README.md for podman configuration details.
-#
 # Usage:
 #   host-tools/run.sh --disk <imgFile> [--out <outDir>]
 #
+# Parameters:
+#   --disk <imgFile>   Path to the guest disk image (qcow2) [required]
+#   --out <outDir>     Output directory for recovered dumps
+#                      (default: <project>/output/dumps)
+#
 # Examples:
 #   host-tools/run.sh --disk /var/lib/libvirt/images/bsod-test.qcow2
-#   host-tools/run.sh --disk <img> --out ./output/dumps
+#   host-tools/run.sh --disk /images/guest.qcow2 --out ./output/dumps
 #
 # See README.md for build instructions and BSOD_HOST_IMAGE override.
+####
 set -euxo pipefail; shopt -s inherit_errexit
 
 typeset image="${BSOD_HOST_IMAGE:-bsod-host-tools}"
@@ -26,7 +28,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --disk) disk="$2"; shift 2 ;;
     --out)  out="$2"; shift 2 ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '/^#!/,/^####$/{/^#!/d;/^####$/d;s/^# \{0,1\}//p;}' "$0"; exit 0 ;;
     *) echo "run.sh: unknown arg: $1" >&2; exit 2 ;;
   esac
 done

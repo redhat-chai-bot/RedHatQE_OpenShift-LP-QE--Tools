@@ -13,5 +13,6 @@ one-time configuration only.
 |---|---|
 | `configure-dumps.ps1` | Configure Windows CrashControl registry settings (dump type, `AutoReboot=0`, page file adequacy). One-time guest setup. |
 | `clear-dumps.ps1` | Delete existing crash dumps before a test so evidence contains only the new crash. |
+| `stage-toolkit.ps1` | Stage the crash-injector toolkit (NotMyFault/CrashMe) onto the guest. One-time setup. |
 
 See [`../crash-injector/README.md`](../crash-injector/README.md) for crash injection test scripts.
