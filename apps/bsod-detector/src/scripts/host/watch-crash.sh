@@ -96,7 +96,10 @@ export GA_NS="${ns}" GA_POD="${pod}" GA_DOM="${dom}"
 
 function Log () { echo "[$(date -u +%H:%M:%S)] $*"; true; }
 function Ga () { python3 "${scriptDir}/guest-agent.py" "$@"; }
-function PingOk () { Ga ping >/dev/null 2>&1; }
+# PingOk — check guest-agent reachability with a short timeout.
+# Without the timeout, a crashed guest's orphaned QGA socket can block
+# for up to 300 seconds before the kernel returns ETIMEDOUT.
+function PingOk () { timeout 10 Ga ping >/dev/null 2>&1; }
 function Domstate () { oc exec -n "${ns}" "${pod}" -- virsh domstate "${dom}" 2>/dev/null | tr -d '[:space:]'; }
 
 function CaptureScreens () {  # $1 = destination dir
