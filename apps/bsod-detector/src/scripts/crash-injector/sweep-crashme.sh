@@ -28,7 +28,7 @@ typeset -a codes=(
 )
 
 # Poll SSH until the guest responds or max attempts is exhausted (8s intervals).
-function wait_ssh () {
+function WaitSsh () {
   typeset max="${1:-30}"
   typeset _i=''
   while IFS= read -r _i; do
@@ -39,7 +39,7 @@ function wait_ssh () {
 }
 
 # Collect guest evidence and host signals after a CrashMe-triggered BSOD.
-function collect_result () {
+function CollectResult () {
   typeset codeHex="$1"
   typeset sweepDir="output/sweep-${codeHex}"
   mkdir -p "${sweepDir}"
@@ -69,7 +69,7 @@ for entry in "${codes[@]}"; do
   virsh start bsod-test 2>&1 || true
 
   : "[${codeUpper}] Waiting for SSH..."
-  if ! wait_ssh 30; then
+  if ! WaitSsh 30; then
     : "[${codeUpper}] FAIL: SSH never came up after revert"
     mkdir -p "output/sweep-${codeUpper}"
     echo '{"ok":false,"warnings":["SSH never came up after snapshot revert"]}' > "output/sweep-${codeUpper}/collect-guest.json"
@@ -92,11 +92,11 @@ for entry in "${codes[@]}"; do
   sleep 45
 
   : "[${codeUpper}] Waiting for SSH after crash..."
-  if ! wait_ssh 40; then
+  if ! WaitSsh 40; then
     : "[${codeUpper}] SSH not up after 320s, trying virsh reset..."
     virsh reset bsod-test 2>&1 || true
     sleep 30
-    if ! wait_ssh 20; then
+    if ! WaitSsh 20; then
       : "[${codeUpper}] FAIL: VM unresponsive after reset"
       mkdir -p "output/sweep-${codeUpper}"
       echo '{"ok":false,"warnings":["VM unresponsive after BSOD + reset"]}' > "output/sweep-${codeUpper}/collect-guest.json"
@@ -106,7 +106,7 @@ for entry in "${codes[@]}"; do
 
   : "[${codeUpper}] Collecting evidence..."
   typeset result=''
-  result=$(collect_result "${codeUpper}")
+  result=$(CollectResult "${codeUpper}")
   typeset observed=''
   typeset _bugCheckMatch=''
   _bugCheckMatch=$(grep -oP '"bugCheckCode"\s*:\s*"[^"]*"' <<< "${result}") || true

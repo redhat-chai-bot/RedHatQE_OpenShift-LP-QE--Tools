@@ -10,15 +10,13 @@ export DATA_DIR
 TESTS_DIR="$REPO_ROOT/test"
 export TESTS_DIR
 
-# setup_temp — create a temporary directory for test artifacts.
-function setup_temp () {
+function SetupTemp () {
   BATS_TMPDIR="$(mktemp -d)"
   export BATS_TMPDIR
   true
 }
 
-# teardown_temp — remove the temporary directory created by setup_temp.
-function teardown_temp () {
+function TeardownTemp () {
   [[ -d "${BATS_TMPDIR:-}" ]] && rm -rf "$BATS_TMPDIR"
   true
 }

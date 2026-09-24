@@ -8,8 +8,8 @@
 
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
-# domain_state <vm> — print the VM state as one of the canonical vocabulary.
-function domain_state () {
+# DomainState <vm> — print the VM state as one of the canonical vocabulary.
+function DomainState () {
   typeset vm="$1"
   typeset raw
   raw="$(virsh domstate "${vm}" 2>/dev/null | head -n1 | sed 's/[[:space:]]*$//')" || { echo "unknown"; return; }
@@ -23,50 +23,50 @@ function domain_state () {
   esac
 }
 
-# detect_crash <vm> — exit 0 if the VM appears crashed or hung, 1 otherwise.
-function detect_crash () {
+# DetectCrash <vm> — exit 0 if the VM appears crashed or hung, 1 otherwise.
+function DetectCrash () {
   typeset state
-  state="$(domain_state "$1")"
+  state="$(DomainState "$1")"
   [[ "${state}" == "crashed" || "${state}" == "hung" ]]
 }
 
-# start_vm <vm> — start the VM.
-function start_vm () {
+# StartVM <vm> — start the VM.
+function StartVM () {
   virsh start "$1" >/dev/null 2>&1
 }
 
-# stop_vm <vm> — graceful shutdown via ACPI.
-function stop_vm () {
+# StopVM <vm> — graceful shutdown via ACPI.
+function StopVM () {
   virsh shutdown "$1" >/dev/null 2>&1
 }
 
-# kill_vm <vm> — hard power-off (destroy).
-function kill_vm () {
+# KillVM <vm> — hard power-off (destroy).
+function KillVM () {
   virsh destroy "$1" >/dev/null 2>&1
 }
 
-# screenshot <vm> <outfile> — capture the framebuffer to a PNG file.
-function screenshot () {
+# Screenshot <vm> <outfile> — capture the framebuffer to a PNG file.
+function Screenshot () {
   virsh screenshot "$1" --file "$2" >/dev/null 2>&1
 }
 
-# snapshot_create <vm> <name> — create a named internal snapshot.
-function snapshot_create () {
+# SnapshotCreate <vm> <name> — create a named internal snapshot.
+function SnapshotCreate () {
   virsh snapshot-create-as "$1" "$2" "bsod-detector snapshot" --atomic
 }
 
-# snapshot_revert <vm> <name> — revert to a named snapshot and start.
-function snapshot_revert () {
+# SnapshotRevert <vm> <name> — revert to a named snapshot and start.
+function SnapshotRevert () {
   virsh snapshot-revert "$1" "$2" --running
 }
 
-# memory_dump <vm> <outfile> — capture raw guest memory as an ELF file.
-function memory_dump () {
+# MemoryDump <vm> <outfile> — capture raw guest memory as an ELF file.
+function MemoryDump () {
   virsh dump "$1" "$2" --memory-only --verbose 2>&1
 }
 
-# guest_ip <vm> — print the guest's IP address (best effort).
-function guest_ip () {
+# GuestIP <vm> — print the guest's IP address (best effort).
+function GuestIP () {
   typeset ip
   ip="$(virsh -q domifaddr "$1" 2>/dev/null | awk 'NR==1{print $4}' | cut -d/ -f1)"
   if [[ -z "${ip}" ]]; then
@@ -75,8 +75,8 @@ function guest_ip () {
   echo "${ip}"
 }
 
-# guest_disk <vm> — print the path to the primary disk image.
-function guest_disk () {
+# GuestDisk <vm> — print the path to the primary disk image.
+function GuestDisk () {
   virsh domblklist "$1" --details 2>/dev/null \
     | awk '$2=="disk" && $4 ~ /^\// {print $4; exit}'
 }

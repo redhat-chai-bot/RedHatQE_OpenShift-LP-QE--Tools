@@ -30,8 +30,7 @@ typeset VM_NAME="${VM_NAME:-bsod-test}"
 typeset scriptDir=""; scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 typeset GUEST_KEY="${GUEST_KEY:-${scriptDir}/../../../.ssh/bsod-test}"   # src/scripts/host -> src/scripts -> src -> app root/.ssh
 
-# die — print a fatal error to stderr and exit.
-function die () { echo "guest-ssh: $*" >&2; exit 1; }
+function Die () { echo "guest-ssh: $*" >&2; exit 1; }
 
 typeset GUEST_IP="${GUEST_IP:-}"
 if [[ -z "${GUEST_IP}" ]]; then
@@ -39,7 +38,7 @@ if [[ -z "${GUEST_IP}" ]]; then
   [[ -z "${GUEST_IP}" ]] && GUEST_IP="$(virsh -q net-dhcp-leases default 2>/dev/null \
       | awk -v m="$(virsh -q domiflist "${VM_NAME}" | awk 'NR==1{print $5}')" '$3==m{print $5}' | cut -d/ -f1)"
 fi
-[[ -n "${GUEST_IP}" ]] || die "could not resolve guest IP (set GUEST_IP)"
+[[ -n "${GUEST_IP}" ]] || Die "could not resolve guest IP (set GUEST_IP)"
 
 # ServerAlive* ensures a session that dies mid-command (e.g. the guest
 # bugchecking during a crash trigger) is torn down within ~15s instead of hanging
@@ -56,18 +55,18 @@ elif [[ -n "${GUEST_PASS:-}" ]]; then
   export SSHPASS="${GUEST_PASS}"
   sshCmd=(sshpass -e ssh);  scpCmd=(sshpass -e scp)
 else
-  die "no auth: set GUEST_KEY to an SSH key (${GUEST_KEY}) or GUEST_PASS"
+  Die "no auth: set GUEST_KEY to an SSH key (${GUEST_KEY}) or GUEST_PASS"
 fi
 
 typeset ps="" args="" file=""
 case "${1:-}" in
   -c) ps="$2"; shift 2 ;;
   -f) file="$2"; shift 2
-      [[ -f "${file}" ]] || die "no such file: ${file}"
+      [[ -f "${file}" ]] || Die "no such file: ${file}"
       ps="$(cat "${file}")"
       [[ "${1:-}" == "--" ]] && { shift; args="$*"; } ;;
   "") ps="$(cat)" ;;
-  *)  die "usage: -c <ps> | -f <file> [-- args] | (stdin)" ;;
+  *)  Die "usage: -c <ps> | -f <file> [-- args] | (stdin)" ;;
 esac
 
 typeset payload="${ps}"

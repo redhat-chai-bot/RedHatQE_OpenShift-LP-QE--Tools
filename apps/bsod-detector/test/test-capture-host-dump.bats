@@ -12,7 +12,7 @@ setup() {
 @test "capture-host-dump does NOT require elf2dmp as a prerequisite" {
   # elf2dmp may be mentioned in comments (offline conversion guidance) but
   # must NOT be a prerequisite check or a called command.
-  ! grep -q 'have elf2dmp' "$SCRIPT"
+  ! grep -q 'Have elf2dmp' "$SCRIPT"
 }
 
 @test "capture-host-dump preserves raw ELF (no rm -f elfFile)" {

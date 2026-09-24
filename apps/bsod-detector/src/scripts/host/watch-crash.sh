@@ -29,12 +29,10 @@
 # pass them only to disambiguate. Nothing is tied to a particular VM.
 #
 # Usage:
-#   export KUBECONFIG=<path>
-#   watch-crash.sh [--ns <ns>] [--vm <name>] [--out <dir>]
-#                  [--interval <secs>] [--miss <count>] [--node <worker>]
-#                  [--reboot-wait <secs>]
+#   export KUBECONFIG=<cluster kubeconfig>
+#   ./watch-crash.sh [--ns NS] [--vm NAME] [--out DIR]
+#                    [--interval 5] [--miss 3] [--node <worker>] [--reboot-wait 300]
 #
-####
 set -euxo pipefail
 shopt -s inherit_errexit
 exec {BASH_XTRACEFD}>/dev/null
@@ -63,7 +61,7 @@ while [ $# -gt 0 ]; do
     --node) node="$2"; shift 2;;
     --reboot-wait) rebootWait="$2"; shift 2;;
     --burst) burst="$2"; shift 2;;
-    -h|--help) sed -n '/^#!/,/^####$/{/^#!/d;/^####$/d;s/^# \{0,1\}//p;}' "$0"; exit 0;;
+    -h|--help) sed -n '2,40p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -96,17 +94,12 @@ pod="$(printf '%s\n' "${podRaw}" | sed -n "/virt-launcher-${vm}-/p" | head -n1 |
 typeset dom="${ns}_${vm}"
 export GA_NS="${ns}" GA_POD="${pod}" GA_DOM="${dom}"
 
-# log — print a timestamped diagnostic message to stdout.
-function log () { echo "[$(date -u +%H:%M:%S)] $*"; true; }
-# ga — invoke the guest-agent.py helper with the given arguments.
-function ga () { python3 "${scriptDir}/guest-agent.py" "$@"; }
-# ping_ok — return 0 if the qemu-guest-agent responds to a ping.
-function ping_ok () { ga ping >/dev/null 2>&1; }
-# domstate — query the libvirt domain state inside the virt-launcher pod.
-function domstate () { oc exec -n "${ns}" "${pod}" -- virsh domstate "${dom}" 2>/dev/null | tr -d '[:space:]'; }
+function Log () { echo "[$(date -u +%H:%M:%S)] $*"; true; }
+function Ga () { python3 "${scriptDir}/guest-agent.py" "$@"; }
+function PingOk () { Ga ping >/dev/null 2>&1; }
+function Domstate () { oc exec -n "${ns}" "${pod}" -- virsh domstate "${dom}" 2>/dev/null | tr -d '[:space:]'; }
 
-# capture_screens <dst> — burst-capture VM framebuffer frames and select the BSOD frame.
-function capture_screens () {
+function CaptureScreens () {  # $1 = destination dir
   typeset dst="$1"; mkdir -p "${dst}"
   oc exec -n "${ns}" "${pod}" -- bash -c "
     mkdir -p /tmp/wsnap; rm -f /tmp/wsnap/*
@@ -128,19 +121,18 @@ function capture_screens () {
   done
   if [ -n "${best}" ]; then
     cp "${best}" "${dst}/bsod-screenshot.png"
-    log "likely blue screen: $(basename "${best}") (${bestSz}B) -> bsod-screenshot.png"
+    Log "likely blue screen: $(basename "${best}") (${bestSz}B) -> bsod-screenshot.png"
   else
-    log "no frame in the ${ssMin}-${ssMax}B band; guest display may have been black (DPMS) or no blue screen captured."
+    Log "no frame in the ${ssMin}-${ssMax}B band; guest display may have been black (DPMS) or no blue screen captured."
   fi
   true
 }
 
-# capture_host_signals — collect host kernel log and domain XML for split-lock #AC analysis.
-function capture_host_signals () {
+function CaptureHostSignals () {  # host kernel log (split-lock #AC) + domain XML
   [ -n "${node}" ] || node="$(oc get vmi "${vm}" -n "${ns}" -o jsonpath='{.status.nodeName}' 2>/dev/null || true)"
   oc exec -n "${ns}" "${pod}" -- virsh dumpxml "${dom}" > "${outDir}/dom.xml" 2>/dev/null || true
   if [ -n "${node}" ]; then
-    log "reading kernel log from node ${node} ..."
+    Log "reading kernel log from node ${node} ..."
     timeout 90 oc debug "node/${node}" -- chroot /host dmesg > "${outDir}/kern.log" 2>/dev/null || true
   fi
   if [ -s "${outDir}/kern.log" ] || [ -s "${outDir}/dom.xml" ]; then
@@ -150,9 +142,9 @@ function capture_host_signals () {
     [ -s "${outDir}/dom.xml" ]  && args+=(--domain-xml "${outDir}/dom.xml")
     bash "${scriptDir}/collect-host-signals.sh" "${args[@]}" \
       > "${outDir}/host-signals.json" 2>/dev/null || true
-    log "host-signals.json written (splitLockDetected: $(jq -r .splitLockDetected "${outDir}/host-signals.json" 2>/dev/null))"
+    Log "host-signals.json written (splitLockDetected: $(jq -r .splitLockDetected "${outDir}/host-signals.json" 2>/dev/null))"
   else
-    log "no kernel log or domain XML captured; skipping host-signals (TLB-flush/#AC evidence lives ONLY here)."
+    Log "no kernel log or domain XML captured; skipping host-signals (TLB-flush/#AC evidence lives ONLY here)."
   fi
   true
 }
@@ -160,46 +152,44 @@ function capture_host_signals () {
 typeset rebooted=false
 typeset bugCheck=""
 
-# collect_after_reboot — wait for the guest to reboot, then pull the minidump and cross-check.
-function collect_after_reboot () {
-  log "waiting up to ${rebootWait}s for the guest agent to return ..."
+function CollectAfterReboot () {
+  Log "waiting up to ${rebootWait}s for the guest agent to return ..."
   typeset t=0
   while [ "${t}" -lt "${rebootWait}" ]; do
-    if ping_ok; then log "guest agent back after ~${t}s"; break; fi
+    if PingOk; then Log "guest agent back after ~${t}s"; break; fi
     sleep 5; t=$((t+5))
   done
-  if ! ping_ok; then
-    log "guest did NOT reboot within ${rebootWait}s -- likely HARD FREEZE (typical for HYPERVISOR_ERROR)."
-    log "guest dump is not retrievable from a frozen guest; rely on host-signals.json above."
+  if ! PingOk; then
+    Log "guest did NOT reboot within ${rebootWait}s -- likely HARD FREEZE (typical for HYPERVISOR_ERROR)."
+    Log "guest dump is not retrievable from a frozen guest; rely on host-signals.json above."
     return 0
   fi
   rebooted=true
-  log "running collect-guest.ps1 ..."
-  if ! ga exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\bsod-detector\src\scripts\collect-guest.ps1' \
+  Log "running collect-guest.ps1 ..."
+  if ! Ga exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\bsod-detector\src\scripts\collect-guest.ps1' \
     2>/dev/null | sed -n '/^{/,$p' > "${outDir}/collect-guest.json"; then
     true
   fi
   # pull the newest minidump and cross-check offline
   typeset dmpRaw=''
-  dmpRaw="$(ga exec powershell.exe -NoProfile -Command "(Get-ChildItem C:\\Windows\\Minidump\\*.dmp | Sort-Object LastWriteTime -Desc | Select-Object -First 1).Name" 2>/dev/null)" || true
+  dmpRaw="$(Ga exec powershell.exe -NoProfile -Command "(Get-ChildItem C:\\Windows\\Minidump\\*.dmp | Sort-Object LastWriteTime -Desc | Select-Object -First 1).Name" 2>/dev/null)" || true
   typeset dmp=''
   dmp="$(printf '%s\n' "${dmpRaw}" | tr -d '\r' | sed -n '/\.[dD][mM][pP]/p')"
   if [ -n "${dmp}" ]; then
     mkdir -p "${outDir}/Minidump"
-    ga get "C:\\Windows\\Minidump\\${dmp}" "${outDir}/Minidump/${dmp}" >/dev/null 2>&1 || true
+    Ga get "C:\\Windows\\Minidump\\${dmp}" "${outDir}/Minidump/${dmp}" >/dev/null 2>&1 || true
     if [ -f "${outDir}/Minidump/${dmp}" ]; then
       bash "${scriptDir}/parse-dump-header.sh" "${outDir}/Minidump/${dmp}" > "${outDir}/parse-dump-header.json" 2>/dev/null || true
       bugCheck="$(jq -r '.dumps[0].bugCheckName // empty' "${outDir}/parse-dump-header.json" 2>/dev/null)" || true
     fi
-    log "minidump pulled: ${dmp} ; bugcheck: ${bugCheck:-unknown}"
+    Log "minidump pulled: ${dmp} ; bugcheck: ${bugCheck:-unknown}"
   else
-    log "no minidump found (a HYPERVISOR_ERROR often writes none)."
+    Log "no minidump found (a HYPERVISOR_ERROR often writes none)."
   fi
   true
 }
 
-# write_summary <domstate> — assemble evidence-summary.json from all collected artifacts.
-function write_summary () {
+function WriteSummary () {  # $1 = domstate seen at detection
   typeset splitLock="null"
   [ -s "${outDir}/host-signals.json" ] && splitLock="$(jq -c '.splitLockDetected // null' "${outDir}/host-signals.json" 2>/dev/null || echo null)"
   jq -n \
@@ -216,38 +206,38 @@ function write_summary () {
                  domainXml:"dom.xml", kernelLog:"kern.log",
                  guestCollect:"collect-guest.json", dumpHeader:"parse-dump-header.json"}}' \
     > "${outDir}/evidence-summary.json" 2>/dev/null || true
-  log "evidence-summary.json written."
+  Log "evidence-summary.json written."
   true
 }
 
-log "watching ${vm} (pod=${pod}, dom=${dom}); poll ${interval}s, crash after ${miss} missed pings. Ctrl-C to stop."
+Log "watching ${vm} (pod=${pod}, dom=${dom}); poll ${interval}s, crash after ${miss} missed pings. Ctrl-C to stop."
 typeset misses=0
-until ping_ok; do log "waiting for guest agent to be reachable ..."; sleep "${interval}"; done
-log "guest agent healthy; watching for a natural crash ..."
+until PingOk; do Log "waiting for guest agent to be reachable ..."; sleep "${interval}"; done
+Log "guest agent healthy; watching for a natural crash ..."
 
 # Keep the display awake so pre-crash/repaint frames aren't all-black (DPMS). Best-effort.
-ga exec powercfg /change monitor-timeout-ac 0 >/dev/null 2>&1 || true
+Ga exec powercfg /change monitor-timeout-ac 0 >/dev/null 2>&1 || true
 
 # A natural bugcheck may leave the domain 'running' (pure hang) OR, if the VM has a
 # pvpanic device, transition it to paused/crashed/pmsuspended. All of those, with a
 # dead agent, mean "crashed" -- only a clean 'shutoff' does not.
-function is_crash_state () { case "$1" in running|paused|crashed|pmsuspended) return 0;; *) return 1;; esac; }
+function IsCrashState () { case "$1" in running|paused|crashed|pmsuspended) return 0;; *) return 1;; esac; }
 
 typeset st=''
 while true; do
-  if ping_ok; then
+  if PingOk; then
     misses=0
   else
     misses=$((misses+1))
-    st="$(domstate || echo unknown)"
-    log "missed ping ${misses}/${miss} (domstate=${st})"
-    if [ "${misses}" -ge "${miss}" ] && is_crash_state "${st}"; then
-      log "*** CRASH/FREEZE DETECTED (agent dead, domstate=${st}) ***"
-      capture_screens "${outDir}"
-      capture_host_signals
-      collect_after_reboot
-      write_summary "${st}"
-      log "evidence package: ${outDir}"
+    st="$(Domstate || echo unknown)"
+    Log "missed ping ${misses}/${miss} (domstate=${st})"
+    if [ "${misses}" -ge "${miss}" ] && IsCrashState "${st}"; then
+      Log "*** CRASH/FREEZE DETECTED (agent dead, domstate=${st}) ***"
+      CaptureScreens "${outDir}"
+      CaptureHostSignals
+      CollectAfterReboot
+      WriteSummary "${st}"
+      Log "evidence package: ${outDir}"
       exit 0
     fi
   fi

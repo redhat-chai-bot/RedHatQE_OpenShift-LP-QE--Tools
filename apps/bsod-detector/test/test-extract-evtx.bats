@@ -3,12 +3,12 @@
 load test-helper
 
 setup() {
-  setup_temp
+  SetupTemp
   EXTRACT_EVTX="$REPO_ROOT/src/scripts/host/extract-evtx.py"
 }
 
 teardown() {
-  teardown_temp
+  TeardownTemp
 }
 
 @test "extract-evtx.py shows help with --help" {

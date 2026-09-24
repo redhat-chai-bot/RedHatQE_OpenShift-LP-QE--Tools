@@ -10,8 +10,8 @@
 # test run that may have triggered a BSOD.
 #
 # Usage:
-#   collect-all.sh --vm <name> --out <dir> --ssh <guest-ssh-path>
-#                  [--guest-scripts <path>] [--timeout <secs>]
+#   collect-all.sh --vm <name> --out <dir> --ssh <guest-ssh-path> \
+#     [--guest-scripts <path>] [--timeout 300]
 #
 # Outputs: <out>/ containing:
 #   bsod-screenshot.png    - framebuffer capture (best frame from rapid burst)
@@ -20,7 +20,6 @@
 #   host-signals.json      - host-side kernel log + hyperv evidence
 #   Minidump/*.dmp         - crash dump files copied from guest
 #   evidence-summary.json  - manifest of all collected artifacts
-####
 exec {BASH_XTRACEFD}>/dev/null
 set -euxo pipefail; shopt -s inherit_errexit
 
@@ -42,7 +41,7 @@ while [[ $# -gt 0 ]]; do
     --ssh)            [[ $# -ge 2 ]] || { echo "collect-all: --ssh requires a value" >&2; exit 2; }; sshCmd="$2"; shift 2 ;;
     --guest-scripts)  [[ $# -ge 2 ]] || { echo "collect-all: --guest-scripts requires a value" >&2; exit 2; }; guestScripts="$2"; shift 2 ;;
     --timeout)        [[ $# -ge 2 ]] || { echo "collect-all: --timeout requires a value" >&2; exit 2; }; timeout="$2"; shift 2 ;;
-    -h|--help)        sed -n '/^#!/,/^####$/{/^#!/d;/^####$/d;s/^# \{0,1\}//p;}' "$0"; exit 0 ;;
+    -h|--help)        sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "collect-all: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -53,40 +52,39 @@ done
 
 mkdir -p "${outDir}"
 
-# log — print a prefixed diagnostic message to stderr.
-function log () { echo "[collect-all] $*" >&2; true; }
+function Log () { echo "[collect-all] $*" >&2; true; }
 
 # --- Phase 1: Capture BSOD screenshot (background) ---
-log "starting framebuffer capture"
+Log "starting framebuffer capture"
 "${scriptDir}/capture-vm-screen.sh" --vm "${vm}" --out "${outDir}" --frames 30 --interval 0.3 &
 typeset capturePid=$!
 
 # --- Phase 2: Host-side crash dump (if domain is preserved after crash) ---
 typeset domState=''
 domState="$(virsh domstate "${vm}" 2>/dev/null)" || domState="unknown"
-log "domain state: ${domState}"
+Log "domain state: ${domState}"
 
 if [[ "${domState}" == "crashed" || "${domState}" == "paused" ]]; then
   kill "${capturePid}" 2>/dev/null || true
   wait "${capturePid}" 2>/dev/null || true
 
-  log "domain is preserved; capturing raw memory via virsh dump"
+  Log "domain is preserved; capturing raw memory via virsh dump"
   if "${scriptDir}/capture-host-dump.sh" --vm "${vm}" --out "${outDir}" > "${outDir}/capture-host-dump.json"; then
     if [[ -f "${outDir}/guest-memory.elf" ]]; then
-      log "host-side raw memory captured: guest-memory.elf"
+      Log "host-side raw memory captured: guest-memory.elf"
     fi
   else
-    log "WARNING: host-side dump failed (see capture-host-dump.json for details)"
+    Log "WARNING: host-side dump failed (see capture-host-dump.json for details)"
   fi
 
-  log "destroying and restarting domain to trigger guest reboot"
+  Log "destroying and restarting domain to trigger guest reboot"
   virsh destroy "${vm}" 2>/dev/null || true
   sleep 2
-  virsh start "${vm}" 2>/dev/null || log "WARNING: could not restart domain '${vm}'"
+  virsh start "${vm}" 2>/dev/null || Log "WARNING: could not restart domain '${vm}'"
 fi
 
 # --- Phase 3: Wait for VM reboot (SSH becomes reachable again) ---
-log "waiting for guest reboot (timeout=${timeout}s)"
+Log "waiting for guest reboot (timeout=${timeout}s)"
 typeset rebooted=0
 typeset elapsed=0
 typeset pollInterval=8
@@ -111,23 +109,23 @@ if compgen -G "${outDir}/bsod-frame-*.png" &>/dev/null; then
 fi
 if [[ -n "${bestFrame}" ]]; then
   mv "${bestFrame}" "${outDir}/bsod-screenshot.png"
-  log "screenshot captured: bsod-screenshot.png"
+  Log "screenshot captured: bsod-screenshot.png"
 else
-  log "WARNING: no screenshot frames captured"
+  Log "WARNING: no screenshot frames captured"
 fi
 rm -f "${outDir}"/bsod-frame-*.png
 
 # --- Phase 5: Collect guest-side evidence (if VM rebooted) ---
 typeset guestCollected=false
 if [[ "${rebooted}" == 1 ]]; then
-  log "guest is up; collecting guest-side evidence"
+  Log "guest is up; collecting guest-side evidence"
   typeset guestOut='C:/bsod-detector/output/collect-current'
   typeset guestCommandOk=false
   if "${sshCmd}" -c "Remove-Item -Recurse -Force ${guestOut} -EA SilentlyContinue; & ${guestScripts}/collect-guest.ps1 -OutputDir ${guestOut//\//\\}" \
     2>/dev/null | sed -E '/^#< CLIXML|<Objs /d' > "${outDir}/collect-guest.json"; then
     guestCommandOk=true
   else
-    log "WARNING: guest collection pipeline returned non-zero"
+    Log "WARNING: guest collection pipeline returned non-zero"
   fi
 
   if [[ "${guestCommandOk}" == true && -s "${outDir}/collect-guest.json" ]] && python3 -c "import json,sys;json.load(open(sys.argv[1]))" "${outDir}/collect-guest.json" 2>/dev/null; then
@@ -142,20 +140,20 @@ if [[ "${rebooted}" == 1 ]]; then
       [[ -f "${keyFile}" ]] && scpOpts+=(-i "${keyFile}" -o IdentitiesOnly=yes)
       scp -r "${scpOpts[@]}" "Administrator@${ip}:${guestOut}/*" "${outDir}/" 2>/dev/null || true
     fi
-    log "guest evidence collected"
+    Log "guest evidence collected"
   else
-    log "WARNING: collect-guest.ps1 produced no output"
+    Log "WARNING: collect-guest.ps1 produced no output"
   fi
 else
-  log "WARNING: guest did not reboot within ${timeout}s; guest-side collection skipped"
+  Log "WARNING: guest did not reboot within ${timeout}s; guest-side collection skipped"
 fi
 
 # --- Phase 6: Collect host-side signals ---
-log "collecting host-side signals"
+Log "collecting host-side signals"
 "${scriptDir}/collect-host-signals.sh" --vm "${vm}" > "${outDir}/host-signals.json" 2>/dev/null || true
 
 # --- Phase 7: Assemble evidence summary manifest ---
-log "writing evidence summary"
+Log "writing evidence summary"
 typeset hasScreenshot=false; [[ -f "${outDir}/bsod-screenshot.png" ]] && hasScreenshot=true
 typeset hasHostSignals=false; [[ -s "${outDir}/host-signals.json" ]] && hasHostSignals=true
 typeset -a dumpFiles=()
@@ -215,5 +213,5 @@ with open(os.path.join(out_dir, "evidence-summary.json"), "w") as f:
 print(json.dumps(summary, indent=2))
 PY
 
-log "done. Evidence package: ${outDir}"
+Log "done. Evidence package: ${outDir}"
 true

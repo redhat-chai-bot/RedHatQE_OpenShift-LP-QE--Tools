@@ -2,7 +2,7 @@
 # dispatch.sh — source the correct hypervisor backend based on BSOD_DET__HYP_PROV.
 #
 # Source this file from any host-side script that needs VM operations. It
-# exports common function signatures (detect_crash, start_vm, stop_vm, etc.)
+# exports common function signatures (DetectCrash, StartVM, StopVM, etc.)
 # implemented by the selected backend.
 #
 # Supported backends:
@@ -12,20 +12,20 @@
 # Usage:
 #   export BSOD_DET__HYP_PROV=kvm   # or kubevirt
 #   source "$(dirname "${BASH_SOURCE[0]}")/backends/dispatch.sh"
-#   detect_crash "$vm"
+#   DetectCrash "$vm"
 #
 # Each backend must define these functions:
-#   domain_state <vm>            — print one of: running|off|hung|crashed|rebooting|unknown
-#   detect_crash <vm>            — exit 0 if crashed/hung, 1 otherwise
-#   start_vm <vm>                — start the VM
-#   stop_vm <vm>                 — graceful shutdown (ACPI)
-#   kill_vm <vm>                 — hard power-off
-#   screenshot <vm> <outfile>    — capture framebuffer to a file
-#   snapshot_create <vm> <name>  — create a named snapshot
-#   snapshot_revert <vm> <name>  — revert to a named snapshot
-#   memory_dump <vm> <outfile>   — capture raw memory (ELF format)
-#   guest_ip <vm>                — print the guest IP address
-#   guest_disk <vm>              — print the path to the primary guest disk image
+#   DomainState <vm>            — print one of: running|off|hung|crashed|rebooting|unknown
+#   DetectCrash <vm>            — exit 0 if crashed/hung, 1 otherwise
+#   StartVM <vm>                — start the VM
+#   StopVM <vm>                 — graceful shutdown (ACPI)
+#   KillVM <vm>                 — hard power-off
+#   Screenshot <vm> <outfile>   — capture framebuffer to a file
+#   SnapshotCreate <vm> <name>  — create a named snapshot
+#   SnapshotRevert <vm> <name>  — revert to a named snapshot
+#   MemoryDump <vm> <outfile>   — capture raw memory (ELF format)
+#   GuestIP <vm>                — print the guest IP address
+#   GuestDisk <vm>              — print the path to the primary guest disk image
 
 typeset _dispatchDir
 _dispatchDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

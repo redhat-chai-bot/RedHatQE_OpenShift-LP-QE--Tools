@@ -12,11 +12,10 @@
 # point this at anything but a disposable/snapshotted test VM.
 #
 # Usage:
-#   run-dry-run.sh [--code <hex>] [--no-revert] [--out <dir>]
+#   src/scripts/crash-injector/run-dry-run.sh [--code <hex>] [--no-revert] [--out <dir>]
 #
 # Defaults: code=0x19 (BAD_POOL_HEADER), revert=yes,
 #           out=<repo>/output/dryrun-<timestamp>
-####
 set -euxo pipefail; shopt -s inherit_errexit
 
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
@@ -36,16 +35,15 @@ while [[ $# -gt 0 ]]; do
     --no-revert)  revert=0; shift ;;
     --out)        out="$2"; shift 2 ;;
     --snapshot)   snapshot="$2"; shift 2 ;;
-    -h|--help)    sed -n '/^#!/,/^####$/{/^#!/d;/^####$/d;s/^# \{0,1\}//p;}' "$0"; exit 0 ;;
+    -h|--help)    sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "run-dry-run: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
-# log — print a prefixed diagnostic message to stderr.
-function log () { echo "[dry-run] $*" >&2; true; }
+function Log () { echo "[dry-run] $*" >&2; true; }
 
 # Resolve a bug check code to its KeBugCheckEx parameters from trigger-methods.json.
-function lookup_params () {
+function LookupParams () {
   python3 -c "
 import json, sys
 tm = json.load(open('${repo}/src/data/trigger-methods.json'))['codes']
@@ -62,7 +60,7 @@ print(' '.join(tm[code]['parameters']))
 }
 
 # Poll SSH until the guest responds (8s intervals, 25 attempts).
-function wait_for_ssh () {
+function WaitForSsh () {
   typeset attempt=0
   for (( attempt=1; attempt<=25; ++attempt )); do
     "${gssh}" -c '"up"' 2>/dev/null | grep -q up && return 0
@@ -71,29 +69,29 @@ function wait_for_ssh () {
   return 1
 }
 
-typeset params; params="$(lookup_params "${code}")"
+typeset params; params="$(LookupParams "${code}")"
 typeset codeNorm; codeNorm="$(python3 -c "c='${code}'.upper(); print('0x'+c[2:].zfill(8) if c.startswith('0x') or c.startswith('0X') else '0x'+c.zfill(8))")"
-log "code=${codeNorm} params=${params}"
+Log "code=${codeNorm} params=${params}"
 
 if [[ "${revert}" == 1 ]]; then
-  log "reverting ${vmName} to ${snapshot}"
+  Log "reverting ${vmName} to ${snapshot}"
   virsh snapshot-revert "${vmName}" "${snapshot}"
 fi
 
 if [[ "$(virsh -q domstate "${vmName}")" != "running" ]]; then
-  log "starting ${vmName}"
+  Log "starting ${vmName}"
   virsh start "${vmName}" >/dev/null
 fi
 
-log "waiting for guest SSH"
-wait_for_ssh || { echo "guest never came up" >&2; exit 1; }
+Log "waiting for guest SSH"
+WaitForSsh || { echo "guest never came up" >&2; exit 1; }
 
 # --- Trigger the crash ---
-log "triggering BSOD: ${codeNorm} ${params}"
+Log "triggering BSOD: ${codeNorm} ${params}"
 "${gssh}" -c "C:\\Tools\\crashme-ctl.exe ${code} ${params}" 2>&1 || true
 
 # --- Delegate all evidence collection to the detector ---
-log "collecting evidence via collect-all.sh"
+Log "collecting evidence via collect-all.sh"
 "${repo}/src/scripts/host/collect-all.sh" \
   --vm "${vmName}" \
   --out "${out}" \

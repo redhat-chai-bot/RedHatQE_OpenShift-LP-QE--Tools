@@ -13,10 +13,9 @@
 # equivalent `virtctl` or API call against the VNC/SPICE endpoint.
 #
 # Usage:
-#   capture-vm-screen.sh --vm <name> --out <dir> [--frames <n>] [--interval <secs>]
+#   capture-vm-screen.sh --vm <name> --out <dir> [--frames 30] [--interval 0.3]
 #
 # Outputs: <dir>/bsod-frame-{1..N}.png (one PNG per captured frame)
-####
 set -euxo pipefail; shopt -s inherit_errexit
 
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
@@ -32,7 +31,7 @@ while [[ $# -gt 0 ]]; do
     --out)      [[ $# -ge 2 ]] || { echo "capture-vm-screen: --out requires a value" >&2; exit 2; }; outDir="$2"; shift 2 ;;
     --frames)   [[ $# -ge 2 ]] || { echo "capture-vm-screen: --frames requires a value" >&2; exit 2; }; frames="$2"; shift 2 ;;
     --interval) [[ $# -ge 2 ]] || { echo "capture-vm-screen: --interval requires a value" >&2; exit 2; }; interval="$2"; shift 2 ;;
-    -h|--help)  sed -n '/^#!/,/^####$/{/^#!/d;/^####$/d;s/^# \{0,1\}//p;}' "$0"; exit 0 ;;
+    -h|--help)  sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "capture-vm-screen: unknown arg: $1" >&2; exit 2 ;;
   esac
 done

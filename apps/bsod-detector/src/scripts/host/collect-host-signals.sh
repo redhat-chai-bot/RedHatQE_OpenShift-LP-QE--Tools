@@ -11,7 +11,7 @@
 # contract; diagnostics go to stderr).
 #
 # Usage:
-#   collect-host-signals.sh --vm <name> [--since <timespec>] [--dmesg]
+#   collect-host-signals.sh --vm <name> [--since "1 hour ago"] [--dmesg]
 #
 #   --vm     libvirt domain name (default: $VM_NAME or bsod-test)
 #   --since  journalctl --since window for kernel logs (default: "2 hours ago")
@@ -39,7 +39,6 @@
 #     "hyperv": { "features": [ {"name","state","risk","present"} ],
 #                 "mitigationApplied": true|false },
 #     "assessment": [ "..." ], "warnings": [ ... ] }
-####
 exec {BASH_XTRACEFD}>/dev/null
 set -euxo pipefail; shopt -s inherit_errexit
 
@@ -54,25 +53,22 @@ typeset useDmesg=0
 typeset logFile=""
 typeset domainXmlFile=""
 
-# warn — print a diagnostic message to stderr.
-function warn () { echo "collect-host-signals: $*" >&2; true; }
-# die — print a fatal error to stderr and exit.
-function die ()  { warn "$*"; exit 2; }
-# have — return 0 if the named command is available on PATH.
-function have () { command -v "$1" >/dev/null 2>&1; }
+function Warn () { echo "collect-host-signals: $*" >&2; true; }
+function Die ()  { Warn "$*"; exit 2; }
+function Have () { command -v "$1" >/dev/null 2>&1; }
 
-have jq || die "jq not found"
-[[ -f "${signalsFile}" ]] || die "host-signals.json not found at ${signalsFile}"
+Have jq || Die "jq not found"
+[[ -f "${signalsFile}" ]] || Die "host-signals.json not found at ${signalsFile}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --vm) [[ $# -ge 2 ]] || die "--vm requires a value"; vmName="$2"; shift 2 ;;
-    --since) [[ $# -ge 2 ]] || die "--since requires a value"; since="$2"; shift 2 ;;
+    --vm) [[ $# -ge 2 ]] || Die "--vm requires a value"; vmName="$2"; shift 2 ;;
+    --since) [[ $# -ge 2 ]] || Die "--since requires a value"; since="$2"; shift 2 ;;
     --dmesg) useDmesg=1; shift ;;
-    --log-file) [[ $# -ge 2 ]] || die "--log-file requires a value"; logFile="$2"; shift 2 ;;
-    --domain-xml) [[ $# -ge 2 ]] || die "--domain-xml requires a value"; domainXmlFile="$2"; shift 2 ;;
-    -h|--help) sed -n '/^#!/,/^####$/{/^#!/d;/^####$/d;s/^# \{0,1\}//p;}' "$0"; exit 0 ;;
-    *) die "unknown arg: $1" ;;
+    --log-file) [[ $# -ge 2 ]] || Die "--log-file requires a value"; logFile="$2"; shift 2 ;;
+    --domain-xml) [[ $# -ge 2 ]] || Die "--domain-xml requires a value"; domainXmlFile="$2"; shift 2 ;;
+    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
+    *) Die "unknown arg: $1" ;;
   esac
 done
 
@@ -80,17 +76,17 @@ typeset -a warnings=()
 
 typeset kernelLog=""
 if [[ -n "${logFile}" ]]; then
-  [[ -f "${logFile}" ]] || die "log file not found: ${logFile}"
+  [[ -f "${logFile}" ]] || Die "log file not found: ${logFile}"
   kernelLog="$(cat "${logFile}")"
 elif [[ "${useDmesg}" -eq 1 ]]; then
-  if have dmesg; then
+  if Have dmesg; then
     kernelLog="$(dmesg 2>/dev/null || true)"
     [[ -n "${kernelLog}" ]] || warnings+=("dmesg returned no output (may need root)")
   else
     warnings+=("dmesg not available")
   fi
 else
-  if have journalctl; then
+  if Have journalctl; then
     kernelLog="$(journalctl -k --since "${since}" --no-pager 2>/dev/null || true)"
     [[ -n "${kernelLog}" ]] || warnings+=("journalctl -k returned no output for window '${since}' (may need root or --dmesg)")
   else
@@ -137,10 +133,10 @@ typeset mitigationApplied=false
 typeset hypervInspected=false
 typeset domainXml=""
 if [[ -n "${domainXmlFile}" ]]; then
-  [[ -f "${domainXmlFile}" ]] || die "domain XML file not found: ${domainXmlFile}"
+  [[ -f "${domainXmlFile}" ]] || Die "domain XML file not found: ${domainXmlFile}"
   domainXml="$(cat "${domainXmlFile}")"
   [[ -n "${domainXml}" ]] || warnings+=("domain XML file '${domainXmlFile}' is empty")
-elif have virsh; then
+elif Have virsh; then
   domainXml="$(virsh dumpxml "${vmName}" 2>/dev/null || true)"
   [[ -n "${domainXml}" ]] || warnings+=("could not read domain XML for '${vmName}' (is it defined? on OpenShift/KubeVirt use --domain-xml with 'oc exec <virt-launcher> -- virsh dumpxml <ns>_<vm>')")
 else

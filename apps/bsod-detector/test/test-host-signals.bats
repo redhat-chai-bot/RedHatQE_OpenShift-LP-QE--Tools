@@ -3,7 +3,7 @@
 load test-helper
 
 setup() {
-  setup_temp
+  SetupTemp
   SCRIPT="$REPO_ROOT/src/scripts/host/collect-host-signals.sh"
   SPLIT_LOCK_LOG="$BATS_TMPDIR/dmesg-splitlock.txt"
   cat > "$SPLIT_LOCK_LOG" <<'EOF'
@@ -17,7 +17,7 @@ EOF
 }
 
 teardown() {
-  teardown_temp
+  TeardownTemp
 }
 
 @test "host-signals detects split-lock traps" {

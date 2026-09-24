@@ -14,21 +14,21 @@ setup() {
 }
 
 @test "kvm.sh defines all required function signatures" {
-  required=(domain_state detect_crash start_vm stop_vm kill_vm screenshot snapshot_create snapshot_revert memory_dump guest_ip guest_disk)
+  required=(DomainState DetectCrash StartVM StopVM KillVM Screenshot SnapshotCreate SnapshotRevert MemoryDump GuestIP GuestDisk)
   for fn in "${required[@]}"; do
     grep -qE "^function ${fn} " "$KVM_BACKEND" || { echo "MISSING: $fn"; false; }
   done
 }
 
 @test "kubevirt.sh defines all required function signatures" {
-  required=(domain_state detect_crash start_vm stop_vm kill_vm screenshot snapshot_create snapshot_revert memory_dump guest_ip guest_disk)
+  required=(DomainState DetectCrash StartVM StopVM KillVM Screenshot SnapshotCreate SnapshotRevert MemoryDump GuestIP GuestDisk)
   for fn in "${required[@]}"; do
     grep -qE "^function ${fn} " "$KUBEVIRT_BACKEND" || { echo "MISSING: $fn"; false; }
   done
 }
 
 @test "dispatch sources kvm backend by default" {
-  BSOD_DET__HYP_PROV=kvm run bash -c "source '$DISPATCH' && type domain_state"
+  BSOD_DET__HYP_PROV=kvm run bash -c "source '$DISPATCH' && type DomainState"
   [ "$status" -eq 0 ]
   [[ "$output" == *"function"* ]]
 }
@@ -39,7 +39,7 @@ setup() {
   [[ "$output" == *"unknown BSOD_DET__HYP_PROV"* ]]
 }
 
-@test "kvm backend uses virsh in domain_state" {
+@test "kvm backend uses virsh in DomainState" {
   grep -q 'virsh domstate' "$KVM_BACKEND"
 }
 
@@ -47,6 +47,6 @@ setup() {
   grep -q 'oc get vmi\|virtctl' "$KUBEVIRT_BACKEND"
 }
 
-@test "kubevirt snapshot_create returns error (not supported)" {
+@test "kubevirt SnapshotCreate returns error (not supported)" {
   grep -q 'not supported' "$KUBEVIRT_BACKEND"
 }
