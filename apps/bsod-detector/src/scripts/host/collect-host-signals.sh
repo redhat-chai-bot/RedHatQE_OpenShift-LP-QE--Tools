@@ -41,11 +41,14 @@
 #     "assessment": [ "..." ], "warnings": [ ... ] }
 ####
 exec {BASH_XTRACEFD}>/dev/null
-set -euxo pipefail; shopt -s inherit_errexit
+set -euxo pipefail
+shopt -s inherit_errexit
 
-typeset here=''; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-typeset repoRoot=''; repoRoot="$(cd "${here}/../../.." && pwd)"
-typeset signalsFile="${repoRoot}/src/data/host-signals.json"
+typeset here=''
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+typeset repoRoot=''
+repoRoot="$(cd "${here}/../../.." && pwd)"
+typeset signalsFile="${BSOD_HOST_SIGNALS_FILE:-${repoRoot}/src/data/host-signals.json}"
 
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 typeset vmName="${VM_NAME:-bsod-test}"
@@ -55,23 +58,51 @@ typeset logFile=""
 typeset domainXmlFile=""
 
 # warn — print a diagnostic message to stderr.
-function warn () { echo "collect-host-signals: $*" >&2; true; }
+function warn() {
+  echo "collect-host-signals: $*" >&2
+  true
+}
 # die — print a fatal error to stderr and exit.
-function die ()  { warn "$*"; exit 2; }
+function die() {
+  warn "$*"
+  exit 2
+}
 # have — return 0 if the named command is available on PATH.
-function have () { command -v "$1" >/dev/null 2>&1; }
+function have() { command -v "$1" >/dev/null 2>&1; }
 
 have jq || die "jq not found"
 [[ -f "${signalsFile}" ]] || die "host-signals.json not found at ${signalsFile}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --vm) [[ $# -ge 2 ]] || die "--vm requires a value"; vmName="$2"; shift 2 ;;
-    --since) [[ $# -ge 2 ]] || die "--since requires a value"; since="$2"; shift 2 ;;
-    --dmesg) useDmesg=1; shift ;;
-    --log-file) [[ $# -ge 2 ]] || die "--log-file requires a value"; logFile="$2"; shift 2 ;;
-    --domain-xml) [[ $# -ge 2 ]] || die "--domain-xml requires a value"; domainXmlFile="$2"; shift 2 ;;
-    -h|--help) sed -n '/^#!/,/^####$/{/^#!/d;/^####$/d;s/^# \{0,1\}//p;}' "$0"; exit 0 ;;
+    --vm)
+      [[ $# -ge 2 ]] || die "--vm requires a value"
+      vmName="$2"
+      shift 2
+      ;;
+    --since)
+      [[ $# -ge 2 ]] || die "--since requires a value"
+      since="$2"
+      shift 2
+      ;;
+    --dmesg)
+      useDmesg=1
+      shift
+      ;;
+    --log-file)
+      [[ $# -ge 2 ]] || die "--log-file requires a value"
+      logFile="$2"
+      shift 2
+      ;;
+    --domain-xml)
+      [[ $# -ge 2 ]] || die "--domain-xml requires a value"
+      domainXmlFile="$2"
+      shift 2
+      ;;
+    -h | --help)
+      sed -n '/^#!/,/^####$/{/^#!/d;/^####$/d;s/^# \{0,1\}//p;}' "$0"
+      exit 0
+      ;;
     *) die "unknown arg: $1" ;;
   esac
 done
@@ -101,17 +132,22 @@ fi
 typeset signalResults="[]"
 typeset splitLock=false
 while IFS= read -r sig; do
-  typeset id=''; id="$(echo "${sig}" | jq -r '.id')"
-  typeset pattern=''; pattern="$(echo "${sig}" | jq -r '.pattern')"
-  typeset related=''; related="$(echo "${sig}" | jq -r '.relatedBugCheck // empty')"
+  typeset id=''
+  id="$(echo "${sig}" | jq -r '.id')"
+  typeset pattern=''
+  pattern="$(echo "${sig}" | jq -r '.pattern')"
+  typeset related=''
+  related="$(echo "${sig}" | jq -r '.relatedBugCheck // empty')"
 
   typeset matches="[]"
   typeset count=0
   if [[ -n "${kernelLog}" ]]; then
     while IFS= read -r line; do
       [[ -n "${line}" ]] || continue
-      typeset kvmThread=''; kvmThread="$(echo "${line}" | { grep -oP 'CPU\s+\d+/KVM/\d+' || true; } | head -n1)"
-      typeset trapAddr=''; trapAddr="$(echo "${line}" | { grep -oP 'address:\s*\K0x[0-9a-fA-F]+' || true; } | head -n1)"
+      typeset kvmThread=''
+      kvmThread="$(echo "${line}" | { grep -oP 'CPU\s+\d+/KVM/\d+' || true; } | head -n1)"
+      typeset trapAddr=''
+      trapAddr="$(echo "${line}" | { grep -oP 'address:\s*\K0x[0-9a-fA-F]+' || true; } | head -n1)"
       typeset addrSpace="unknown"
       if [[ -n "${trapAddr}" ]]; then
         # Windows kernel space = 0xfffff8xx...; anything else treated as user/other.
@@ -120,7 +156,7 @@ while IFS= read -r sig; do
       matches="$(echo "${matches}" | jq \
         --arg raw "${line}" --arg t "${kvmThread}" --arg a "${trapAddr}" --arg s "${addrSpace}" \
         '. + [{raw:$raw, kvmThread:(if $t=="" then null else $t end), trapAddress:(if $a=="" then null else $a end), addressSpace:$s}]')"
-      count=$((count+1))
+      count=$((count + 1))
     done < <(grep -P "${pattern}" <<<"${kernelLog}" 2>/dev/null || true)
   fi
 
@@ -150,29 +186,38 @@ fi
 if [[ -n "${domainXml}" ]]; then
   hypervInspected=true
   while IFS= read -r feat; do
-    typeset name=''; name="$(echo "${feat}" | jq -r '.name')"
-    typeset risk=''; risk="$(echo "${feat}" | jq -r '.risk')"
+    typeset name=''
+    name="$(echo "${feat}" | jq -r '.name')"
+    typeset risk=''
+    risk="$(echo "${feat}" | jq -r '.risk')"
     # (e.g. synictimer -> <stimer>); fall back to name when .element absent.
-    typeset elem=''; elem="$(echo "${feat}" | jq -r '.element // .name')"
-    typeset state="absent"; typeset present=false
+    typeset elem=''
+    elem="$(echo "${feat}" | jq -r '.element // .name')"
+    typeset state="absent"
+    typeset present=false
     if grep -qP "<${elem}\b[^>]*state=['\"]on['\"]" <<<"${domainXml}"; then
-      state="on"; present=true
+      state="on"
+      present=true
     elif grep -qP "<${elem}\b[^>]*state=['\"]off['\"]" <<<"${domainXml}"; then
-      state="off"; present=true
+      state="off"
+      present=true
     fi
     hypervFeatures="$(echo "${hypervFeatures}" | jq \
       --arg n "${name}" --arg s "${state}" --arg r "${risk}" --argjson p "${present}" \
       '. + [{name:$n, state:$s, risk:$r, present:$p}]')"
   done < <(jq -c '.hypervEnlightenments[]' "${signalsFile}")
 
-  typeset tlbState=''; tlbState="$(echo "${hypervFeatures}" | jq -r '.[] | select(.name=="tlbflush") | .state')"
-  typeset ipiState=''; ipiState="$(echo "${hypervFeatures}"  | jq -r '.[] | select(.name=="ipi") | .state')"
+  typeset tlbState=''
+  tlbState="$(echo "${hypervFeatures}" | jq -r '.[] | select(.name=="tlbflush") | .state')"
+  typeset ipiState=''
+  ipiState="$(echo "${hypervFeatures}" | jq -r '.[] | select(.name=="ipi") | .state')"
   if [[ "${tlbState}" != "on" && "${ipiState}" != "on" ]]; then mitigationApplied=true; fi
 fi
 
 typeset -a assessment=()
 if [[ "${splitLock}" == true ]]; then
-  typeset kernelHits=''; kernelHits="$(echo "${signalResults}" | jq '[.[] | select(.id=="split-lock-trap") | .matches[] | select(.addressSpace=="kernel")] | length')"
+  typeset kernelHits=''
+  kernelHits="$(echo "${signalResults}" | jq '[.[] | select(.id=="split-lock-trap") | .matches[] | select(.addressSpace=="kernel")] | length')"
   assessment+=("Split-lock #AC traps present in host kernel log (${kernelHits} kernel-space). Consistent with HYPERVISOR_ERROR (0x20001) mechanism.")
   if [[ "${hypervInspected}" == false ]]; then
     assessment+=("Could not read the guest Hyper-V config; unable to correlate the traps with tlbflush/ipi enlightenments.")
@@ -188,8 +233,10 @@ if [[ "${hypervInspected}" == true && "${mitigationApplied}" == true ]]; then
   assessment+=("Mitigation appears applied: Hyper-V tlbflush and ipi are not enabled.")
 fi
 
-typeset assessJson=''; assessJson="$(printf '%s\n' "${assessment[@]:-}" | jq -R . | jq -s 'map(select(length>0))')"
-typeset warnsJson=''; warnsJson="$(printf '%s\n' "${warnings[@]:-}"   | jq -R . | jq -s 'map(select(length>0))')"
+typeset assessJson=''
+assessJson="$(printf '%s\n' "${assessment[@]:-}" | jq -R . | jq -s 'map(select(length>0))')"
+typeset warnsJson=''
+warnsJson="$(printf '%s\n' "${warnings[@]:-}" | jq -R . | jq -s 'map(select(length>0))')"
 
 jq -n \
   --arg vm "${vmName}" \

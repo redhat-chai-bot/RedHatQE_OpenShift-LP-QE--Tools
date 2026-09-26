@@ -37,6 +37,16 @@ teardown() {
   echo "$output" | jq -e '.warnings[] | select(contains("not found"))'
 }
 
+@test "extract-evtx.py fails closed on a corrupt EVTX file when parser is available" {
+  python3 -c 'import Evtx.Evtx' 2>/dev/null || skip "python-evtx not installed"
+  local corrupt="$BATS_TMPDIR/corrupt.evtx"
+  printf 'not-an-evtx' > "$corrupt"
+  run python3 "$EXTRACT_EVTX" --data-dir "$DATA_DIR" "$corrupt"
+  [ "$status" -eq 4 ]
+  echo "$output" | jq -e '.ok == false'
+  echo "$output" | jq -e '.warnings[] | select(contains("EVTX parse failed"))'
+}
+
 @test "extract-evtx.py output has required top-level keys" {
   run python3 "$EXTRACT_EVTX" --data-dir "$DATA_DIR"
   [ "$status" -eq 0 ]

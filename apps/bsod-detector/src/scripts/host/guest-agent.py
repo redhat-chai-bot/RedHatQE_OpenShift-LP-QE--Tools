@@ -205,6 +205,11 @@ def guest_get(guestpath, local, chunk=3500 * 1024, auto_compress=True):
                            f"$in.CopyTo($gz); $gz.Dispose(); $in.Dispose(); $out.Dispose(); "
                            f"Write-Host ('compressed to ' + (Get-Item {compressed_path}).Length + ' bytes')"],
                           poll_timeout=600)
+            if r.get("timeout") or r.get("exitcode") != 0:
+                raise RuntimeError(
+                    f"guest compression failed: exit={r.get('exitcode')} timeout={r.get('timeout', False)} "
+                    f"stderr={r.get('stderr', '')}"
+                )
             sys.stderr.write("✓ Compression complete\n")
             sys.stderr.flush()
             guestpath = compressed_path
@@ -282,7 +287,9 @@ def main():
         print(f"[exit {r.get('exitcode')}]")
         if r.get("stdout"): sys.stdout.write(r["stdout"] + ("" if r["stdout"].endswith("\n") else "\n"))
         if r.get("stderr"): sys.stderr.write("STDERR:\n" + r["stderr"] + "\n")
-        return
+        if r.get("timeout"):
+            sys.exit(124)
+        sys.exit(r.get("exitcode") if r.get("exitcode") is not None else 1)
     if cmd == "put":
         n = guest_put(sys.argv[2], sys.argv[3]); print(f"wrote {n} bytes -> {sys.argv[3]}"); return
     if cmd == "get":
@@ -297,7 +304,9 @@ def main():
         print(f"[exit {r.get('exitcode')}]")
         if r.get("stdout"): sys.stdout.write(r["stdout"])
         if r.get("stderr"): sys.stderr.write("STDERR:\n" + r["stderr"])
-        return
+        if r.get("timeout"):
+            sys.exit(124)
+        sys.exit(r.get("exitcode") if r.get("exitcode") is not None else 1)
     print("unknown cmd", cmd); sys.exit(2)
 
 

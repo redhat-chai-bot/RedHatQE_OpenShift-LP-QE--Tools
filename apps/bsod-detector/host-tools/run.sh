@@ -16,26 +16,46 @@
 #
 # See README.md for build instructions and BSOD_HOST_IMAGE override.
 ####
-set -euxo pipefail; shopt -s inherit_errexit
+set -euo pipefail
+shopt -s inherit_errexit
 
-typeset image="${BSOD_HOST_IMAGE:-bsod-host-tools}"
+typeset image="${BSOD_HOST_IMAGE:-quay.io/redhatqe/bsod-detector:latest}"
 typeset here=''
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 typeset project=''
 project="$(cd "${here}/.." && pwd)"
 
-typeset disk=''; typeset out="${project}/output/dumps"
+typeset disk=''
+typeset out="${project}/output/dumps"
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --disk) disk="$2"; shift 2 ;;
-    --out)  out="$2"; shift 2 ;;
-    -h|--help) sed -n '/^#!/,/^####$/{/^#!/d;/^####$/d;s/^# \{0,1\}//p;}' "$0"; exit 0 ;;
-    *) echo "run.sh: unknown arg: $1" >&2; exit 2 ;;
+    --disk)
+      disk="$2"
+      shift 2
+      ;;
+    --out)
+      out="$2"
+      shift 2
+      ;;
+    -h | --help)
+      sed -n '/^#!/,/^####$/{/^#!/d;/^####$/d;s/^# \{0,1\}//p;}' "$0"
+      exit 0
+      ;;
+    *)
+      echo "run.sh: unknown arg: $1" >&2
+      exit 2
+      ;;
   esac
 done
 
-[[ -n "${disk}" ]] || { echo "run.sh: --disk is required" >&2; exit 2; }
-[[ -r "${disk}" ]] || { echo "run.sh: cannot read disk: ${disk} (need libvirt group or root)" >&2; exit 2; }
+[[ -n "${disk}" ]] || {
+  echo "run.sh: --disk is required" >&2
+  exit 2
+}
+[[ -r "${disk}" ]] || {
+  echo "run.sh: cannot read disk: ${disk} (need libvirt group or root)" >&2
+  exit 2
+}
 mkdir -p "${out}"
 
 # The disk image lives under /var/lib/libvirt/images (root-owned). Rootless
@@ -57,6 +77,6 @@ exec podman run --rm \
   "${selinuxOpt[@]}" \
   -v "${disk}":/images/"$(basename "${disk}")":ro \
   -v "${out}":/out:Z \
+  -e MODE=extract \
   "${image}" \
-  -- \
   --disk /images/"$(basename "${disk}")" --out /out

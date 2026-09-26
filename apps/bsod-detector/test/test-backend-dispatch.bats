@@ -16,14 +16,14 @@ setup() {
 @test "kvm.sh defines all required function signatures" {
   required=(domain_state detect_crash start_vm stop_vm kill_vm screenshot snapshot_create snapshot_revert memory_dump guest_ip guest_disk)
   for fn in "${required[@]}"; do
-    grep -qE "^function ${fn} " "$KVM_BACKEND" || { echo "MISSING: $fn"; false; }
+    grep -qE "^function ${fn}( |\(\))" "$KVM_BACKEND" || { echo "MISSING: $fn"; false; }
   done
 }
 
 @test "kubevirt.sh defines all required function signatures" {
   required=(domain_state detect_crash start_vm stop_vm kill_vm screenshot snapshot_create snapshot_revert memory_dump guest_ip guest_disk)
   for fn in "${required[@]}"; do
-    grep -qE "^function ${fn} " "$KUBEVIRT_BACKEND" || { echo "MISSING: $fn"; false; }
+    grep -qE "^function ${fn}( |\(\))" "$KUBEVIRT_BACKEND" || { echo "MISSING: $fn"; false; }
   done
 }
 

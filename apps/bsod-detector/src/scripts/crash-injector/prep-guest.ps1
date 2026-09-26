@@ -6,7 +6,7 @@
 .DESCRIPTION
     Runs INSIDE the guest (elevated). Makes the VM test-ready so the
     clean-baseline snapshot starts from a known-good state:
-      1. Applies the kernel-dump CrashControl settings (matches the project's
+      1. Applies the automatic-dump CrashControl settings (matches the project's
          data/crash-control.json recommendation).
       2. Ensures a system-managed page file on C: (the 1.9 GB fixed default is
          too small to guarantee a dump on 8 GB RAM).
@@ -17,7 +17,7 @@
     resulting state (the script contract).
 
     NOTE: the CrashControl values here MUST stay in sync with
-    data/crash-control.json (kernel dump = CrashDumpEnabled 2). That file is the
+    data/crash-control.json (automatic dump = CrashDumpEnabled 7). That file is the
     source of truth; this script hard-applies the same values because it runs in
     the guest with no access to the repo.
 
@@ -43,10 +43,10 @@ $ProgressPreference    = 'SilentlyContinue'
 $warnings = @()
 $rebootRecommended = $false
 
-# --- 1. Crash-dump config (kernel dump; mirror of data/crash-control.json) ---
+# --- 1. Crash-dump config (automatic dump; mirror of data/crash-control.json) ---
 $cc = 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl'
 $desired = @{
-    CrashDumpEnabled     = 2                       # kernel dump
+    CrashDumpEnabled     = 7                       # automatic dump
     AlwaysKeepMemoryDump = 1
     Overwrite            = 1
     LogEvent             = 1

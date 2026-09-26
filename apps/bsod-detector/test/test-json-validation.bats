@@ -59,8 +59,14 @@ load test-helper
   [ "$bad" -eq 0 ]
 }
 
-@test "every chaos trigger tier is 1-4" {
-  bad=$(jq '[.triggers[] | select(.tier < 1 or .tier > 4)] | length' "$DATA_DIR/chaos-triggers.json")
+@test "every chaos trigger tier is declared by tierSchema" {
+  bad=$(jq '[. as $root | .triggers[] | select(($root.tierSchema[.tier|tostring] // null) == null)] | length' "$DATA_DIR/chaos-triggers.json")
+  [ "$bad" -eq 0 ]
+}
+
+@test "tier 5 triggers are explicitly marked experimental or unsupported" {
+  bad=$(jq '[. as $root | .triggers[] | select(.tier == 5) |
+    select(($root.tierSchema["5"] | test("experimental|unsupported"; "i")) | not)] | length' "$DATA_DIR/chaos-triggers.json")
   [ "$bad" -eq 0 ]
 }
 

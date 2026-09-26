@@ -286,8 +286,8 @@ directory as a pipeline artifact. Key files:
 | File | Contains |
 |---|---|
 | `collect-guest.json` | Full structured report (the primary artifact) |
-| `Minidump/*.dmp` | Small memory dumps (one per crash, ~256 KB each) |
-| `MEMORY.DMP` | Kernel dump (`CrashDumpEnabled=2`, kernel pages only) or complete dump (`CrashDumpEnabled=1`, all physical RAM + 257 MB page file required) |
+| `Minidump/*.dmp` | Small dumps only when Windows actually produced nonempty files; automatic dump does not guarantee them |
+| `MEMORY.DMP` | Automatic dump (`CrashDumpEnabled=7`) configured by the source-of-truth data |
 
 The JSON report is self-contained for triage. The `.dmp` files are for deep
 analysis with WinDbg / `kd -z <file> -c "!analyze -v"`.

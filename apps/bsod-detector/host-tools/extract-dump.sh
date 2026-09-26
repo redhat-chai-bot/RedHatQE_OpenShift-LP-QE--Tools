@@ -23,16 +23,19 @@
 #   { "ok": true, "disk": "...", "outputDir": "/out",
 #     "dumpFiles": ["MEMORY.DMP","Minidump/..."], "warnings": [ ... ] }
 ####
-set -euxo pipefail; shopt -s inherit_errexit
-exec {BASH_XTRACEFD}>/dev/null
+set -euo pipefail
+shopt -s inherit_errexit
 
 typeset disk=''
 typeset out='/out'
 typeset winRoot='/Windows'
 # warn — print a diagnostic message to stderr.
-function warn () { echo "extract-dump: $*" >&2; true; }
+function warn() {
+  echo "extract-dump: $*" >&2
+  true
+}
 # emit — write the final JSON result object to stdout.
-function emit () {
+function emit() {
   printf '{"ok":%s,"disk":%s,"outputDir":%s,"dumpFiles":%s,"warnings":%s}\n' \
     "$1" "$(jq -Rn --arg v "${disk}" '$v')" "$(jq -Rn --arg v "${out}" '$v')" \
     "${filesJson:-[]}" "${warnJson:-[]}"
@@ -41,18 +44,42 @@ function emit () {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --disk) disk="$2"; shift 2 ;;
-    --out) out="$2"; shift 2 ;;
-    --windows-root) winRoot="$2"; shift 2 ;;
-    -h|--help)
-      sed -n '/^#!/,/^####$/{/^#!/d;/^####$/d;s/^# \{0,1\}//p;}' "$0"; exit 0 ;;
-    *) warn "unknown arg: $1"; exit 2 ;;
+    --disk)
+      disk="$2"
+      shift 2
+      ;;
+    --out)
+      out="$2"
+      shift 2
+      ;;
+    --windows-root)
+      winRoot="$2"
+      shift 2
+      ;;
+    -h | --help)
+      sed -n '/^#!/,/^####$/{/^#!/d;/^####$/d;s/^# \{0,1\}//p;}' "$0"
+      exit 0
+      ;;
+    *)
+      warn "unknown arg: $1"
+      exit 2
+      ;;
   esac
 done
 
-[[ -n "${disk}" ]] || { warn "--disk is required"; exit 2; }
-[[ -f "${disk}" ]] || { warn "disk not found: ${disk}"; exit 2; }
+[[ -n "${disk}" ]] || {
+  warn "--disk is required"
+  exit 2
+}
+[[ -f "${disk}" || -b "${disk}" ]] || {
+  warn "disk file/block device not found: ${disk}"
+  exit 2
+}
 mkdir -p "${out}"
+chmod 0700 "${out}"
+typeset errFile=''
+errFile="$(mktemp "${out}/.extract-errors.XXXXXX")"
+trap 'rm -f "${errFile}"' EXIT
 
 typeset -a warns=()
 typeset -a found=()
@@ -60,10 +87,12 @@ typeset -a found=()
 # Locate the Windows partition automatically; -i inspects the OS layout.
 # virt-copy-out reads read-only by default.
 # copy_out — copy a file from the guest disk image to the output directory.
-function copy_out () {
+function copy_out() {
   typeset src="${winRoot}/$1"
+  typeset copied="${out}/${src##*/}"
   if virt-ls -a "${disk}" "${src}" >/dev/null 2>&1; then
-    virt-copy-out -a "${disk}" "${src}" "${out}" 2>>/tmp/err && return 0
+    virt-copy-out -a "${disk}" "${src}" "${out}" 2>>"${errFile}" || return 1
+    [[ -s "${copied}" ]] && return 0
   fi
   return 1
 }
@@ -78,8 +107,9 @@ fi
 # Minidump directory (small dumps, one per crash)
 typeset f=''
 if virt-ls -a "${disk}" "${winRoot}/Minidump" >/dev/null 2>&1; then
-  virt-copy-out -a "${disk}" "${winRoot}/Minidump" "${out}" 2>>/tmp/err || true
-  while IFS= read -r f; do found+=("Minidump/${f}"); done < <(virt-ls -a "${disk}" "${winRoot}/Minidump" 2>/dev/null | sed -n '/\.dmp$/Ip')
+  virt-copy-out -a "${disk}" "${winRoot}/Minidump" "${out}" 2>>"${errFile}" || true
+  while IFS= read -r f; do found+=("Minidump/${f#"${out}/Minidump/"}"); done \
+    < <(find "${out}/Minidump" -type f -iname '*.dmp' -size +0c 2>/dev/null | sort)
 else
   warns+=("no Minidump directory found")
 fi
@@ -92,8 +122,15 @@ for evtxName in "${evtxTargets[@]}"; do
   if copy_out "System32/winevt/Logs/${evtxName}"; then
     # virt-copy-out preserves the path structure; move to our flat winevt/ dir
     typeset srcEvtx="${out}/${evtxName}"
-    [[ -f "${srcEvtx}" ]] && mv "${srcEvtx}" "${out}/winevt/${evtxName}" 2>/dev/null || true
-    found+=("winevt/${evtxName}")
+    if [[ -s "${srcEvtx}" ]]; then
+      if mv "${srcEvtx}" "${out}/winevt/${evtxName}" 2>/dev/null && [[ -s "${out}/winevt/${evtxName}" ]]; then
+        found+=("winevt/${evtxName}")
+      else
+        warns+=("${evtxName} could not be moved into winevt output")
+      fi
+    else
+      warns+=("${evtxName} copied but was empty")
+    fi
   else
     warns+=("${evtxName} not found at ${evtxDir}")
   fi
@@ -104,6 +141,9 @@ filesJson="$(printf '%s\n' "${found[@]:-}" | jq -Rn '[inputs | select(length > 0
 typeset warnJson=''
 warnJson="$(printf '%s\n' "${warns[@]:-}" | jq -Rn '[inputs | select(length > 0)]')"
 
-if [[ "${#found[@]}" -eq 0 ]]; then emit false; exit 1; fi
+if [[ "${#found[@]}" -eq 0 ]]; then
+  emit false
+  exit 1
+fi
 emit true
 true

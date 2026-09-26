@@ -32,4 +32,5 @@ load test-helper
   make -C "$REPO_ROOT/src/scripts/crash-injector/test-driver" clean >/dev/null 2>&1
   [ ! -f "$REPO_ROOT/src/scripts/crash-injector/test-driver/crashme-ctl.exe" ]
   [ ! -f "$REPO_ROOT/src/scripts/crash-injector/test-driver/crashme.sys" ]
+  [ ! -f "$REPO_ROOT/src/scripts/crash-injector/test-driver/libntoskrnl.a" ]
 }

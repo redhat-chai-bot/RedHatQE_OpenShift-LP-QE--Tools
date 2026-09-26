@@ -25,19 +25,19 @@ image bundles libguestfs, qemu-img, and libvirt-client for that purpose.
 The container **Dockerfile** and build **Makefile** live in the repo's image
 tree at [`image/container/bsod-detector/`](../../../image/container/bsod-detector/),
 following the repository convention (source under `apps/`, build under
-`image/container/`). The Dockerfile's build context is this app directory
-(`apps/bsod-detector/`), so it `COPY`s `host-tools/extract-dump.sh` from here.
+`image/container/`). The Dockerfile's build context is the repository root, so
+app helpers and the image entrypoint are both valid `COPY` inputs.
 
 ## Build & run
 
 ```bash
-# Build (from the repo root). Tag it bsod-host-tools so run.sh finds it:
-podman build -t bsod-host-tools \
-  -f image/container/bsod-detector/Dockerfile apps/bsod-detector
+# Build from the repository root:
+podman build -t quay.io/redhatqe/bsod-detector:local \
+  -f image/container/bsod-detector/Dockerfile .
 
 # or via the Makefile:
-make -C image/container/bsod-detector build IMAGE_TAG=host-tools
-# (then set BSOD_HOST_IMAGE to the resulting quay.io/redhatqe/bsod-detector:host-tools tag)
+make -C image/container/bsod-detector build IMAGE_TAG=local
+# set BSOD_HOST_IMAGE if the local tag differs from the wrapper default
 
 # Extract dumps from the (offline) golden VM disk into ./output/dumps
 apps/bsod-detector/host-tools/run.sh \

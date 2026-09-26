@@ -58,12 +58,13 @@ domain XML.
 Organic (non-KeBugCheckEx) fault injection trigger definitions for chaos
 testing. Each trigger defines a host-side or guest-side scenario that may
 produce a real BSOD through actual failure conditions.
-- **Consumers:** `vm/sweep-chaos.sh` reads trigger parameters, method type,
+- **Consumers:** `src/scripts/crash-injector/sweep-chaos.sh` reads trigger parameters, method type,
   snapshot name, guest workload, expected codes, and timeout.
-- 12 triggers across 4 tiers: host-side fault injection (NMI, balloon,
+- 24 triggers across 5 tiers: host-side fault injection (NMI, balloon,
   device hot-remove, network toggle, vCPU hot-remove), Driver Verifier
   stress (low resources, forced pending I/O), block I/O throttle/error
-  injection, and Hyper-V enlightenment permutation.
+  injection, Hyper-V enlightenment permutations, and six explicitly
+  experimental/unsupported tier-5 mechanisms.
 
 ### `blkdebug-read-errors.conf`
 

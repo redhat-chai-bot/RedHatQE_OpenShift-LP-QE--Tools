@@ -34,4 +34,4 @@ libntoskrnl.a: ntoskrnl.def
 	x86_64-w64-mingw32-dlltool -d $< -l $@ -k
 
 clean:
-	rm -f crashme-ctl.exe crashme.sys
+	rm -f crashme-ctl.exe crashme.sys libntoskrnl.a

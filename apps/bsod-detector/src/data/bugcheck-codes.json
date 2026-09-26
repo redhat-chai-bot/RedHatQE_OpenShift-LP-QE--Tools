@@ -102,11 +102,39 @@
       "name": "REGISTRY_FILTER_DRIVER_EXCEPTION",
       "description": "A registry filtering driver (e.g. an antivirus minifilter) caused an unhandled exception during a registry callback. Often WdFilter.sys (Defender) on an in-page error."
     },
-    "0x00000154": {
-      "name": "UNEXPECTED_STORE_EXCEPTION",
-      "description": "A store component caught an unexpected exception, commonly triggered by a failing disk, corrupt page file, or antivirus interference with store operations."
-    },
-    "0x00020001": {
+  "0x00000154": {
+    "name": "UNEXPECTED_STORE_EXCEPTION",
+    "description": "A store component caught an unexpected exception, commonly triggered by a failing disk, corrupt page file, or antivirus interference with store operations."
+  },
+  "0x00000041": {
+    "name": "MUST_SUCCEED_POOL_EMPTY",
+    "description": "A kernel component requested must-succeed pool memory when that pool was empty."
+  },
+  "0x0000004D": {
+    "name": "NO_PAGES_AVAILABLE",
+    "description": "No free or zeroed pages were available to satisfy a kernel memory request."
+  },
+  "0x0000009C": {
+    "name": "MACHINE_CHECK_EXCEPTION",
+    "description": "The processor reported a fatal machine-check exception."
+  },
+  "0x000000C4": {
+    "name": "DRIVER_VERIFIER_DETECTED_VIOLATION",
+    "description": "Driver Verifier detected a driver rule violation; parameter 1 identifies the verifier rule."
+  },
+  "0x000000CC": {
+    "name": "PAGE_FAULT_IN_FREED_SPECIAL_POOL",
+    "description": "A driver referenced memory after it had been freed from Driver Verifier Special Pool."
+  },
+  "0x000000F4": {
+    "name": "CRITICAL_OBJECT_TERMINATION",
+    "description": "A process or thread required for system operation terminated unexpectedly."
+  },
+  "0x00000101": {
+    "name": "CLOCK_WATCHDOG_TIMEOUT",
+    "description": "An expected clock interrupt on a secondary processor was not received within the timeout interval."
+  },
+  "0x00020001": {
       "name": "HYPERVISOR_ERROR",
       "description": "The hypervisor encountered a fatal error. Common causes include unhandled exceptions during hypercalls (e.g. TLB-flush or IPI delivery) and hardware-enforced alignment faults (split-lock #AC) forwarded as fatal NMIs to the guest."
     }

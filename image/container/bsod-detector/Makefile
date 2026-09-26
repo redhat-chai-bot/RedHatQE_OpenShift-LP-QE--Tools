@@ -1,4 +1,4 @@
-.PHONY: build push clean help validate
+.PHONY: build push clean help validate validate-layout
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
 
@@ -8,7 +8,7 @@ IMAGE_NAME ?= bsod-detector
 IMAGE_TAG ?= latest
 IMAGE_FULL = $(IMAGE_REGISTRY)/$(IMAGE_NAMESPACE)/$(IMAGE_NAME):$(IMAGE_TAG)
 
-APP_DIR = apps/bsod-detector
+REPO_ROOT = ../../..
 
 # Validate required variables before using them
 validate:
@@ -21,16 +21,33 @@ validate:
 	    echo 'Validation passed. IMAGE_FULL=$(IMAGE_FULL)'; \
 	}
 
+validate-layout:
+	@{ \
+	    set -euo pipefail; shopt -s inherit_errexit; \
+	    root="$$(cd '$(REPO_ROOT)' && pwd)"; \
+	    for path in \
+	      apps/bsod-detector/src/scripts/host/watch-crash.sh \
+	      apps/bsod-detector/src/scripts/host/recover-natural-crash.sh \
+	      apps/bsod-detector/src/scripts/host/rhov-common.sh \
+	      apps/bsod-detector/host-tools/extract-dump.sh \
+	      image/container/bsod-detector/entrypoint.sh; do \
+	      [ -s "$${root}/$${path}" ] || { echo "ERROR: missing build input $${path}" >&2; exit 1; }; \
+	    done; \
+	    grep -q 'virtctl vnc screenshot' "$${root}/apps/bsod-detector/src/scripts/host/watch-crash.sh"; \
+	    grep -q 'virtctl memory-dump get' "$${root}/apps/bsod-detector/src/scripts/host/watch-crash.sh"; \
+	    echo 'Container build layout validation passed.'; \
+	}
+
 # Build container image
-build: validate
+build: validate validate-layout
 	@{ \
 	    set -euo pipefail; shopt -s inherit_errexit; \
 	    echo 'Building container image: $(IMAGE_FULL)'; \
-	    [ -d '../../../$(APP_DIR)' ] || { echo 'ERROR: Build context not found: ../../../$(APP_DIR)' >&2; exit 1; }; \
+	    [ -d '$(REPO_ROOT)/apps/bsod-detector' ] || { echo 'ERROR: repository-root build context not found' >&2; exit 1; }; \
 	    [ -f Dockerfile ] || { echo 'ERROR: Dockerfile not found in current directory' >&2; exit 1; }; \
 	    podman build -t '$(IMAGE_FULL)' \
 	        -f Dockerfile \
-	        '../../../$(APP_DIR)'; \
+	        '$(REPO_ROOT)'; \
 	    echo 'Successfully built: $(IMAGE_FULL)'; \
 	}
 
@@ -61,6 +78,7 @@ help:
 	    echo '  push     - Build and push container image to registry'; \
 	    echo '  clean    - Remove local container image'; \
 	    echo '  validate - Validate required variables'; \
+	    echo '  validate-layout - Verify repository-root COPY inputs and required RHOV commands'; \
 	    echo ''; \
 	    echo 'Variables:'; \
 	    echo '  IMAGE_REGISTRY  - Container registry (default: $(IMAGE_REGISTRY))'; \

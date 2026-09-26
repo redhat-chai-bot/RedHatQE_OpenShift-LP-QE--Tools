@@ -20,7 +20,7 @@
       "MinidumpDir": "%SystemRoot%\\Minidump",
       "DumpFile": "%SystemRoot%\\MEMORY.DMP"
     },
-    "notes": "CrashDumpEnabled=7 (automatic dump, Win8+) writes both MEMORY.DMP (~kernel pages) and Minidump\\*.dmp (~600KB each) from a single crash. AutoReboot=1 — VM reboots after writing dumps so QGA comes back online and pulls evidence via guest-agent.py. AlwaysKeepMemoryDump=1 stops Windows from deleting MEMORY.DMP on low disk."
+    "notes": "CrashDumpEnabled=7 selects an automatic dump written to MEMORY.DMP. It does not independently guarantee a Minidump file. AutoReboot=0 keeps the crashed VM stopped in-guest while RHOV capture waits for observed OS-disk writes followed by a valid idle window. AlwaysKeepMemoryDump=1 preserves MEMORY.DMP on low disk."
   },
   "pageFile": {
     "path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management",

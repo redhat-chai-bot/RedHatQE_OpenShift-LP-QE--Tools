@@ -62,8 +62,8 @@ reboot), re-run the sweep to re-baseline `../../data/trigger-methods.json`.
 
 ## Rebuilding the baseline
 
-The `clean-baseline` snapshot is test-ready: kernel crash dump configured
-(`CrashDumpEnabled=2`, `AlwaysKeepMemoryDump`, `AutoReboot`), page file
+The `clean-baseline` snapshot is test-ready: automatic crash dump configured
+(`CrashDumpEnabled=7`, `AlwaysKeepMemoryDump=1`, `AutoReboot=0`), page file
 system-managed (~8 GB), the CrashMe driver staged in `C:\Tools`, the project
 `src/scripts/` and `src/data/` staged under `C:\bsod-detector\`, SSH key auth
 installed, and Driver Verifier enabled. To rebuild from scratch:
