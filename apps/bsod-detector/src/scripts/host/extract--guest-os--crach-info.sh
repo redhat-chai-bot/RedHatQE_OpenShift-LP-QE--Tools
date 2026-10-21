@@ -16,16 +16,16 @@ while (($#)); do
         echo 'usage: extract--guest-os--crach-info.sh --metadata PRE_STOP_METADATA.json --out VALIDATED_RUN_DIR'
         exit 0
         ;;
-      (*) echo "extract--guest-os--crach-info: unknown argument: ${1}" >&2; exit 2;;
+      (*) echo "extract--guest-os--crach-info: unknown argument: ${1}" 1>&2; exit 2;;
     esac
 done
 [[ -r "${metadataFile}" && -n "${outDir}" ]] || {
-    echo 'extract--guest-os--crach-info: --metadata and --out are required' >&2
+    echo 'extract--guest-os--crach-info: --metadata and --out are required' 1>&2
     exit 2
 }
 
 function Die () {
-    echo "extract--guest-os--crach-info: ERROR: $*" >&2
+    echo "extract--guest-os--crach-info: ERROR: $*" 1>&2
     exit 1
 }
 
@@ -42,7 +42,7 @@ function Oc () {
 
 typeset tool=''
 for tool in oc jq python3 sha256sum findmnt timeout realpath; do
-    command -v "${tool}" >/dev/null || Die "required tool missing: ${tool}"
+    command -v "${tool}" 1> /dev/null || Die "required tool missing: ${tool}"
 done
 
 typeset runId='' expectedOut=''
@@ -63,10 +63,10 @@ storageId="$(jq -er .evidenceMount.id "${metadataFile}")"
 typeset marker="${mountTarget}/.bsod-storage-identity"
 
 # An identity marker permits the preflight test/dev storage contract.
-if [[ ! -f "${marker}" || -L "${marker}" || "$(<"${marker}")" != "${storageId}" ]]; then
+if [[ ! -f "${marker}" || -L "${marker}" || "$(0< "${marker}")" != "${storageId}" ]]; then
     typeset mountJson='' actualMount='' expectedMount=''
     mountJson="$(timeout --signal=TERM --kill-after=5 10 findmnt -J -M "${mountTarget}" -o TARGET,SOURCE,FSTYPE,MAJ:MIN)" || Die 'validated evidence mount is no longer mounted'
-    actualMount="$(jq -c '.filesystems[0] | {target:.target,source:.source,fsType:.fstype,device:.["maj:min"]}' <<<"${mountJson}")"
+    actualMount="$(jq -c '.filesystems[0] | {target:.target,source:.source,fsType:.fstype,device:.["maj:min"]}' 0<<<"${mountJson}")"
     expectedMount="$(jq -c '.evidenceMount | {target,source,fsType,device}' "${metadataFile}")"
     [[ "${actualMount}" == "${expectedMount}" ]] || Die "evidence mount identity changed: expected ${expectedMount}, got ${actualMount}"
 fi
@@ -83,16 +83,16 @@ guestPvc="$(jq -er .guestPvc "${metadataFile}")"
 image="$(jq -er .recoveryImage "${metadataFile}")"
 typeset field=''
 for field in snapshotClass storageClass storageSize volumeMode armedEpoch; do
-    jq -er ".${field}" "${metadataFile}" >/dev/null
+    jq -er ".${field}" "${metadataFile}" 1> /dev/null
 done
-jq -c .preCrashInventory "${metadataFile}" >/dev/null
+jq -c .preCrashInventory "${metadataFile}" 1> /dev/null
 [[ "${image}" =~ @sha256:[0-9a-fA-F]{64}$ && "$(jq -r .recoveryImageContract "${metadataFile}")" == bash+guestfish-v1 ]] || Die 'extraction image contract was not proven by preflight'
 
 typeset stageErrors="${outDir}/stage-errors.jsonl"
 touch "${stageErrors}"
 chmod 0600 "${stageErrors}"
 typeset extractLog="${outDir}/extraction.log"
-: > "${extractLog}"
+: 1> "${extractLog}"
 chmod 0600 "${extractLog}"
 typeset -i hasPod=0 isClean=0
 typeset pod='' container='libguestfs'
@@ -102,8 +102,8 @@ function RecordError () {
     shift
     at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     jq -cn --arg stage "${stage}" --arg error "$*" --arg at "${at}" \
-        '{stage:$stage,error:$error,at:$at}' >> "${stageErrors}"
-    echo "extract--guest-os--crach-info: ERROR [${stage}]: $*" >&2
+        '{stage:$stage,error:$error,at:$at}' 1>> "${stageErrors}"
+    echo "extract--guest-os--crach-info: ERROR [${stage}]: $*" 1>&2
     return 0
 }
 
@@ -112,10 +112,10 @@ function Cleanup () {
     isClean=1
     typeset -i status=0
     if ((hasPod)); then
-        if Oc get pod "${pod}" -n "${ns}" >/dev/null; then
+        if Oc get pod "${pod}" -n "${ns}" 1> /dev/null; then
             # Allow the 60s deletion wait to finish before the transport/process deadlines.
             timeout --signal=TERM --kill-after=5 70 oc --request-timeout=65s \
-                delete pod "${pod}" -n "${ns}" --wait=true --timeout=60s >>"${extractLog}" 2>&1 || {
+                delete pod "${pod}" -n "${ns}" --wait=true --timeout=60s 1>> "${extractLog}" 2>&1 || {
                 RecordError cleanup "failed to delete guestfs-ntfs pod ${pod}"
                 status=1
             }
@@ -137,13 +137,13 @@ trap 'OnSignal 143' TERM
 function FindNTFS () {
     typeset output='' device='' fsType=''
     output="$(Oc exec -n "${ns}" "${pod}" -c "${container}" -- \
-        guestfish --ro -a /dev/vda run : list-filesystems 2>>"${extractLog}")" || return 1
+        guestfish --ro -a /dev/vda run : list-filesystems 2>> "${extractLog}")" || return 1
     typeset -a partArr=()
     while IFS=': ' read -r device fsType; do
         if [[ -n "${device}" && "${fsType}" == ntfs ]]; then
             partArr+=("${device}")
         fi
-    done <<< "${output}"
+    done 0<<< "${output}"
     ((${#partArr[@]})) || return 1
     printf '%s\n' "${partArr[@]}"
     return 0
@@ -156,7 +156,7 @@ attachedVmis="$(jq -r --arg pvc "${guestPvc}" '
   .items[] | select(
     .status.phase == "Running" and
     (.spec.volumes // [] | map(.persistentVolumeClaim.claimName // "", .dataVolume.name // "") | any(. == $pvc))
-  ) | .metadata.name' <<<"${vmiJson}")" || Die 'cannot parse VMI list — PVC attachment state uncertain'
+  ) | .metadata.name' 0<<<"${vmiJson}")" || Die 'cannot parse VMI list — PVC attachment state uncertain'
 if [[ -n "${attachedVmis}" ]]; then
     RecordError extraction 'source PVC is attached to a VMI (direct or DataVolume); cannot safely mount'
     exit 1
@@ -195,15 +195,15 @@ jq -n --arg name "${pod}" --arg ns "${ns}" --arg image "${guestfsImage}" --arg p
         {name:"guestfs-tmp",emptyDir:{}}, {name:"guestfs-home",emptyDir:{}}
       ]
     }
-  }' | Oc apply -f - >>"${extractLog}"
+  }' | Oc apply -f - 1>> "${extractLog}"
 
 hasPod=1
-oc --request-timeout=185s wait pod "${pod}" -n "${ns}" --for=jsonpath='{.status.phase}'=Running --timeout=180s >>"${extractLog}" 2>&1 || {
+oc --request-timeout=185s wait pod "${pod}" -n "${ns}" --for=jsonpath='{.status.phase}'=Running --timeout=180s 1>> "${extractLog}" 2>&1 || {
     RecordError extraction-pod "guestfs-ntfs pod '${pod}' startup timed out"
     exit 1
 }
 Oc exec -n "${ns}" "${pod}" -c "${container}" -- \
-    guestfish --ro -a /dev/vda run : list-filesystems >>"${extractLog}" 2>&1 || {
+    guestfish --ro -a /dev/vda run : list-filesystems 1>> "${extractLog}" 2>&1 || {
     RecordError extraction-pod 'guestfish not available or block device not accessible'
     exit 1
 }
@@ -215,7 +215,7 @@ typeset -a ntfsArr=() evtxArr=(
 typeset ntfsPart=''
 while IFS= read -r ntfsPart; do
     ntfsArr+=("${ntfsPart}")
-done < <(FindNTFS)
+done 0< <(FindNTFS)
 
 # One QEMU session per partition avoids repeated startup OOMs. Copy each result
 # independently: a missing Application.evtx must not discard a valid System.evtx.
@@ -231,7 +231,7 @@ for ntfsPart in "${ntfsArr[@]}"; do
     done
     batchArr+=(: umount-all)
     Oc exec -n "${ns}" "${pod}" -c "${container}" -- \
-        guestfish "${batchArr[@]}" >>"${extractLog}" 2>&1 || true
+        guestfish "${batchArr[@]}" 1>> "${extractLog}" 2>&1 || true
 
     typeset -i index=0
     for filePath in "${evtxArr[@]}"; do
@@ -239,7 +239,7 @@ for ntfsPart in "${ntfsArr[@]}"; do
         index+=1
         typeset dest="${outDir}/guestFS_${partId}${filePath}"
         mkdir -p "${dest%/*}"
-        if oc cp "${ns}/${pod}:${podTemp}" "${dest}" -c "${container}" 2>>"${extractLog}" && [[ -s "${dest}" ]]; then
+        if oc cp "${ns}/${pod}:${podTemp}" "${dest}" -c "${container}" 2>> "${extractLog}" && [[ -s "${dest}" ]]; then
             chmod 0600 "${dest}"
             hasLogs=1
         else
@@ -259,28 +259,28 @@ if [[ -s "${outDir}/parse-dump-header.json" ]]; then
     :
 elif [[ -s "${outDir}/MEMORY.DMP" ]]; then
     timeout --signal=TERM --kill-after=5 60 bash "${scriptDir}/parse-dump-header.sh" "${outDir}/MEMORY.DMP" \
-        > "${outDir}/parse-dump-header.json" 2>>"${extractLog}" || parseStatus=$?
+        1> "${outDir}/parse-dump-header.json" 2>> "${extractLog}" || parseStatus=$?
 elif [[ -d "${outDir}/Minidump" ]]; then
     timeout --signal=TERM --kill-after=5 60 bash "${scriptDir}/parse-dump-header.sh" --dir "${outDir}/Minidump" \
-        > "${outDir}/parse-dump-header.json" 2>>"${extractLog}" || parseStatus=$?
+        1> "${outDir}/parse-dump-header.json" 2>> "${extractLog}" || parseStatus=$?
 else
     jq -n '{"ok":true,"totalDumps":0,"dumps":[],"warnings":["no on-disk dump available; primary artifact is vm-memory.elf.tar.gz"]}' \
-        > "${outDir}/parse-dump-header.json"
+        1> "${outDir}/parse-dump-header.json"
     chmod 0600 "${outDir}/parse-dump-header.json"
 fi
-if ((parseStatus != 0)) || ! jq -e '.ok == true' "${outDir}/parse-dump-header.json" >/dev/null; then
+if ((parseStatus != 0)) || ! jq -e '.ok == true' "${outDir}/parse-dump-header.json" 1> /dev/null; then
     RecordError dump-parse 'dump parser failed or reported semantic failure'
     exit 1
 fi
 jq -n '{"ok":true,"note":"extract-evtx.py is a developer tool — run offline against guestFS_<partition>/Windows/System32/winevt/Logs/*.evtx","events":[]}' \
-    > "${outDir}/events.json"
+    1> "${outDir}/events.json"
 chmod 0600 "${outDir}/events.json"
 
 (
     cd "${outDir}"
     # Canonical relative paths; logs/errors/summaries can still change during cleanup.
     find . \( -type f -o -type l \) ! -name '*.tmp' ! -name '*.log' ! -name stage-errors.jsonl ! -name '*-summary.json' ! -name checksums.sha256 -print0 |
-        sort -z | xargs -0 sha256sum | sed 's|  \./|  |' > checksums.sha256.tmp
+        sort -z | xargs -0 sha256sum | sed 's|  \./|  |' 1> checksums.sha256.tmp
     mv -f checksums.sha256.tmp checksums.sha256
     chmod 0600 checksums.sha256
     exit 0
@@ -289,6 +289,6 @@ typeset -i cleanupStatus=0 summaryStatus=0
 Cleanup || cleanupStatus=$?
 timeout --signal=TERM --kill-after=5 60 python3 "${scriptDir}/reliability.py" write-summary \
     --out "${outDir}" --stage-errors "${stageErrors}" --mode rhov-snapshot-recovery \
-    --vm "${vm}" --namespace "${ns}" --run-id "${runId}" --filename extraction-summary.json >/dev/null || summaryStatus=$?
+    --vm "${vm}" --namespace "${ns}" --run-id "${runId}" --filename extraction-summary.json 1> /dev/null || summaryStatus=$?
 ((cleanupStatus == 0 && summaryStatus == 0)) || exit 1
 exit 0
