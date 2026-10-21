@@ -3,35 +3,35 @@
 set -euxo pipefail; shopt -s inherit_errexit
 umask 077
 
-typeset scriptDir=''
-scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+typeset scrDir="${BASH_SOURCE[0]%/*}"
+typeset scrName="${BASH_SOURCE[0]##*/}"
 typeset metadataFile='' outDir=''
 typeset cmdTimeout="${BSOD_DET__COMMAND__TIMEOUT:-30}"
 
 while (($#)); do
     case "${1}" in
-      (--metadata) metadataFile="${2:?}"; shift 2;;
-      (--out) outDir="${2:?}"; shift 2;;
-      (-h|--help)
-        echo 'usage: extract--guest-os--crach-info.sh --metadata PRE_STOP_METADATA.json --out VALIDATED_RUN_DIR'
-        exit 0
-        ;;
-      (*) echo "extract--guest-os--crach-info: unknown argument: ${1}" 1>&2; exit 2;;
+        (--metadata)    metadataFile="${2:?}"; shift 2;;
+        (--out)         outDir="${2:?}"; shift 2;;
+        (-h|--help)
+            echo "usage: ${scrName} --metadata PRE_STOP_METADATA.json --out VALIDATED_RUN_DIR"
+            exit 0
+            ;;
+        (*) echo "${scrName%.sh}: unknown argument: ${1}" 1>&2; exit 2;;
     esac
 done
-[[ -r "${metadataFile}" && -n "${outDir}" ]] || {
-    echo 'extract--guest-os--crach-info: --metadata and --out are required' 1>&2
+{ [ -r "${metadataFile}" ] && [ -n "${outDir}" ]; } || {
+    echo "${scrName%.sh}: --metadata and --out are required" 1>&2
     exit 2
 }
 
 function Die () {
-    echo "extract--guest-os--crach-info: ERROR: $*" 1>&2
+    echo "${scrName%.sh}: ERROR: $*" 1>&2
     exit 1
 }
 
 function Oc () {
     # Exec streams need a process deadline; API requests have their own timeout.
-    if [[ "${1}" == exec ]]; then
+    if [ "${1}" = exec ]; then
         timeout --signal=TERM --kill-after=5 "${cmdTimeout}" \
             oc --request-timeout="${cmdTimeout}s" "$@" || return $?
     else
@@ -49,32 +49,32 @@ typeset runId='' expectedOut=''
 runId="$(jq -er .runId "${metadataFile}")"
 expectedOut="$(jq -er .outputDir "${metadataFile}")"
 outDir="$(realpath -e "${outDir}")"
-[[ "${outDir}" == "${expectedOut}" && "${outDir##*/}" == "${runId}" ]] || Die 'output path/run ID does not match preflight metadata'
-[[ ! -L "${outDir}" ]] || Die 'output path must not be a symlink'
+{ [ "${outDir}" = "${expectedOut}" ] && [ "${outDir##*/}" = "${runId}" ]; } || Die 'output path/run ID does not match preflight metadata'
+[ ! -L "${outDir}" ] || Die 'output path must not be a symlink'
 
 typeset mountTarget='' storageId=''
 mountTarget="$(jq -er .evidenceMount.target "${metadataFile}")"
 case "$(jq -r .evidenceMount.kind "${metadataFile}")" in
-  (pvc|network|csi) ;;
-  (*) Die 'metadata does not prove persistent evidence volume kind';;
+    (pvc|network|csi) ;;
+    (*) Die 'metadata does not prove persistent evidence volume kind';;
 esac
-[[ -n "$(jq -r .evidenceMount.id "${metadataFile}")" ]] || Die 'metadata lacks stable evidence storage ID'
+[ -n "$(jq -r .evidenceMount.id "${metadataFile}")" ] || Die 'metadata lacks stable evidence storage ID'
 storageId="$(jq -er .evidenceMount.id "${metadataFile}")"
 typeset marker="${mountTarget}/.bsod-storage-identity"
 
 # An identity marker permits the preflight test/dev storage contract.
-if [[ ! -f "${marker}" || -L "${marker}" || "$(0< "${marker}")" != "${storageId}" ]]; then
+if [ ! -f "${marker}" ] || [ -L "${marker}" ] || [ "$(0< "${marker}")" != "${storageId}" ]; then
     typeset mountJson='' actualMount='' expectedMount=''
     mountJson="$(timeout --signal=TERM --kill-after=5 10 findmnt -J -M "${mountTarget}" -o TARGET,SOURCE,FSTYPE,MAJ:MIN)" || Die 'validated evidence mount is no longer mounted'
     actualMount="$(jq -c '.filesystems[0] | {target:.target,source:.source,fsType:.fstype,device:.["maj:min"]}' 0<<<"${mountJson}")"
     expectedMount="$(jq -c '.evidenceMount | {target,source,fsType,device}' "${metadataFile}")"
-    [[ "${actualMount}" == "${expectedMount}" ]] || Die "evidence mount identity changed: expected ${expectedMount}, got ${actualMount}"
+    [ "${actualMount}" = "${expectedMount}" ] || Die "evidence mount identity changed: expected ${expectedMount}, got ${actualMount}"
 fi
 
 # Watcher-owned captures may exist, but extraction must not overwrite stale data.
 typeset stale=''
 stale="$(find "${outDir}" -mindepth 1 \( -name MEMORY.DMP -o -name Minidump -o -name 'guestFS_*' -o -name events.json -o -name extraction-summary.json -o -name checksums.sha256 \) -print -quit)"
-[[ -z "${stale}" ]] || Die "pre-existing extraction artifact rejected: ${stale}"
+[ -z "${stale}" ] || Die "pre-existing extraction artifact rejected: ${stale}"
 
 typeset ns='' vm='' guestPvc='' image=''
 ns="$(jq -er .namespace "${metadataFile}")"
@@ -86,7 +86,7 @@ for field in snapshotClass storageClass storageSize volumeMode armedEpoch; do
     jq -er ".${field}" "${metadataFile}" 1> /dev/null
 done
 jq -c .preCrashInventory "${metadataFile}" 1> /dev/null
-[[ "${image}" =~ @sha256:[0-9a-fA-F]{64}$ && "$(jq -r .recoveryImageContract "${metadataFile}")" == bash+guestfish-v1 ]] || Die 'extraction image contract was not proven by preflight'
+{ [[ "${image}" =~ @sha256:[0-9a-fA-F]{64}$ ]] && [ "$(jq -r .recoveryImageContract "${metadataFile}")" = bash+guestfish-v1 ]; } || Die 'extraction image contract was not proven by preflight'
 
 typeset stageErrors="${outDir}/stage-errors.jsonl"
 touch "${stageErrors}"
@@ -103,7 +103,7 @@ function RecordError () {
     at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     jq -cn --arg stage "${stage}" --arg error "$*" --arg at "${at}" \
         '{stage:$stage,error:$error,at:$at}' 1>> "${stageErrors}"
-    echo "extract--guest-os--crach-info: ERROR [${stage}]: $*" 1>&2
+    echo "${scrName%.sh}: ERROR [${stage}]: $*" 1>&2
     return 0
 }
 
@@ -140,7 +140,7 @@ function FindNTFS () {
         guestfish --ro -a /dev/vda run : list-filesystems 2>> "${extractLog}")" || return 1
     typeset -a partArr=()
     while IFS=': ' read -r device fsType; do
-        if [[ -n "${device}" && "${fsType}" == ntfs ]]; then
+        if [ -n "${device}" ] && [ "${fsType}" = ntfs ]; then
             partArr+=("${device}")
         fi
     done 0<<< "${output}"
@@ -157,7 +157,7 @@ attachedVmis="$(jq -r --arg pvc "${guestPvc}" '
     .status.phase == "Running" and
     (.spec.volumes // [] | map(.persistentVolumeClaim.claimName // "", .dataVolume.name // "") | any(. == $pvc))
   ) | .metadata.name' 0<<<"${vmiJson}")" || Die 'cannot parse VMI list — PVC attachment state uncertain'
-if [[ -n "${attachedVmis}" ]]; then
+if [ -n "${attachedVmis}" ]; then
     RecordError extraction 'source PVC is attached to a VMI (direct or DataVolume); cannot safely mount'
     exit 1
 fi
@@ -239,7 +239,7 @@ for ntfsPart in "${ntfsArr[@]}"; do
         index+=1
         typeset dest="${outDir}/guestFS_${partId}${filePath}"
         mkdir -p "${dest%/*}"
-        if oc cp "${ns}/${pod}:${podTemp}" "${dest}" -c "${container}" 2>> "${extractLog}" && [[ -s "${dest}" ]]; then
+        if oc cp "${ns}/${pod}:${podTemp}" "${dest}" -c "${container}" 2>> "${extractLog}" && [ -s "${dest}" ]; then
             chmod 0600 "${dest}"
             hasLogs=1
         else
@@ -255,13 +255,13 @@ done
 # On-disk dump extraction and EVTX conversion remain disabled; preserve the
 # watcher parser result, or emit the existing offline-analysis stubs.
 typeset -i parseStatus=0
-if [[ -s "${outDir}/parse-dump-header.json" ]]; then
+if [ -s "${outDir}/parse-dump-header.json" ]; then
     :
-elif [[ -s "${outDir}/MEMORY.DMP" ]]; then
-    timeout --signal=TERM --kill-after=5 60 bash "${scriptDir}/parse-dump-header.sh" "${outDir}/MEMORY.DMP" \
+elif [ -s "${outDir}/MEMORY.DMP" ]; then
+    timeout --signal=TERM --kill-after=5 60 bash "${scrDir}/parse-dump-header.sh" "${outDir}/MEMORY.DMP" \
         1> "${outDir}/parse-dump-header.json" 2>> "${extractLog}" || parseStatus=$?
-elif [[ -d "${outDir}/Minidump" ]]; then
-    timeout --signal=TERM --kill-after=5 60 bash "${scriptDir}/parse-dump-header.sh" --dir "${outDir}/Minidump" \
+elif [ -d "${outDir}/Minidump" ]; then
+    timeout --signal=TERM --kill-after=5 60 bash "${scrDir}/parse-dump-header.sh" --dir "${outDir}/Minidump" \
         1> "${outDir}/parse-dump-header.json" 2>> "${extractLog}" || parseStatus=$?
 else
     jq -n '{"ok":true,"totalDumps":0,"dumps":[],"warnings":["no on-disk dump available; primary artifact is vm-memory.elf.tar.gz"]}' \
@@ -287,7 +287,7 @@ chmod 0600 "${outDir}/events.json"
 )
 typeset -i cleanupStatus=0 summaryStatus=0
 Cleanup || cleanupStatus=$?
-timeout --signal=TERM --kill-after=5 60 python3 "${scriptDir}/reliability.py" write-summary \
+timeout --signal=TERM --kill-after=5 60 python3 "${scrDir}/reliability.py" write-summary \
     --out "${outDir}" --stage-errors "${stageErrors}" --mode rhov-snapshot-recovery \
     --vm "${vm}" --namespace "${ns}" --run-id "${runId}" --filename extraction-summary.json 1> /dev/null || summaryStatus=$?
 ((cleanupStatus == 0 && summaryStatus == 0)) || exit 1

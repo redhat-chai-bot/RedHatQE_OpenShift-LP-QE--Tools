@@ -12,7 +12,7 @@ These scripts manage the full BSOD detection and artifact extraction pipeline or
 |------|---------|
 | `preflight-rhov.sh` | Fail-closed pre-run validation; generates recovery metadata |
 | `watch-crash.sh` | Background BSOD detection & memory capture orchestration |
-| `extract--guest-os--crach-info.sh` | Offline NTFS artifact extraction from stopped guest disk |
+| `extract--guest-os--crash-info.sh` | Offline NTFS artifact extraction from stopped guest disk |
 | `guest-agent.py` | Python CLI for QEMU Guest Agent communication (PowerShell tunnel) |
 | `reliability.py` | Artifact validation, decision logic, summary generation |
 | `collect-host-signals.sh` | Parse host-side KVM/Hyper-V crash correlation signals |
@@ -108,7 +108,7 @@ BSOD_DET__CONFIRM_TARGET="win2022-vm-hjoshi1" \
 - Capture VNC screenshot, domain XML, host signals
 - Monitor dump write progress (virsh domstats)
 - Stop VM using `virtctl stop`
-- Call `extract--guest-os--crach-info.sh` for offline NTFS extraction
+- Call `extract--guest-os--crash-info.sh` for offline NTFS extraction
 - Restart VM after recovery
 - Generate `evidence-summary.json`
 
@@ -164,7 +164,7 @@ evidence-summary.json        (final pipeline verdict)
 - `BSOD_DET__COMMAND__TIMEOUT` must be a positive integer
 
 **2. Helper scripts present**
-- All pipeline helpers must exist and be readable: `guest-agent.py`, `reliability.py`, `extract--guest-os--crach-info.sh`, `collect-host-signals.sh`, `parse-dump-header.sh`
+- All pipeline helpers must exist and be readable: `guest-agent.py`, `reliability.py`, `extract--guest-os--crash-info.sh`, `collect-host-signals.sh`, `parse-dump-header.sh`
 - Guest config inputs must exist: `configure-dumps.ps1`, `crash-control.json`
 
 **3. Evidence mount validation**
@@ -227,7 +227,7 @@ Writes all collected VM/storage/config data needed by downstream scripts.
 
 ---
 
-### `extract--guest-os--crach-info.sh`
+### `extract--guest-os--crash-info.sh`
 
 **Purpose**: Offline NTFS artifact extraction from stopped VM disk.
 
@@ -432,7 +432,7 @@ trigger-bsod-intentional.sh
   │    ├─ CaptureHostSignals
   │    ├─ WaitDumpMonitor (non-fatal on timeout)
   │    ├─ StopVM
-  │    ├─ extract--guest-os--crach-info.sh
+  │    ├─ extract--guest-os--crash-info.sh
   │    │    ├─ Verify PVC not attached to running VMI
   │    │    ├─ Create guestfs-ntfs pod
   │    │    ├─ Detect Windows partition dynamically
@@ -520,7 +520,7 @@ All variables follow Red Hat Chaos Team naming: `BSOD_DET__[<COMPONENT>__]<NAME>
 | `WaitDumpMonitor()` | Wait for background progress monitor to complete |
 | `StopVM()` | Stop VM via virtctl stop, poll until phase=Succeeded/Failed |
 | `RestartVM()` | Restart VM via virtctl start (unless --no-restart flag) |
-| `Recover()` | Invoke extract--guest-os--crach-info.sh for offline NTFS extraction |
+| `Recover()` | Invoke extract--guest-os--crash-info.sh for offline NTFS extraction |
 | `CrashResponse()` | Main orchestration: screenshot → memory → host signals → dump monitor → stop → recover → restart → summary |
 
 #### Memory Dump Flow (CaptureMemory)
@@ -564,7 +564,7 @@ evidence-summary.json         Final pipeline verdict
 
 ---
 
-### extract--guest-os--crach-info.sh
+### extract--guest-os--crash-info.sh
 
 **Purpose**: Offline NTFS artifact extraction from stopped VM disk via guestfs-ntfs pod.
 

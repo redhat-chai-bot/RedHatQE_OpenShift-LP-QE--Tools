@@ -10,7 +10,7 @@ import unittest
 
 
 hostDir = Path(__file__).resolve().parents[1] / 'src/scripts/host'
-recovery = hostDir / 'extract--guest-os--crach-info.sh'
+recovery = hostDir / 'extract--guest-os--crash-info.sh'
 
 mockOC = r'''
 import json, os, signal, sys, time
@@ -148,10 +148,10 @@ class RecoveryTests(unittest.TestCase):
                         MOCK_ROOT=str(self.root), BSOD_DET__COMMAND__TIMEOUT='0.3',
                         BSOD_DET__GUESTFS__NTFS_IMAGE='registry.test/guestfs:fixture')
 
-    def RunRecovery(self, scenario='', *args):
+    def RunRecovery(self, scenario='', *args, script=recovery, cwd=None):
         self.meta.write_text(json.dumps(self.metadata))
-        return subprocess.run([str(recovery), *(args or ('--metadata', str(self.meta), '--out', str(self.out)))],
-                              env=dict(self.env, SCENARIO=scenario), text=True, capture_output=True, timeout=10)
+        return subprocess.run([str(script), *(args or ('--metadata', str(self.meta), '--out', str(self.out)))],
+                              cwd=cwd, env=dict(self.env, SCENARIO=scenario), text=True, capture_output=True, timeout=10)
 
     def Calls(self):
         path = self.root / 'calls.jsonl'
@@ -199,6 +199,71 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(list(self.out.glob('guestFS_sda3/**/*.evtx'))), 1)
         self.AssertDeleted()
 
+    def test_relative_host_path_resolves_helpers(self):
+        result = self.RunRecovery(script=f'./{recovery.name}', cwd=hostDir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads((self.out / 'extraction-summary.json').read_text())['ok'])
+        self.AssertDeleted()
+
+    def test_relative_repository_path_resolves_helpers(self):
+        repoRoot = Path(__file__).resolve().parents[3]
+        result = self.RunRecovery(script=os.path.relpath(recovery, repoRoot), cwd=repoRoot)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads((self.out / 'extraction-summary.json').read_text())['ok'])
+        self.AssertDeleted()
+
+    def test_absolute_path_from_unrelated_directory_resolves_helpers(self):
+        result = self.RunRecovery(cwd=self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads((self.out / 'extraction-summary.json').read_text())['ok'])
+        self.AssertDeleted()
+
+    def test_container_recover_dispatch(self):
+        entrypoint = Path(__file__).resolve().parents[3] / 'image/container/bsod-detector/entrypoint.sh'
+        self.meta.write_text(json.dumps(self.metadata))
+        command = '''set -euxo pipefail; shopt -s inherit_errexit
+function exec () {
+    [ "$1" = "/usr/local/bin/${MOCK_EXTRACTOR_NAME}" ] || return 99
+    shift
+    command "${MOCK_EXTRACTOR}" "$@"
+}
+source "$1" "${@:2}"
+'''
+        result = subprocess.run(['bash', '-c', command, 'container-fixture', str(entrypoint),
+                                 '--metadata', str(self.meta), '--out', str(self.out)], cwd=self.root,
+                                env=dict(self.env, MODE='recover', EVIDENCE_DIR=str(self.root),
+                                         MOCK_EXTRACTOR=str(recovery), MOCK_EXTRACTOR_NAME=recovery.name),
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads((self.out / 'extraction-summary.json').read_text())['ok'])
+        self.AssertDeleted()
+
+    def test_diagnostics_follow_invoked_name(self):
+        alias = self.root / 'fixture-extractor.sh'
+        alias.symlink_to(recovery)
+        for args, expected, message in (
+                (('--help',), 0, f'usage: {alias.name} '),
+                (('--unknown',), 2, f'{alias.stem}: unknown argument:'),
+                (('--out', str(self.out)), 2, f'{alias.stem}: --metadata and --out are required')):
+            with self.subTest(args=args):
+                result = self.RunRecovery('', *args, script=alias)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertIn(message, result.stdout if expected == 0 else result.stderr)
+        self.metadata['recoveryImage'] = 'unpinned'
+        result = self.RunRecovery(script=alias)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f'{alias.stem}: ERROR:', result.stderr)
+        self.assertFalse(self.Calls())
+
+    def test_metadata_guard_rejects_missing_or_unreadable_inputs(self):
+        for args in (('--metadata', str(self.meta)),
+                     ('--metadata', str(self.root / 'missing.json'), '--out', str(self.out))):
+            with self.subTest(args=args):
+                result = self.RunRecovery('', *args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('--metadata and --out are required', result.stderr)
+        self.assertFalse(self.Calls())
+
     def test_preserves_watcher_parser(self):
         parser = self.out / 'parse-dump-header.json'
         content = '{"ok":true,"totalDumps":0,"dumps":[],"fixture":"watcher"}\n'
@@ -233,7 +298,8 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual([call[0] for call in self.Calls()], ['get', 'apply'])
 
     def test_unsafe_inputs_never_apply(self):
-        for scenario in ('api-error', 'bad-json', 'attached-pvc', 'attached-dv', 'stale', 'mount', 'image'):
+        for scenario in ('api-error', 'bad-json', 'attached-pvc', 'attached-dv', 'stale', 'mount', 'image',
+                         'image-contract', 'storage-kind', 'storage-id', 'run-id'):
             with self.subTest(scenario=scenario):
                 case = RecoveryTests('test_success_contract')
                 case.setUp()
@@ -245,6 +311,14 @@ class RecoveryTests(unittest.TestCase):
                     case.metadata['evidenceMount']['source'] = 'other:/mount'
                 if scenario == 'image':
                     case.metadata['recoveryImage'] = 'registry.test/unpinned'
+                if scenario == 'image-contract':
+                    case.metadata['recoveryImageContract'] = 'unsupported'
+                if scenario == 'storage-kind':
+                    case.metadata['evidenceMount']['kind'] = 'temporary'
+                if scenario == 'storage-id':
+                    case.metadata['evidenceMount']['id'] = ''
+                if scenario == 'run-id':
+                    case.metadata['runId'] = 'wrong-run'
                 result = case.RunRecovery(scenario)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
                 self.assertFalse(any(call[0] == 'apply' for call in case.Calls()))
@@ -266,7 +340,7 @@ class RecoveryTests(unittest.TestCase):
                 result = self.RunRecovery('', *args)
                 self.assertEqual(result.returncode, expected)
                 if args == ('--help',):
-                    self.assertIn('usage: extract--guest-os--crach-info.sh ', result.stdout)
+                    self.assertIn('usage: extract--guest-os--crash-info.sh ', result.stdout)
         self.assertFalse(self.Calls())
 
 

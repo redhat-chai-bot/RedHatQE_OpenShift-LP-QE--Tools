@@ -24,7 +24,7 @@ running under KubeVirt / OpenShift Virtualization (RHOV).
          │
    ┌─────▼──────┐     ┌─────────────────┐     ┌────────────────────┐
    │ preflight  │     │  watch-crash.sh │     │extract--guest-os-- │
-   │ -rhov.sh   │──►  │  (background)   │──►  │crach-info.sh       │
+   │ -rhov.sh   │──►  │  (background)   │──►  │crash-info.sh       │
    └─────┬──────┘     └────────┬────────┘     └──────────┬─────────┘
          │                     │                          │
    QGA ping             virtctl memory-dump          guestfs-ntfs pod
@@ -47,14 +47,14 @@ By default, each pipeline run writes under `/mnt/persistent-bsod-evidence/`; `BS
 | `domain.xml` | ~14 KB | At BSOD (VM frozen) | `watch-crash.sh` → `virsh dumpxml` inside virt-launcher | Complete libvirt XML at crash time — CPU, memory, disks, devices. Richer than `oc get vmi -o yaml` |
 | `launcher-compute.log` | ~100–200 KB | At BSOD (VM frozen) | `watch-crash.sh` → `oc logs` on virt-launcher | Raw QEMU/KVM compute logs — split-lock traps, KVM internal errors, device events |
 | `host-signals.json` | ~1.3 KB | At BSOD (VM frozen) | `watch-crash.sh` → `collect-host-signals.sh` | Parsed from `launcher-compute.log` — split-lock count, KVM error count, Hyper-V feature states (tlbflush/ipi/vapic/spinlocks/synictimer), risk assessment |
-| `guestFS_sda3/Windows/System32/winevt/Logs/System.evtx` | ~8–9 MB | After VM stopped | `extract--guest-os--crach-info.sh` → guestfs-ntfs pod | Windows System EventLog from NTFS. Contains crash event 1001 (BugCheck), dirty shutdown 6008. Partition name (`sda3`) is **detected dynamically** |
-| `guestFS_sda3/Windows/System32/winevt/Logs/Application.evtx` | ~6 MB | After VM stopped | `extract--guest-os--crach-info.sh` → guestfs-ntfs pod | Windows Application EventLog — Application/1001 LiveKernelEvent and app-level crash events |
-| `parse-dump-header.json` | ~146 B | After VM stopped | `extract--guest-os--crach-info.sh` | Parses a readable on-disk dump if present; otherwise writes a no-dump stub. The ELF-to-Windows-DMP conversion is disabled in the pipeline. |
-| `events.json` | ~162 B | After VM stopped | `extract--guest-os--crach-info.sh` | Stub. The EVTX parser is archived at `apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py`; its lookup data is maintained in active `apps/bsod-detector/src/data`. |
-| `checksums.sha256` | ~900 B | After VM stopped | `extract--guest-os--crach-info.sh` | SHA-256 manifest of all evidence files (integrity verification) |
-| `extraction.log` | ~3–5 KB | After VM stopped | `extract--guest-os--crach-info.sh` | Step-by-step guestfish extraction trace |
+| `guestFS_sda3/Windows/System32/winevt/Logs/System.evtx` | ~8–9 MB | After VM stopped | `extract--guest-os--crash-info.sh` → guestfs-ntfs pod | Windows System EventLog from NTFS. Contains crash event 1001 (BugCheck), dirty shutdown 6008. Partition name (`sda3`) is **detected dynamically** |
+| `guestFS_sda3/Windows/System32/winevt/Logs/Application.evtx` | ~6 MB | After VM stopped | `extract--guest-os--crash-info.sh` → guestfs-ntfs pod | Windows Application EventLog — Application/1001 LiveKernelEvent and app-level crash events |
+| `parse-dump-header.json` | ~146 B | After VM stopped | `extract--guest-os--crash-info.sh` | Parses a readable on-disk dump if present; otherwise writes a no-dump stub. The ELF-to-Windows-DMP conversion is disabled in the pipeline. |
+| `events.json` | ~162 B | After VM stopped | `extract--guest-os--crash-info.sh` | Stub. The EVTX parser is archived at `apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py`; its lookup data is maintained in active `apps/bsod-detector/src/data`. |
+| `checksums.sha256` | ~900 B | After VM stopped | `extract--guest-os--crash-info.sh` | SHA-256 manifest of all evidence files (integrity verification) |
+| `extraction.log` | ~3–5 KB | After VM stopped | `extract--guest-os--crash-info.sh` | Step-by-step guestfish extraction trace |
 | `extraction-summary.json` | ~3 KB | After VM stopped | `reliability.py write-summary` | Recovery phase artifact inventory — type, format, size, sha256, valid flag per file |
-| `stage-errors.jsonl` | 0 B (success) | Throughout | `watch-crash.sh` + `extract--guest-os--crach-info.sh` | One JSON line per stage failure. Empty on clean run |
+| `stage-errors.jsonl` | 0 B (success) | Throughout | `watch-crash.sh` + `extract--guest-os--crash-info.sh` | One JSON line per stage failure. Empty on clean run |
 | `evidence-summary.json` | ~3 KB | End of pipeline | `watch-crash.sh` → `reliability.py write-summary` | Final pipeline verdict: `ok: true/false`, missing artifact types, invalid artifacts |
 | `watcher.log` | ~100–120 KB | Throughout | `watch-crash.sh` | Full timestamped execution trace of the entire pipeline |
 
@@ -803,7 +803,7 @@ apps/bsod-detector/
 │   │   │   ├── README.md
 │   │   │   ├── watch-crash.sh                 # BSOD detection + memory capture
 │   │   │   ├── preflight-rhov.sh              # Pre-run validation
-│   │   │   ├── extract--guest-os--crach-info.sh       # Offline NTFS extraction
+│   │   │   ├── extract--guest-os--crash-info.sh       # Offline NTFS extraction
 │   │   │   ├── guest-agent.py                 # QGA PowerShell tunnel
 │   │   │   ├── parse-dump-header.sh           # Bugcheck code extraction
 │   │   │   ├── reliability.py                 # Artifact validation + summary

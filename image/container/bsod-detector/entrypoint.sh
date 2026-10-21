@@ -5,7 +5,7 @@
 # All target parameters come from environment variables.
 #
 # MODE=watch    → watch-crash.sh   (natural crash detection)
-# MODE=recover  → extract--guest-os--crach-info.sh  (hard-freeze recovery)
+# MODE=recover  → extract--guest-os--crash-info.sh  (hard-freeze recovery)
 # MODE=extract  → extract-dump     (offline libguestfs extraction)
 set -euo pipefail
 
@@ -65,7 +65,7 @@ case "$MODE" in
   recover)
     echo "Starting hard-freeze evidence recovery..."
     echo ""
-    exec /usr/local/bin/extract--guest-os--crach-info.sh "$@"
+    exec /usr/local/bin/extract--guest-os--crash-info.sh "$@"
     ;;
 
   extract)

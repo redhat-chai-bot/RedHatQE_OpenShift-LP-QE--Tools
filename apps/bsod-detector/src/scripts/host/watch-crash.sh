@@ -359,7 +359,7 @@ function RestartVM () {
   if ((noRestart == 0)); then RunTimed 90 virtctl start "${vm}" -n "${ns}" >>"${pipelineLog}" 2>&1 || { RecordError restart 'virtctl start failed or timed out'; return 1; }; fi
 }
 function Recover () {
-  typeset recoveryTimeout=3600 recoveryBin="${scriptDir}/extract--guest-os--crach-info.sh"
+  typeset recoveryTimeout=3600 recoveryBin="${scriptDir}/extract--guest-os--crash-info.sh"
   [[ -x "${recoveryBin}" ]] || { RecordError recovery "recovery script missing: ${recoveryBin}"; return 1; }
   RunTimed "${recoveryTimeout}" "${recoveryBin}" --metadata "${metadataFile}" --out "${outDir}" >>"${pipelineLog}" 2>&1
 }

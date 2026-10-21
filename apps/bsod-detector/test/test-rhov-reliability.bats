@@ -201,7 +201,7 @@ run_recovery() {
   run env PATH="$BATS_TMPDIR/mockbin:$PATH" REAL_PYTHON="$REAL_PYTHON" EVIDENCE_ROOT="$EVIDENCE_ROOT" \
     OC_LOG="$OC_LOG" BSOD_EXTRACT_EVTX_BIN="$BATS_TMPDIR/mockbin/extract-evtx" \
     MISSING_GUESTFISH="${MISSING_GUESTFISH:-0}" DUMP_CODE="${DUMP_CODE:-10}" EVTX_FAIL="${EVTX_FAIL:-0}" MOUNT_SOURCE="${MOUNT_SOURCE:-}" \
-    bash "$HOST_DIR/extract--guest-os--crach-info.sh" --metadata "$BATS_TMPDIR/metadata.json" --out "$EVIDENCE_ROOT/fixture-recovery-001"
+    bash "$HOST_DIR/extract--guest-os--crash-info.sh" --metadata "$BATS_TMPDIR/metadata.json" --out "$EVIDENCE_ROOT/fixture-recovery-001"
 }
 
 write_elf_memory_fixture() {
@@ -373,6 +373,6 @@ run_watcher() {
   ! grep -q 'memory-dump .*\/dev\/stdout' "$HOST_DIR/watch-crash.sh"
   grep -q 'virtctl vnc screenshot' "$HOST_DIR/watch-crash.sh"
   grep -q 'virtctl memory-dump get' "$HOST_DIR/watch-crash.sh"
-  grep -q 'extract--guest-os--crach-info.sh' "$HOST_DIR/watch-crash.sh"
+  grep -q 'extract--guest-os--crash-info.sh' "$HOST_DIR/watch-crash.sh"
   grep -q 'exec-crash' "$REPO_ROOT/src/scripts/crash-injector/trigger-bsod-intentional.sh"
 }

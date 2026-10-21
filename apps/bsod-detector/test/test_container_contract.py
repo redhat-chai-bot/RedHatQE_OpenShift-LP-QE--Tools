@@ -13,7 +13,7 @@ IMAGE = ROOT / "image" / "container" / "bsod-detector"
 class ContainerContractTests(unittest.TestCase):
     def test_renamed_extractor_integrations(self):
         hostDir = ROOT / 'apps/bsod-detector/src/scripts/host'
-        name = 'extract--guest-os--crach-info.sh'
+        name = 'extract--guest-os--crash-info.sh'
         extractor = hostDir / name
         self.assertTrue(extractor.is_file())
         self.assertTrue(extractor.stat().st_mode & 0o111)
