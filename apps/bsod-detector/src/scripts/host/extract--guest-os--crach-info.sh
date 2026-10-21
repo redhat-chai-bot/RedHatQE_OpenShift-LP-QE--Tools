@@ -13,19 +13,19 @@ while (($#)); do
     --metadata) metadataFile="${2:?}"; shift 2 ;;
     --out) outDir="${2:?}"; shift 2 ;;
     -h|--help)
-      echo 'usage: recover-natural-crash.sh --metadata PRE_STOP_METADATA.json --out VALIDATED_RUN_DIR'
+      echo 'usage: extract--guest-os--crach-info.sh --metadata PRE_STOP_METADATA.json --out VALIDATED_RUN_DIR'
       exit 0
       ;;
-    *) echo "recover-natural-crash: unknown argument: ${1}" >&2; exit 2 ;;
+    *) echo "extract--guest-os--crach-info: unknown argument: ${1}" >&2; exit 2 ;;
   esac
 done
 [[ -r "${metadataFile}" && -n "${outDir}" ]] || {
-  echo 'recover-natural-crash: --metadata and --out are required' >&2
+  echo 'extract--guest-os--crach-info: --metadata and --out are required' >&2
   exit 2
 }
 
 function Die () {
-  echo "recover-natural-crash: ERROR: $*" >&2
+  echo "extract--guest-os--crach-info: ERROR: $*" >&2
   exit 1
 }
 
@@ -103,7 +103,7 @@ function RecordError () {
   at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   jq -cn --arg stage "${stage}" --arg error "$*" --arg at "${at}" \
     '{stage:$stage,error:$error,at:$at}' >> "${stageErrors}"
-  echo "recover-natural-crash: ERROR [${stage}]: $*" >&2
+  echo "extract--guest-os--crach-info: ERROR [${stage}]: $*" >&2
   return 0
 }
 

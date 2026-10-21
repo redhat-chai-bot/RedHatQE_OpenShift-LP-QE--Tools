@@ -11,6 +11,19 @@ IMAGE = ROOT / "image" / "container" / "bsod-detector"
 
 
 class ContainerContractTests(unittest.TestCase):
+    def test_renamed_extractor_integrations(self):
+        hostDir = ROOT / 'apps/bsod-detector/src/scripts/host'
+        name = 'extract--guest-os--crach-info.sh'
+        extractor = hostDir / name
+        self.assertTrue(extractor.is_file())
+        self.assertTrue(extractor.stat().st_mode & 0o111)
+        for caller in ('watch-crash.sh', 'preflight-rhov.sh'):
+            self.assertIn(name, (hostDir / caller).read_text())
+        self.assertIn(f'exec /usr/local/bin/{name} "$@"', (IMAGE / 'entrypoint.sh').read_text())
+        dockerfile = (IMAGE / 'Dockerfile').read_text()
+        self.assertIn(f'COPY apps/bsod-detector/src/scripts/host/{name}', dockerfile)
+        self.assertIn(f'/usr/local/bin/{name} \\', dockerfile)
+
     def test_dockerfile_copy_sources_exist_in_repository_context(self):
         dockerfile = (IMAGE / "Dockerfile").read_text(encoding="utf-8")
         logical = dockerfile.replace("\\\n", " ")

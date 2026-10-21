@@ -55,7 +55,7 @@ BSOD_DET__CONFIRM_TARGET="win2022-vm-hjoshi1" \
    ├─ Captures vm-memory.elf.tar.gz via virtctl memory-dump
    ├─ Captures screenshot, domain.xml, host-signals.json
    ├─ Stops VM (virtctl stop)
-   ├─ Runs recover-natural-crash.sh (offline NTFS extraction)
+   ├─ Runs extract--guest-os--crach-info.sh (offline NTFS extraction)
    ├─ Restarts VM (virtctl start)
    └─ Writes evidence-summary.json
 8. Return exit code (0=success, 1=failure)
@@ -75,14 +75,14 @@ The table below shows what each file is, who writes it, and at which pipeline ph
 | `domain.xml` | ~14 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `virsh dumpxml` inside virt-launcher pod | Complete libvirt XML domain definition at crash time — CPU topology, memory, all attached disks, network interfaces, QEMU devices. Richer than `oc get vmi -o yaml` as it reflects actual QEMU runtime state |
 | `launcher-compute.log` | ~100–200 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `oc logs` on virt-launcher pod | Raw KVM/QEMU compute container logs — hypervisor events, device errors, split-lock traps, memory balloon events, KVM internal errors |
 | `host-signals.json` | ~1.3 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `collect-host-signals.sh` | Parsed summary of `launcher-compute.log` — split-lock trap count, KVM internal error count, Hyper-V feature states (tlbflush/ipi/vapic/spinlocks/synictimer), risk assessment |
-| `parse-dump-header.json` | ~146 B | After VM stopped | `recover-natural-crash.sh` | Bugcheck code + parameters extracted from dump header. **Stub** when elf2dmp is disabled (no on-disk MEMORY.DMP on KVM). Run `parse-dump-header.sh` offline against elf2dmp output |
-| `guestFS_sda3/Windows/System32/winevt/Logs/System.evtx` | ~8–9 MB | After VM stopped | `recover-natural-crash.sh` → guestfs-ntfs pod → `guestfish` | Windows System EventLog extracted offline from NTFS partition. Contains crash event 1001 (BugCheck), dirty shutdown 6008, kernel events. `sda3` is dynamic — detected as whichever NTFS partition contains `C:\` |
-| `guestFS_sda3/Windows/System32/winevt/Logs/Application.evtx` | ~6 MB | After VM stopped | `recover-natural-crash.sh` → guestfs-ntfs pod → `guestfish` | Windows Application EventLog extracted offline from NTFS partition. Contains Application/1001 LiveKernelEvent and app-level crash records |
-| `events.json` | ~162 B | After VM stopped | `recover-natural-crash.sh` | **Stub.** The EVTX parser is archived at `apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py`; its lookup data is maintained in active `apps/bsod-detector/src/data`. |
-| `checksums.sha256` | ~900 B | After VM stopped | `recover-natural-crash.sh` | SHA-256 hashes of all evidence files (except log files and summary files generated after this point). Used by reliability.py to detect tampering |
-| `extraction.log` | ~3–5 KB | After VM stopped | `recover-natural-crash.sh` | Step-by-step guestfish extraction trace — partition discovery, guestfish commands, oc cp transfers, file sizes |
+| `parse-dump-header.json` | ~146 B | After VM stopped | `extract--guest-os--crach-info.sh` | Bugcheck code + parameters extracted from dump header. **Stub** when elf2dmp is disabled (no on-disk MEMORY.DMP on KVM). Run `parse-dump-header.sh` offline against elf2dmp output |
+| `guestFS_sda3/Windows/System32/winevt/Logs/System.evtx` | ~8–9 MB | After VM stopped | `extract--guest-os--crach-info.sh` → guestfs-ntfs pod → `guestfish` | Windows System EventLog extracted offline from NTFS partition. Contains crash event 1001 (BugCheck), dirty shutdown 6008, kernel events. `sda3` is dynamic — detected as whichever NTFS partition contains `C:\` |
+| `guestFS_sda3/Windows/System32/winevt/Logs/Application.evtx` | ~6 MB | After VM stopped | `extract--guest-os--crach-info.sh` → guestfs-ntfs pod → `guestfish` | Windows Application EventLog extracted offline from NTFS partition. Contains Application/1001 LiveKernelEvent and app-level crash records |
+| `events.json` | ~162 B | After VM stopped | `extract--guest-os--crach-info.sh` | **Stub.** The EVTX parser is archived at `apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py`; its lookup data is maintained in active `apps/bsod-detector/src/data`. |
+| `checksums.sha256` | ~900 B | After VM stopped | `extract--guest-os--crach-info.sh` | SHA-256 hashes of all evidence files (except log files and summary files generated after this point). Used by reliability.py to detect tampering |
+| `extraction.log` | ~3–5 KB | After VM stopped | `extract--guest-os--crach-info.sh` | Step-by-step guestfish extraction trace — partition discovery, guestfish commands, oc cp transfers, file sizes |
 | `extraction-summary.json` | ~3 KB | After VM stopped | `reliability.py write-summary` | Artifact inventory from recovery phase — lists every file with type, format, size, sha256, valid flag. Reports missing types or invalid artifacts |
-| `stage-errors.jsonl` | 0 B (success) | Throughout | `watch-crash.sh` + `recover-natural-crash.sh` | One JSON line per stage failure — stage name, error message, timestamp. Empty on clean run |
+| `stage-errors.jsonl` | 0 B (success) | Throughout | `watch-crash.sh` + `extract--guest-os--crach-info.sh` | One JSON line per stage failure — stage name, error message, timestamp. Empty on clean run |
 | `evidence-summary.json` | ~3 KB | End of pipeline | `watch-crash.sh` → `reliability.py write-summary` | Final pipeline verdict — `ok: true/false`, consolidated stage errors, missing required artifact types, invalid artifacts |
 | `watcher.log` | ~100–120 KB | Throughout | `watch-crash.sh` | Full timestamped execution trace of the entire pipeline — QGA pings, BSOD detection, memory capture, stop VM, recovery, restart |
 
@@ -105,7 +105,7 @@ Pipeline start
   │
   ├─── [VM stopped] virtctl stop
   │
-  ├─── [Recovery] recover-natural-crash.sh via guestfs-ntfs pod
+  ├─── [Recovery] extract--guest-os--crach-info.sh via guestfs-ntfs pod
   │         → guestFS_sda3/...System.evtx      (guestfish + oc cp, ~30s)
   │         → guestFS_sda3/...Application.evtx  (same session, ~30s)
   │         → parse-dump-header.json     (stub)
@@ -176,5 +176,5 @@ virtctl start win2022-vm-hjoshi1 -n windows-bsod
 
 - `../host/preflight-rhov.sh` — VM validation and metadata generation
 - `../host/watch-crash.sh` — BSOD detection and memory capture
-- `../host/recover-natural-crash.sh` — Offline NTFS artifact extraction
+- `../host/extract--guest-os--crach-info.sh` — Offline NTFS artifact extraction
 - `../guest/configure-dumps.ps1` — Windows crash dump configuration

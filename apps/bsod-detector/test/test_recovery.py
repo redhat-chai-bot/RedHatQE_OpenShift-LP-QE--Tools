@@ -10,7 +10,7 @@ import unittest
 
 
 hostDir = Path(__file__).resolve().parents[1] / 'src/scripts/host'
-recovery = hostDir / 'recover-natural-crash.sh'
+recovery = hostDir / 'extract--guest-os--crach-info.sh'
 
 mockOC = r'''
 import json, os, signal, sys, time
@@ -263,7 +263,10 @@ class RecoveryTests(unittest.TestCase):
     def test_cli_statuses(self):
         for args, expected in ((('--help',), 0), (('--unknown',), 2), (('--out', str(self.out)), 2)):
             with self.subTest(args=args):
-                self.assertEqual(self.RunRecovery('', *args).returncode, expected)
+                result = self.RunRecovery('', *args)
+                self.assertEqual(result.returncode, expected)
+                if args == ('--help',):
+                    self.assertIn('usage: extract--guest-os--crach-info.sh ', result.stdout)
         self.assertFalse(self.Calls())
 
 

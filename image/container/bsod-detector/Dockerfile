@@ -9,7 +9,7 @@
 #
 #   MODE=recover
 #     Post-stop evidence recovery from preflight metadata.
-#     Calls recover-natural-crash.sh — snapshot-backed guestfish extraction.
+#     Calls extract--guest-os--crach-info.sh — snapshot-backed guestfish extraction.
 #
 #   MODE=extract
 #     Offline dump extraction from a guest disk image via libguestfs.
@@ -108,7 +108,7 @@ oc-EOF
 # required for scripts, only for evidence output and optional KUBECONFIG.
 COPY apps/bsod-detector/src/scripts/host/watch-crash.sh             /usr/local/bin/watch-crash.sh
 COPY apps/bsod-detector/src/scripts/host/preflight-rhov.sh          /usr/local/bin/preflight-rhov.sh
-COPY apps/bsod-detector/src/scripts/host/recover-natural-crash.sh   /usr/local/bin/recover-natural-crash.sh
+COPY apps/bsod-detector/src/scripts/host/extract--guest-os--crach-info.sh   /usr/local/bin/extract--guest-os--crach-info.sh
 COPY apps/bsod-detector/src/scripts/host/guest-agent.py             /usr/local/bin/guest-agent.py
 COPY apps/bsod-detector/src/scripts/host/reliability.py             /usr/local/bin/reliability.py
 COPY apps/bsod-detector/src/scripts/host/parse-dump-header.sh       /usr/local/bin/parse-dump-header.sh
@@ -120,7 +120,7 @@ COPY apps/bsod-detector/archieve/host-tools/extract-dump.sh          /usr/local/
 RUN chmod +x \
     /usr/local/bin/watch-crash.sh \
     /usr/local/bin/preflight-rhov.sh \
-    /usr/local/bin/recover-natural-crash.sh \
+    /usr/local/bin/extract--guest-os--crach-info.sh \
     /usr/local/bin/guest-agent.py \
     /usr/local/bin/reliability.py \
     /usr/local/bin/parse-dump-header.sh \

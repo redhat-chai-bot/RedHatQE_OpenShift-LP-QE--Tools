@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fail-closed RHOV preflight validation before crash injection and watcher
 # Verifies: cluster permissions, VM/VMI state, storage configuration, recovery image capability
-# Produces metadata.json consumed by watch-crash.sh and recover-natural-crash.sh
+# Produces metadata.json consumed by watch-crash.sh and extract--guest-os--crach-info.sh
 # Side effects: temporary probe pod only; no VM lifecycle changes (runStrategy must be Manual)
 set -euxo pipefail; shopt -s inherit_errexit
 umask 077
@@ -104,8 +104,8 @@ ValidName "${ns}" namespace; ValidName "${vm}" VM; ValidName "${snapClass}" snap
 
 # Verify all required local tools are available (oc, python, jq, etc.)
 for tool in oc virtctl jq python3 sha256sum findmnt timeout realpath sync; do RequireCommand "${tool}"; done
-# Verify all helper scripts exist and are readable (will be invoked by watch-crash.sh and recover-natural-crash.sh)
-for helper in guest-agent.py reliability.py recover-natural-crash.sh collect-host-signals.sh parse-dump-header.sh; do
+# Verify all helper scripts exist and are readable (will be invoked by watch-crash.sh and extract--guest-os--crach-info.sh)
+for helper in guest-agent.py reliability.py extract--guest-os--crach-info.sh collect-host-signals.sh parse-dump-header.sh; do
   [[ -r "${scriptDir}/${helper}" ]] || Die "required helper missing: ${scriptDir}/${helper}"
 done
 # Verify guest configuration files exist (PowerShell script + JSON crash control settings)
@@ -310,7 +310,7 @@ jq -e 'if type=="array" then all(.[]; (.path|type)=="string" and (.size|type)=="
 # Ensure inventory is valid array (default to empty if null response)
 [[ "$(jq -r type <<<"${inventory}")" == array ]] || inventory='[]'
 
-# Write all validated state to metadata JSON file for consumption by watch-crash.sh and recover-natural-crash.sh
+# Write all validated state to metadata JSON file for consumption by watch-crash.sh and extract--guest-os--crach-info.sh
 # Schema version 2: defines all fields expected by watcher and extraction scripts
 typeset armedEpoch=''; armedEpoch="$(date -u +%s)"
 typeset temporary="${metadataFile}.tmp"
