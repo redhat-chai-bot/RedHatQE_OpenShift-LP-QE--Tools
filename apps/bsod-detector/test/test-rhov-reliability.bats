@@ -149,6 +149,7 @@ if [[ "${1:-}" == cp ]]; then
 fi
 case "$1" in
   apply) cat >/dev/null ;;
+  wait) exit 0 ;;
   get)
     case "$2" in
       volumesnapshot) printf true ;;
