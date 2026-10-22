@@ -12,7 +12,7 @@ These scripts manage the full BSOD detection and artifact extraction pipeline or
 |------|---------|
 | `preflight-rhov.sh` | Fail-closed pre-run validation; generates recovery metadata |
 | `watch-crash.sh` | Background BSOD detection & memory capture orchestration |
-| `recover-natural-crash.sh` | Offline NTFS artifact extraction from stopped guest disk |
+| `extract-crash-info.sh` | Offline NTFS artifact extraction from stopped guest disk |
 | `guest-agent.py` | Python CLI for QEMU Guest Agent communication (PowerShell tunnel) |
 | `reliability.py` | Artifact validation, decision logic, summary generation |
 | `collect-host-signals.sh` | Parse host-side KVM/Hyper-V crash correlation signals |
@@ -82,8 +82,8 @@ These scripts manage the full BSOD detection and artifact extraction pipeline or
 | `BSOD_DET__SNAPSHOT__CLASS` | No | Storage snapshot class |
 | `BSOD_DET__MEMORY__DUMP_PVC` | No | Memory dump PVC name |
 | `BSOD_DET__READY__TIMEOUT` | No | Watcher readiness timeout (default: 300s) |
-| `BSOD_DET__PREFLIGHT__TIMEOUT` | No | Positive-integer validation only; trigger script currently uses a fixed 1800s preflight timeout |
-| `BSOD_RECOVERY_IMAGE` | No | Digest-pinned guestfs image |
+| `BSOD_DET__PREFLIGHT__TIMEOUT` | No | Preflight timeout (default: 300s) |
+| `BSOD_DET__RECOVERY__IMAGE` | No | Digest-pinned guestfs image |
 
 **Example**:
 ```bash
@@ -108,7 +108,7 @@ BSOD_DET__CONFIRM_TARGET="win2022-vm-hjoshi1" \
 - Capture VNC screenshot, domain XML, host signals
 - Monitor dump write progress (virsh domstats)
 - Stop VM using `virtctl stop`
-- Call `recover-natural-crash.sh` for offline NTFS extraction
+- Call `extract-crash-info.sh` for offline NTFS extraction
 - Restart VM after recovery
 - Generate `evidence-summary.json`
 
@@ -136,7 +136,8 @@ virtctl memory-dump remove
 ```
 bsod-screenshot.png          (VNC screenshot at crash)
 vm-memory.elf.tar.gz         (primary memory artifact ~1.5GB compressed)
-domain.xml                   (libvirt domain configuration at crash)
+domain-bsod.xml              (libvirt domain XML captured at crash moment — state=crashed/paused)
+domain.xml                   (pre-crash backup captured in Phase 2b)
 host-signals.json            (host diagnostics)
 launcher-compute.log         (KVM launcher logs)
 parse-dump-header.json       (bugcheck code stub — elf2dmp disabled)
@@ -160,11 +161,11 @@ evidence-summary.json        (final pipeline verdict)
 - Recovery image must be digest-pinned (`@sha256:[64 hex chars]`)
 - Evidence volume kind must be `pvc`, `network`, or `csi` (hostPath/emptyDir forbidden)
 - Evidence storage ID must be stable (alphanumeric + safe chars)
-- Snapshot class, memory dump PVC both required
+- Snapshot class required; memory dump PVC is **auto-created if missing**
 - `BSOD_DET__COMMAND__TIMEOUT` must be a positive integer
 
 **2. Helper scripts present**
-- All pipeline helpers must exist and be readable: `guest-agent.py`, `reliability.py`, `recover-natural-crash.sh`, `collect-host-signals.sh`, `parse-dump-header.sh`
+- All pipeline helpers must exist and be readable: `guest-agent.py`, `reliability.py`, `extract-crash-info.sh`, `collect-host-signals.sh`, `parse-dump-header.sh`
 - Guest config inputs must exist: `configure-dumps.ps1`, `crash-control.json`
 
 **3. Evidence mount validation**
@@ -180,7 +181,11 @@ evidence-summary.json        (final pipeline verdict)
 - VM `runStrategy` must be `Manual` (not `Always` — would auto-restart after BSOD)
 - Exactly one running `virt-launcher` pod must exist for the VM
 - Guest PVC must be `Block` mode with storage class and size (required for snapshot recovery)
-- Memory dump PVC must be `Bound`, `Filesystem` mode, and different from the guest PVC
+- **Memory dump PVC auto-creation**: If the named memory-dump PVC doesn't exist, preflight creates it with:
+  - Size: **same as guest disk PVC** (dynamically detected)
+  - Storage class: **same as guest disk PVC** (dynamically detected)
+  - Access mode: `ReadWriteOnce`, `Filesystem` mode
+  - Waits up to 120 seconds for the new PVC to bind before continuing
 - Snapshot class driver must match the guest PVC provisioner
 
 **5. Recovery image capability probe**
@@ -227,7 +232,7 @@ Writes all collected VM/storage/config data needed by downstream scripts.
 
 ---
 
-### `recover-natural-crash.sh`
+### `extract-crash-info.sh`
 
 **Purpose**: Offline NTFS artifact extraction from stopped VM disk.
 
@@ -254,8 +259,12 @@ guestFS_sda3/
   Windows/System32/winevt/Logs/
     System.evtx          (Windows System EventLog — 8MB typical)
     Application.evtx     (Windows Application EventLog — 6MB typical)
-parse-dump-header.json   (stub — on-disk dumps blocked on KVM)
-events.json              (stub — optional parser is archived, not in the active script tree)
+  domain-guestfs.xml     (copy of domain-bsod.xml for forensic comparison)
+Minidump/                (always created; contains all files from C:\Windows\Minidump\)
+MEMORY.DMP               (extracted from DedicatedDump.sys via guestfish stdout streaming;
+                          zero-filled on VirtIO — viostor issue #1629; real content expected with SATA)
+parse-dump-header.json   (stub — on-disk dumps blocked on VirtIO; real on SATA)
+events.json              (stub — run extract-evtx.py offline)
 checksums.sha256         (manifest of evidence files)
 extraction.log           (guestfish extraction trace)
 extraction-summary.json  (artifact inventory and validation)
@@ -263,11 +272,10 @@ extraction-summary.json  (artifact inventory and validation)
 
 **Why no EventLogs/ symlink**: `.evtx` files are directly accessible under `guestFS_<partition>/Windows/System32/winevt/Logs/`. The archived parser is at `../../../archieve/src/scripts/host/extract-evtx.py`; its lookup files are maintained in `../../../src/data`.
 
-**Platform limitations (KVM + VirtIO Balloon)**:
-- `pagefile.sys` cannot be reliably created — Windows Server 2022 lazy pagefile allocation + balloon driver
-- `MEMORY.DMP` (on-disk): Not produced — `AutoReboot=0` prevents the boot that copies DedicatedDump.sys → MEMORY.DMP
-- `Minidump`: Not produced — requires pagefile which cannot be created
-- Intended primary memory artifact is `vm-memory.elf.tar.gz` from KubeVirt; capture depends on successful dump, PVC, export, and download stages.
+**Platform limitations (KVM + VirtIO)**:
+- `MEMORY.DMP` / `Minidump`: viostor (virtio-blk) and vioscsi (virtio-scsi) both fail in crash dump miniport mode — `StorPortGetUncachedExtension` returns error, no bytes written (viostor issue [#1629](https://github.com/virtio-win/kvm-guest-drivers-windows/issues/1629)). SATA (storahci.sys — inbox driver) is expected to work.
+- `pagefile.sys` IS pre-created in golden image (4GB via fsutil) — Minidump infrastructure is ready; currently blocked only by the StorPort VirtIO limitation above.
+- Invalid MEMORY.DMP (zero-filled) does NOT flip `ok=false` — only required artifact types affect the pipeline verdict. `vm-memory.elf.tar.gz` is always the primary dump artifact.
 
 **Environment Variables**:
 
@@ -432,7 +440,7 @@ trigger-bsod-intentional.sh
   │    ├─ CaptureHostSignals
   │    ├─ WaitDumpMonitor (non-fatal on timeout)
   │    ├─ StopVM
-  │    ├─ recover-natural-crash.sh
+  │    ├─ extract-crash-info.sh
   │    │    ├─ Verify PVC not attached to running VMI
   │    │    ├─ Create guestfs-ntfs pod
   │    │    ├─ Detect Windows partition dynamically
@@ -520,7 +528,7 @@ All variables follow Red Hat Chaos Team naming: `BSOD_DET__[<COMPONENT>__]<NAME>
 | `WaitDumpMonitor()` | Wait for background progress monitor to complete |
 | `StopVM()` | Stop VM via virtctl stop, poll until phase=Succeeded/Failed |
 | `RestartVM()` | Restart VM via virtctl start (unless --no-restart flag) |
-| `Recover()` | Invoke recover-natural-crash.sh for offline NTFS extraction |
+| `Recover()` | Invoke extract-crash-info.sh for offline NTFS extraction |
 | `CrashResponse()` | Main orchestration: screenshot → memory → host signals → dump monitor → stop → recover → restart → summary |
 
 #### Memory Dump Flow (CaptureMemory)
@@ -553,7 +561,8 @@ All variables follow Red Hat Chaos Team naming: `BSOD_DET__[<COMPONENT>__]<NAME>
 ```
 bsod-screenshot.png           BSOD screenshot at crash
 vm-memory.elf.tar.gz          Primary memory artifact (~1.5GB compressed)
-domain.xml                    Libvirt domain config at crash
+domain-bsod.xml               Libvirt domain XML captured at crash moment (state=crashed/paused)
+domain.xml                    Pre-crash backup from Phase 2b
 host-signals.json             Host KVM diagnostics
 launcher-compute.log          virt-launcher pod logs
 parse-dump-header.json        Bugcheck code (elf2dmp disabled by default)
@@ -564,7 +573,7 @@ evidence-summary.json         Final pipeline verdict
 
 ---
 
-### recover-natural-crash.sh
+### extract-crash-info.sh
 
 **Purpose**: Offline NTFS artifact extraction from stopped VM disk via guestfs-ntfs pod.
 
@@ -606,8 +615,11 @@ guestFS_sda3/
   Windows/System32/winevt/Logs/
     System.evtx          (Windows System EventLog)
     Application.evtx     (Windows Application EventLog)
-parse-dump-header.json        (Dump metadata, or stub if no on-disk dump)
-events.json                   (stub — archived parser is optional and not called by the active pipeline)
+  domain-guestfs.xml     (copy of domain-bsod.xml for forensic comparison with crash-time XML)
+Minidump/                (always created; all files from C:\Windows\Minidump\ if any)
+MEMORY.DMP               (streamed from DedicatedDump.sys via guestfish stdout; zero-filled on VirtIO)
+parse-dump-header.json        (Dump metadata, or stub with viostor #1629 explanation if zero-filled)
+events.json                   (Stub — run extract-evtx.py offline)
 checksums.sha256              (Manifest of all evidence files)
 extraction.log                (Guestfish extraction trace)
 extraction-summary.json       (Artifact inventory & validation)

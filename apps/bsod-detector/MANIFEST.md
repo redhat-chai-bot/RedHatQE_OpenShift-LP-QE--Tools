@@ -22,7 +22,7 @@ A catalog of what ships in this tool and why each file is kept.
 | `watch-crash.sh` | Primary KubeVirt entry point. Watch a Windows VM for a natural BSOD/freeze via the guest agent and collect evidence offline. |
 | `preflight-rhov.sh` | Fail-closed platform/guest/RBAC/storage validation plus a short-lived recovery-image capability probe before arming. |
 | `reliability.py` | Pure state-machine, disk-progress, artifact-signature, checksum, and summary primitives. |
-| `recover-natural-crash.sh` | Snapshot-based RHOV recovery using pre-stop metadata and direct durable streams. |
+| `extract-crash-info.sh` | Snapshot-based RHOV recovery using pre-stop metadata and direct durable streams. |
 | `collect-from-host.sh` | Libvirt host-side BSOD/freeze detector + offline dump recovery. |
 | `collect-host-signals.sh` | Capture host-side crash-correlation signals (split-lock `#AC`, Hyper-V enlightenments). |
 

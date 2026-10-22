@@ -68,54 +68,52 @@ Pipeline fails if `memory=true` or `minidumpCount>0` — ensures clean state bef
 
 ---
 
-## Platform Limitations (KVM + VirtIO Balloon)
+## Platform Limitations (KVM + VirtIO)
 
 | Artifact | Status | Reason |
 |---|---|---|
 | `System.evtx` | ✅ Extracted | Offline NTFS read via guestfish |
 | `Application.evtx` | ✅ Extracted | Offline NTFS read via guestfish |
 | `vm-memory.elf.tar.gz` | ✅ Captured | KubeVirt virtctl memory-dump — always works |
-| `MEMORY.DMP` (on-disk) | ❌ Not captured | `AutoReboot=0` prevents the boot that copies DedicatedDump.sys → MEMORY.DMP |
-| `Minidump/*.dmp` | ❌ Not captured | Requires `pagefile.sys` which cannot be created on KVM |
+| `MEMORY.DMP` (on-disk) | ⚠️ Zero-filled on VirtIO | viostor (virtio-blk) and vioscsi (virtio-scsi) fail in crash dump miniport mode — `StorPortGetUncachedExtension` returns error ([issue #1629](https://github.com/virtio-win/kvm-guest-drivers-windows/issues/1629)). Expected to work with SATA (storahci.sys — inbox driver) |
+| `Minidump/*.dmp` | ⚠️ Empty on VirtIO | Same StorPort miniport failure. Infrastructure ready (pagefile.sys pre-created in golden image); blocked only by VirtIO driver issue |
 | `vm-memory-windows.dmp` | ❌ Not in pipeline | elf2dmp conversion disabled (17GB — developer runs offline) |
 
-**Why pagefile.sys fails on KVM**:
-- Windows Server 2022 defers pagefile creation until memory pressure occurs
-- VMs with ≥16GB RAM on KVM rarely experience enough pressure to trigger eager pagefile creation
-- Multiple approaches attempted: `Set-ItemProperty`, `Win32_PageFileSetting` WMI, .NET Registry API — none resulted in `pagefile.sys` on disk after reboot
-- `DedicatedDumpFile` bypasses this entirely for crash dump staging
+**Why MEMORY.DMP is zero-filled on VirtIO**:
+- Windows crash dump miniport mode calls `StorPortGetUncachedExtension` for DMA buffer allocation
+- Both viostor (virtio-blk) and vioscsi (virtio-scsi) return `SP_RETURN_ERROR` at this call
+- Crash dump write is abandoned — DedicatedDump.sys pre-allocated but never written
+- This is a StorPort miniport architecture limitation, not a driver bug per se
+- vioscsi had equivalent fixes in PR #110 (2017) and PR #811 (2022); viostor was never audited
+- **Workaround**: `vm-memory.elf.tar.gz` (hypervisor-level ELF dump) provides equivalent forensic value; convert offline with `elf2dmp`
 
 ---
 
 ## Golden Image Requirements
 
-These settings must be applied **before sealing the VM image**. Requires one reboot after applying.
+Use the provided scripts to set up the VM **before sealing the image**. Requires one reboot after applying.
 
+**Scripts** (in `src/scripts/guest/`):
+
+| Script | When to run | Purpose |
+|---|---|---|
+| `golden-image-pre-reboot.ps1` | Before reboot | Install QGA + pvpanic, disable recovery, set crash dump registry, pre-allocate DedicatedDump.sys + pagefile.sys |
+| `golden-image-post-reboot.ps1` | After reboot | Verify all 8 settings are active in running kernel — must all pass before sealing |
+
+**Run as Administrator**:
 ```powershell
-# Run as Administrator on the VM to be sealed
-$cc = 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl'
-Set-ItemProperty $cc CrashDumpEnabled    7                          -Type DWord
-Set-ItemProperty $cc AutoReboot          0                          -Type DWord
-Set-ItemProperty $cc AlwaysKeepMemoryDump 1                         -Type DWord
-Set-ItemProperty $cc Overwrite           1                          -Type DWord
-Set-ItemProperty $cc LogEvent            1                          -Type DWord
-Set-ItemProperty $cc DumpFile            '%SystemRoot%\MEMORY.DMP'  -Type ExpandString
-Set-ItemProperty $cc MinidumpDir         '%SystemRoot%\Minidump'    -Type ExpandString
-Set-ItemProperty $cc DedicatedDumpFile   'C:\DedicatedDump.sys'     -Type ExpandString
+# Step 1 — pre-reboot setup (auto-reboots at end)
+.\golden-image-pre-reboot.ps1
 
-# Pre-allocate DedicatedDump.sys (RAM + 1MB)
-$size = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory + 1MB
-fsutil file createnew C:\DedicatedDump.sys $size
-
-# Disable automatic pagefile (VirtIO Balloon blocks it anyway)
-$cs = Get-CimInstance Win32_ComputerSystem
-Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $false }
+# Step 2 — post-reboot verification
+.\golden-image-post-reboot.ps1
+# All checks passed — safe to seal the golden image.
 ```
 
-Then reboot once before sealing:
-```bash
-virtctl stop <vm> -n <ns>
-virtctl start <vm> -n <ns>
+**Download note**: Use `.NET WebClient` instead of `curl.exe` or BITS (both fail in VM context):
+```powershell
+$wc = New-Object System.Net.WebClient
+$wc.DownloadFile("https://...", "C:\Temp\virtio-win.iso")
 ```
 
 **At pipeline runtime**, `configure-dumps.ps1` finds settings already in place → `rebootRequired=false` → preflight passes cleanly.

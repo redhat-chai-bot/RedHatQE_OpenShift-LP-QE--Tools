@@ -32,7 +32,7 @@ These components were used in earlier iterations of the BSOD detector (KVM/libvi
 
 **Why archived:** RHOV POC uses:
 - `watch-crash.sh` for real-time crash detection and memory capture
-- `recover-natural-crash.sh` for ODF snapshot-based offline extraction
+- `extract-crash-info.sh` for ODF snapshot-based offline extraction
 - `guest-agent.py` for QGA-based guest communication
 
 ### src/scripts/guest/
@@ -60,7 +60,7 @@ See the root-level README and `src/scripts/crash-injector/trigger-bsod-intention
 - `src/scripts/crash-injector/trigger-bsod-intentional.sh` — Orchestration
 - `src/scripts/host/preflight-rhov.sh` — Cluster validation
 - `src/scripts/host/watch-crash.sh` — Crash detection & memory capture
-- `src/scripts/host/recover-natural-crash.sh` — ODF extraction
+- `src/scripts/host/extract-crash-info.sh` — ODF extraction
 - `src/scripts/host/guest-agent.py` — QGA communication
 - `src/scripts/host/reliability.py` — Validation
 - `src/scripts/guest/configure-dumps.ps1` — Dump config

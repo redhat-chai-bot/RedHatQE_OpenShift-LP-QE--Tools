@@ -19,7 +19,8 @@
       "LogEvent": 1,
       "AutoReboot": 0,
       "MinidumpDir": "%SystemRoot%\\Minidump",
-      "DumpFile": "%SystemRoot%\\MEMORY.DMP"
+      "DumpFile": "%SystemRoot%\\MEMORY.DMP",
+      "DedicatedDumpFile": "C:\\DedicatedDump.sys"
     },
     "notes": "CrashDumpEnabled=7 (Automatic). pagefile.sys cannot be created on KVM with VirtIO Balloon; full physical memory captured via KubeVirt vm-memory.elf.tar.gz. AutoReboot=0 keeps VM frozen. Minidump and on-disk MEMORY.DMP are blocked on this platform."
   },
