@@ -233,7 +233,9 @@ Writes all collected VM/storage/config data needed by downstream scripts.
 
 **Usage**: `extract--guest-os--crash-info.sh --metadata PRE_STOP_METADATA.json`.
 The output directory comes only from metadata `.outputDir`; there is no extractor `--out` option.
-Directory aliases are resolved to an existing directory whose basename must match metadata `.runId`.
+The extractor preserves the provided path spelling and accepts existing directory aliases and arbitrary directory names.
+Metadata `.runId` is retained in the extraction summary, independently of the output directory name.
+Stale-output scanning follows a command-line directory alias, not symlinks encountered below it.
 Persistent storage identity (including identity-marker symlink protection) and stale-artifact checks still apply.
 Container `MODE=recover` takes the same metadata-only arguments; watcher/preflight and archived `MODE=extract` retain their own `--out` options.
 

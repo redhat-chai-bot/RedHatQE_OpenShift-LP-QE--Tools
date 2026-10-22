@@ -28,16 +28,14 @@ function Die () {
 }
 
 typeset tool=''
-for tool in oc jq python3 sha256sum findmnt timeout realpath; do
+for tool in oc jq python3 sha256sum findmnt timeout; do
     command -v "${tool}" 1> /dev/null || Die "Required tool missing: ${tool}"
 done
 
 typeset runId=''
 runId="$(jq -er .runId "${metadataFile}")"
 outDir="$(jq -er '.outputDir | select(type == "string" and length > 0)' "${metadataFile}")" || Die 'Metadata lacks a non-empty output directory.'
-outDir="$(realpath -e "${outDir}")" || Die "Output directory cannot be resolved: ${outDir}"
 [ -d "${outDir}" ] || Die "Output path is not a directory: ${outDir}"
-[ "${outDir##*/}" = "${runId}" ] || Die 'Output directory does not match metadata run ID.'
 
 typeset mountTarget='' storageId=''
 mountTarget="$(jq -er .evidenceMount.target "${metadataFile}")"
@@ -60,7 +58,7 @@ fi
 
 # Watcher-owned captures may exist, but extraction must not overwrite stale data.
 typeset stale=''
-stale="$(find "${outDir}" -mindepth 1 \( -name MEMORY.DMP -o -name Minidump -o -name 'guestFS_*' -o -name events.json -o -name extraction-summary.json -o -name checksums.sha256 \) -print -quit)"
+stale="$(find -H "${outDir}" -mindepth 1 \( -name MEMORY.DMP -o -name Minidump -o -name 'guestFS_*' -o -name events.json -o -name extraction-summary.json -o -name checksums.sha256 \) -print -quit)"
 [ -z "${stale}" ] || Die "Pre-existing extraction artifact rejected: ${stale}"
 
 typeset ns='' vm='' guestPvc='' image=''

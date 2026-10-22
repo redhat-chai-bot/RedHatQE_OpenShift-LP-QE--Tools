@@ -239,7 +239,7 @@ class RecoveryTests(unittest.TestCase):
     def test_all_die_messages_have_consistent_grammar(self):
         source = recovery.read_text()
         messages = re.findall(r'\bDie ([\'"])(.*?)\1', source)
-        self.assertEqual(len(messages), 13)
+        self.assertEqual(len(messages), 11)
         self.assertEqual(len(re.findall(r'\bDie\b', source)), len(messages) + 1)
         for quote, message in messages:
             with self.subTest(message=message):
@@ -259,6 +259,8 @@ class RecoveryTests(unittest.TestCase):
         source = recovery.read_text()
         self.assertNotIn('--out', source[:source.index('function Die')])
         self.assertNotIn('expectedOut', source)
+        self.assertNotIn('realpath', source)
+        self.assertNotIn('${outDir##*/}', source)
         self.assertNotIn('[ ! -L "${outDir}" ]', source)
         self.assertIn('[ -L "${marker}" ]', source)
         result = self.RunRecovery()
@@ -266,24 +268,79 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue((self.out / 'checksums.sha256').is_file())
         self.AssertDeleted()
 
-    def test_metadata_directory_aliases_resolve_to_run_target(self):
-        for isDifferentName in (False, True):
-            with self.subTest(isDifferentName=isDifferentName):
+    def test_metadata_output_spelling_and_independent_run_id(self):
+        for pathKind in ('parent-alias', 'leaf-alias', 'relative-alias', 'arbitrary-directory'):
+            with self.subTest(pathKind=pathKind):
                 case = RecoveryTests('test_success_contract')
                 case.setUp()
                 self.addCleanup(case.doCleanups)
                 alias = case.root / 'different alias'
-                alias.symlink_to(case.out if isDifferentName else case.root, target_is_directory=True)
-                case.metadata['outputDir'] = str(alias if isDifferentName else alias / case.out.name)
-                result = case.RunRecovery()
+                if pathKind == 'arbitrary-directory':
+                    case.out = case.out.rename(case.root / 'arbitrary capture directory')
+                    providedOut = str(case.out)
+                else:
+                    alias.symlink_to(case.root if pathKind == 'parent-alias' else case.out, target_is_directory=True)
+                    providedOut = (str(alias / case.out.name) if pathKind == 'parent-alias' else
+                                   './different alias' if pathKind == 'relative-alias' else str(alias) + '/.')
+                case.metadata['outputDir'] = providedOut
+                case.metadata['runId'] = 'summary-run-id'
+                pythonMock = case.bin / 'python3'
+                pythonMock.write_text(f'#!{sys.executable}\nimport json, os, sys\n'
+                                      'from pathlib import Path\n'
+                                      'with (Path(os.environ["MOCK_ROOT"]) / "python-argv.jsonl").open("a") as calls:\n'
+                                      '    calls.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                                      f'os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n')
+                pythonMock.chmod(0o755)
+                result = case.RunRecovery(cwd=case.root)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 summary = json.loads((case.out / 'extraction-summary.json').read_text())
                 self.assertTrue(summary['ok'])
+                self.assertEqual(summary['runId'], 'summary-run-id')
                 self.assertTrue((case.out / 'checksums.sha256').is_file())
+                copies = [call for call in case.Calls() if call[0] == 'cp']
+                self.assertTrue(copies)
+                self.assertTrue(all(call[2].startswith(providedOut + '/guestFS_') for call in copies))
+                pythonCalls = [json.loads(line) for line in (case.root / 'python-argv.jsonl').read_text().splitlines()]
+                summaryCall, = [call for call in pythonCalls if 'write-summary' in call]
+                self.assertEqual(summaryCall[summaryCall.index('--out') + 1], providedOut)
                 case.AssertDeleted()
 
+    def test_directory_alias_stale_outputs_rejected_before_writes(self):
+        for staleName in ('MEMORY.DMP', 'Minidump', 'guestFS_sda3', 'events.json',
+                          'extraction-summary.json', 'checksums.sha256'):
+            with self.subTest(staleName=staleName):
+                case = RecoveryTests('test_success_contract')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                alias = case.root / 'directory alias'
+                alias.symlink_to(case.out, target_is_directory=True)
+                case.metadata['outputDir'] = str(alias)
+                stale = case.out / staleName
+                stale.mkdir() if staleName in ('Minidump', 'guestFS_sda3') else stale.write_text('preserve-stale')
+                before = sorted(path.name for path in case.out.iterdir())
+                result = case.RunRecovery()
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('Pre-existing extraction artifact rejected:', result.stderr)
+                self.assertFalse(case.Calls())
+                self.assertEqual(sorted(path.name for path in case.out.iterdir()), before)
+                if stale.is_file():
+                    self.assertEqual(stale.read_text(), 'preserve-stale')
+                self.assertFalse((case.out / 'extraction.log').exists())
+
+    def test_stale_scan_does_not_follow_descendant_directory_alias(self):
+        external = self.root / 'external'
+        external.mkdir()
+        (external / 'events.json').write_text('external-stale')
+        (self.out / 'nested alias').symlink_to(external, target_is_directory=True)
+        result = self.RunRecovery('api-error')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('Cannot list VMIs', result.stderr)
+        self.assertNotIn('Pre-existing extraction artifact rejected:', result.stderr)
+        self.assertEqual([call[0] for call in self.Calls()], ['get'])
+        self.assertEqual((external / 'events.json').read_text(), 'external-stale')
+
     def test_invalid_metadata_output_rejected_before_oc_or_writes(self):
-        for scenario in ('missing', 'null', 'empty', 'non-string', 'missing-target', 'file', 'run-id'):
+        for scenario in ('missing', 'null', 'empty', 'non-string', 'missing-target', 'file'):
             with self.subTest(scenario=scenario):
                 case = RecoveryTests('test_success_contract')
                 case.setUp()
@@ -296,8 +353,6 @@ class RecoveryTests(unittest.TestCase):
                     case.metadata['outputDir'] = str(case.root / 'missing')
                 elif scenario == 'file':
                     case.metadata['outputDir'] = str(case.root / 'fixture.evtx')
-                else:
-                    case.metadata['runId'] = 'wrong-run'
                 before = {path.name: path.read_bytes() for path in case.out.iterdir()}
                 result = case.RunRecovery()
                 self.assertEqual(result.returncode, 1, result.stderr)
@@ -427,7 +482,7 @@ source "$1" "${@:2}"
 
     def test_unsafe_inputs_never_apply(self):
         for scenario in ('api-error', 'bad-json', 'attached-pvc', 'attached-dv', 'stale', 'mount', 'image',
-                         'image-contract', 'storage-kind', 'storage-id', 'run-id'):
+                         'image-contract', 'storage-kind', 'storage-id'):
             with self.subTest(scenario=scenario):
                 case = RecoveryTests('test_success_contract')
                 case.setUp()
@@ -445,8 +500,6 @@ source "$1" "${@:2}"
                     case.metadata['evidenceMount']['kind'] = 'temporary'
                 if scenario == 'storage-id':
                     case.metadata['evidenceMount']['id'] = ''
-                if scenario == 'run-id':
-                    case.metadata['runId'] = 'wrong-run'
                 result = case.RunRecovery(scenario)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
                 self.assertFalse(any(call[0] == 'apply' for call in case.Calls()))
