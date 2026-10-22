@@ -53,6 +53,8 @@ elif args[0] == 'apply':
     (root / 'helper-pod').touch()
     if scenario == 'apply-error':
         sys.exit(18)
+    if scenario == 'helper-absent':
+        (root / 'helper-pod').unlink()
 elif args[0] == 'wait':
     if '--for=delete' in args:
         if scenario in ('cleanup-wait-error', 'cleanup-wait-timeout'):
@@ -179,14 +181,20 @@ class RecoveryTests(unittest.TestCase):
         path = self.root / 'calls.jsonl'
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
-    def AssertDeleted(self):
+    def AssertDeleted(self, waitCount=None, count=None):
         deletes = [call for call in self.Calls() if call[0] == 'delete']
-        self.assertEqual(len(deletes), 1)
-        self.assertIn('--wait=false', deletes[0])
-        self.assertIn('--ignore-not-found', deletes[0])
+        if count is None:
+            count = 2 if (self.out / 'extraction-summary.json').exists() else 1
+        self.assertEqual(len(deletes), count)
+        for call in deletes:
+            self.assertEqual(call[1:3], ['-n', self.metadata['namespace']])
+            self.assertTrue(call[3].startswith('pod/guestfs-ntfs-'))
+            self.assertEqual(call[4:], ['--ignore-not-found'])
         waits = [call for call in self.Calls() if call[0] == 'wait' and '--for=delete' in call]
-        self.assertEqual(len(waits), 1)
-        self.assertIn('--timeout=60s', waits[0])
+        self.assertEqual(len(waits), count if waitCount is None else waitCount)
+        for call in waits:
+            self.assertEqual(call[1:4], deletes[0][1:4])
+            self.assertEqual(call[4:], ['--for=delete', '--timeout=60s'])
         self.assertFalse(any(call[:2] == ['get', 'pod'] for call in self.Calls()))
 
     def test_success_contract(self):
@@ -241,25 +249,22 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         rawCalls = [json.loads(line) for line in (self.root / 'oc-argv.jsonl').read_text().splitlines()]
         requests = [call for call in rawCalls if call[0].startswith('--request-timeout=')]
-        self.assertEqual(len(requests), 3)
-        wait, delete, deleted = requests
+        self.assertEqual(len(requests), 1)
+        wait, = requests
         self.assertEqual(wait[:2], ['--request-timeout=185s', 'wait'])
         self.assertIn('--timeout=180s', wait)
-        self.assertEqual(delete[:2], ['--request-timeout=65s', 'delete'])
-        self.assertIn('--wait=false', delete)
-        self.assertEqual(deleted[:2], ['--request-timeout=65s', 'wait'])
-        self.assertIn('--for=delete', deleted)
-        self.assertIn('--timeout=60s', deleted)
         self.assertTrue(all(call[0] in ('get', 'apply', 'exec', 'cp', '-n') for call in rawCalls if call not in requests))
-        discovery, = [call for call in rawCalls if call[0] == '-n']
+        discovery, = [call for call in rawCalls if call[:3] == ['-n', 'fixture-ns', 'exec']]
         self.assertEqual(discovery[:3], ['-n', 'fixture-ns', 'exec'])
         self.assertEqual(discovery[discovery.index('--') + 1:],
                          ['guestfish', '--ro', '-a', '/dev/vda', 'run', ':', 'list-filesystems'])
         deadlines = [json.loads(line) for line in (self.root / 'timeouts.jsonl').read_text().splitlines()]
-        self.assertEqual(len(deadlines), 3)
-        self.assertEqual(deadlines[0][:5], ['--signal=TERM', '--kill-after=5', '70', 'oc', '--request-timeout=65s'])
-        self.assertEqual(deadlines[1][:5], ['--signal=TERM', '--kill-after=5', '70', 'oc', '--request-timeout=65s'])
-        self.assertEqual(deadlines[2][:4], ['--signal=TERM', '--kill-after=5', '60', 'python3'])
+        self.assertEqual(len(deadlines), 1)
+        self.assertEqual(deadlines[0][:4], ['--signal=TERM', '--kill-after=5', '60', 'python3'])
+        cleanup = [call for call in rawCalls if call[:3] in
+                   (['-n', 'fixture-ns', 'delete'], ['-n', 'fixture-ns', 'wait'])]
+        self.assertEqual(len(cleanup), 4)
+        self.AssertDeleted()
         source = recovery.read_text()
         self.assertNotRegex(source, r'\bOc\b')
         self.assertNotIn('cmdTimeout', source)
@@ -405,7 +410,7 @@ class RecoveryTests(unittest.TestCase):
         summary = json.loads((target / 'extraction-summary.json').read_text())
         self.assertIn('memory', summary['missingRequiredArtifactTypes'])
         self.assertEqual(result.returncode, 1)
-        self.AssertDeleted()
+        self.AssertDeleted(count=2)
 
     def test_output_creation_failure_precedes_api_and_logs(self):
         target = self.root / 'denied output'
@@ -434,17 +439,39 @@ class RecoveryTests(unittest.TestCase):
                 self.assertFalse((case.out / 'extraction-summary.json').exists())
 
     def test_cleanup_absent_helper_is_idempotent_and_waited(self):
-        source = recovery.read_text()
-        cleanup = re.search(r'^function Cleanup \(\) \{\n.*?^\}', source, re.MULTILINE | re.DOTALL).group()
-        command = ('set -euxo pipefail; shopt -s inherit_errexit\n'
-                   'typeset -i hasPod=1\n'
-                   'typeset helperPod=fixture-pod ns=fixture-ns\n'
-                   + cleanup + '\nCleanup\nCleanup\n')
-        result = subprocess.run(['bash', '-c', command, 'absent-helper', str(self.out)], env=self.env,
-                                text=True, capture_output=True, timeout=10)
+        result = self.RunRecovery('helper-absent')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([call[0] for call in self.Calls()], ['delete', 'wait'])
         self.AssertDeleted()
+
+    def test_empty_helper_exit_trap_makes_no_cleanup_calls(self):
+        result = self.RunRecovery('api-error')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual([call[0] for call in self.Calls()], ['get'])
+        self.assertIn('Cleanup', result.stderr)
+        self.assertIn("'[' -z '' ']'", result.stderr)
+        self.assertFalse((self.root / 'helper-pod').exists())
+
+    def test_cleanup_error_replaces_original_failure_on_exit(self):
+        mock = self.bin / 'oc'
+        mock.write_text(mock.read_text().replace("scenario == 'cleanup-error'", "scenario == 'wait-error'"))
+        result = self.RunRecovery('wait-error')
+        self.assertEqual(result.returncode, 25, result.stderr)
+        self.assertIn('mock startup timeout', result.stderr)
+        self.assertIn('mock delete failure', result.stderr)
+        self.assertEqual([call[0] for call in self.Calls()], ['get', 'apply', 'wait', 'delete'])
+        self.assertTrue((self.root / 'helper-pod').exists())
+        self.assertFalse((self.out / 'extraction-summary.json').exists())
+
+    def test_cleanup_has_only_exit_trap_and_supplied_commands(self):
+        source = recovery.read_text()
+        self.assertNotIn('hasPod', source)
+        self.assertNotIn("trap 'exit 130' INT", source)
+        self.assertNotIn("trap 'exit 143' TERM", source)
+        self.assertEqual(re.findall(r'^trap .*$', source, re.MULTILINE), ['trap Cleanup EXIT'])
+        cleanup = re.search(r'^function Cleanup \(\) \{\n.*?^\}', source, re.MULTILINE | re.DOTALL).group()
+        self.assertNotIn('timeout --', cleanup)
+        self.assertNotIn('--wait=false', cleanup)
+        self.assertNotIn('--request-timeout', cleanup)
 
     def test_cleanup_wait_and_delete_failures_remain_visible(self):
         for scenario in ('cleanup-error', 'cleanup-wait-error', 'cleanup-wait-timeout'):
@@ -453,16 +480,17 @@ class RecoveryTests(unittest.TestCase):
                 case.setUp()
                 self.addCleanup(case.doCleanups)
                 result = case.RunRecovery(scenario)
-                self.assertEqual(result.returncode, 1, result.stderr)
-                case.AssertDeleted()
+                self.assertEqual(result.returncode, 25 if scenario == 'cleanup-error' else 28, result.stderr)
+                case.AssertDeleted(waitCount=1 if scenario == 'cleanup-error' else 2)
                 self.assertFalse((case.out / 'stage-errors.jsonl').exists())
                 self.assertFalse((case.out / 'extraction.log').exists())
                 self.assertIn('mock delete failure' if scenario == 'cleanup-error' else
                               'mock deletion wait failed', result.stderr)
 
-    def test_sigint_cleans_once(self):
+    def test_sigint_without_custom_trap_can_continue(self):
         result = self.RunRecovery('signal-int')
-        self.assertEqual(result.returncode, 130, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.out / 'extraction-summary.json').exists())
         self.AssertDeleted()
 
     def test_obsolete_storage_and_image_policy_is_not_consulted(self):
@@ -494,6 +522,30 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(json.loads((self.out / 'extraction-summary.json').read_text())['ok'])
         self.assertNotIn('--out', recover)
         self.AssertDeleted()
+
+    def test_watcher_reports_transient_cleanup_failure(self):
+        mock = self.bin / 'oc'
+        mock.write_text(mock.read_text().replace("elif args[0] == 'delete':",
+                        "elif args[0] == 'delete':\n"
+                        "    marker = root / 'delete-attempted'\n"
+                        "    if not marker.exists():\n"
+                        "        marker.touch()\n"
+                        "        print('mock transient deletion failure', file=sys.stderr)\n"
+                        "        sys.exit(25)"))
+        watcher = (hostDir / 'watch-crash.sh').read_text()
+        runTimed = re.search(r'^function RunTimed \(\) \{.*\}$', watcher, re.MULTILINE).group()
+        recover = re.search(r'^function Recover \(\) \{\n.*?^\}', watcher, re.MULTILINE | re.DOTALL).group()
+        self.meta.write_text(json.dumps(self.metadata))
+        command = ('set -euxo pipefail; shopt -s inherit_errexit\n'
+                   'typeset scriptDir="${1}" metadataFile="${2}" pipelineLog="${3}"\n'
+                   + runTimed + '\n' + recover + '\nRecover\n')
+        result = subprocess.run(['bash', '-c', command, 'watcher-fixture', str(hostDir),
+                                 str(self.meta), str(self.root / 'pipeline.log')],
+                                cwd=self.root, env=self.env, text=True, capture_output=True, timeout=10)
+        log = (self.root / 'pipeline.log').read_text()
+        self.assertIn('mock transient deletion failure', log)
+        self.AssertDeleted()
+        self.assertNotEqual(result.returncode, 0, log)
 
     def test_relative_repository_path_resolves_helpers(self):
         repoRoot = Path(__file__).resolve().parents[3]
@@ -580,9 +632,9 @@ source "$1" "${@:2}"
                 case.setUp()
                 self.addCleanup(case.doCleanups)
                 result = case.RunRecovery(scenario)
-                expected = {'wait-error': 19, 'no-guestfish': 20, 'exec-error': 27}.get(scenario, 1)
+                expected = {'wait-error': 19, 'no-guestfish': 20, 'exec-error': 27, 'cleanup-error': 25}.get(scenario, 1)
                 self.assertEqual(result.returncode, expected, result.stderr)
-                case.AssertDeleted()
+                case.AssertDeleted(waitCount=1 if scenario == 'cleanup-error' else None)
                 if scenario != 'cleanup-error':
                     self.assertFalse(list(case.out.glob('**/*.evtx')))
 
@@ -716,9 +768,9 @@ source "$1" "${@:2}"
         self.assertFalse(sentinel.exists())
         self.assertFalse(self.Calls())
 
-    def test_signal_cleans_once(self):
+    def test_sigterm_uses_default_signal_and_exit_cleanup(self):
         result = self.RunRecovery('signal')
-        self.assertEqual(result.returncode, 143, result.stderr)
+        self.assertEqual(result.returncode, -15, result.stderr)
         self.AssertDeleted()
         self.assertFalse((self.out / 'stage-errors.jsonl').exists())
 

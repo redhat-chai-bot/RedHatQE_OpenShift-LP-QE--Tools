@@ -61,23 +61,20 @@ typeset stale=''
 stale="$(find -H "${outDir}" -mindepth 1 \( -name MEMORY.DMP -o -name Minidump -o -name 'guestFS_*' -o -name events.json -o -name extraction-summary.json -o -name checksums.sha256 \) -print -quit)"
 [ -z "${stale}" ] || { : "Pre-existing extraction artifact rejected: ${stale}"; false; }
 
-typeset -i hasPod=0
 typeset helperPod='' container='libguestfs'
 
 function Cleanup () {
-    ((hasPod)) || return 0
-    hasPod=0
-    typeset -i status=0
-    timeout --signal=TERM --kill-after=5 70 oc --request-timeout=65s \
-        delete pod "${helperPod}" -n "${ns}" --ignore-not-found --wait=false || status=1
-    timeout --signal=TERM --kill-after=5 70 oc --request-timeout=65s \
-        wait pod "${helperPod}" -n "${ns}" --for=delete --timeout=60s || status=1
-    return "${status}"
+    [ -z "${helperPod}" ] || {
+        oc -n "${ns}" delete "pod/${helperPod}" \
+            --ignore-not-found
+        oc -n "${ns}" wait "pod/${helperPod}" \
+            --for=delete \
+            --timeout=60s
+    }
+    true
 }
 
 trap Cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
 function FindNTFS () {
     typeset output='' device='' fsType=''
@@ -122,7 +119,6 @@ attachedVmis="$(jq -r --arg pvc "${guestPVC}" '
 
 helperPod="guestfs-ntfs-$(date -u +%s)-$$"
 typeset guestfsImage="${BSOD_DET__GUESTFS__NTFS_IMAGE:-quay.io/konveyor/oadp-vmfr-access:latest}"
-hasPod=1
 jq -n --arg name "${helperPod}" --arg ns "${ns}" --arg image "${guestfsImage}" --arg pvc "${guestPVC}" '
   {
     apiVersion:"v1", kind:"Pod",

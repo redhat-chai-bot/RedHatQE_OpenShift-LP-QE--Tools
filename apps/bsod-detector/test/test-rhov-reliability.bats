@@ -229,9 +229,9 @@ write_elf_memory_fixture() {
   [ "$(jq -r '.missingRequiredArtifactTypes|length' "$summary")" -eq 0 ]
   [ ! -e "$EVIDENCE_ROOT/fixture-recovery-001/bsod-screenshot.png" ]
   grep -q '^-n fixture-ns exec .*guestfish --ro -a /dev/vda run : list-filesystems' "$OC_LOG"
-  grep -q '^delete pod ' "$OC_LOG"
-  ! grep -q '^delete pvc ' "$OC_LOG"
-  ! grep -q '^delete volumesnapshot ' "$OC_LOG"
+  [ "$(grep -c '^-n fixture-ns delete pod/guestfs-ntfs-.* --ignore-not-found$' "$OC_LOG")" -eq 2 ]
+  [ "$(grep -c '^-n fixture-ns wait pod/guestfs-ntfs-.* --for=delete --timeout=60s$' "$OC_LOG")" -eq 2 ]
+  ! grep -Eq '(^| )delete (pvc|volumesnapshot)( |/)' "$OC_LOG"
 }
 
 @test "recovery rejects stale output and unavailable guestfish without requiring storage metadata" {

@@ -243,6 +243,7 @@ It rejects stale extraction artifacts, but does not revalidate evidence-mount id
 Preflight's persistent-storage validation is unchanged; extraction no longer checks whether that mount changed afterwards.
 Container `MODE=recover` takes the same metadata-only arguments; watcher/preflight and archived `MODE=extract` retain their own `--out` options.
 Extraction inherits stdout/stderr (captured in `watcher.log` when called by the watcher); it creates no `extraction.log` or stage-error entries. Summary generation still reads an existing watcher-owned `stage-errors.jsonl`, without creating or modifying it.
+Cleanup uses the initialized helper name, native `oc delete --ignore-not-found` with its default wait behavior, then `oc wait --for=delete --timeout=60s`. Successful extraction calls cleanup explicitly and again on EXIT; there is no ownership flag or custom INT/TERM trap. The existing conditional caller can mask an initial cleanup failure if EXIT cleanup succeeds. Native cleanup errors can replace an earlier exit status, and custom signal-status guarantees no longer apply.
 
 **Responsibilities**:
 - Validate output path and preflight metadata integrity
