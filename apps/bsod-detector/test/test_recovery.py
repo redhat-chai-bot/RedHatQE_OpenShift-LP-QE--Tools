@@ -50,11 +50,20 @@ if args[0] == 'get':
         sys.exit(91)
 elif args[0] == 'apply':
     (root / 'pod.json').write_text(sys.stdin.read())
+    (root / 'helper-pod').touch()
     if scenario == 'apply-error':
         sys.exit(18)
 elif args[0] == 'wait':
-    if scenario == 'signal':
-        os.kill(os.getppid(), signal.SIGTERM)
+    if '--for=delete' in args:
+        if scenario in ('cleanup-wait-error', 'cleanup-wait-timeout'):
+            print('mock deletion wait failed: ' + scenario, file=sys.stderr)
+            sys.exit(28)
+        if (root / 'helper-pod').exists():
+            print('mock helper pod still exists', file=sys.stderr)
+            sys.exit(29)
+        sys.exit(0)
+    if scenario in ('signal', 'signal-int'):
+        os.kill(os.getppid(), signal.SIGINT if scenario == 'signal-int' else signal.SIGTERM)
         time.sleep(0.1)
     if scenario == 'wait-error':
         print('mock startup timeout', file=sys.stderr)
@@ -108,6 +117,7 @@ elif args[0] == 'delete':
     if scenario == 'cleanup-error':
         print('mock delete failure', file=sys.stderr)
         sys.exit(25)
+    (root / 'helper-pod').unlink(missing_ok=True)
 else:
     sys.exit(93)
 '''
@@ -172,7 +182,12 @@ class RecoveryTests(unittest.TestCase):
     def AssertDeleted(self):
         deletes = [call for call in self.Calls() if call[0] == 'delete']
         self.assertEqual(len(deletes), 1)
-        self.assertIn('--timeout=60s', deletes[0])
+        self.assertIn('--wait=false', deletes[0])
+        self.assertIn('--ignore-not-found', deletes[0])
+        waits = [call for call in self.Calls() if call[0] == 'wait' and '--for=delete' in call]
+        self.assertEqual(len(waits), 1)
+        self.assertIn('--timeout=60s', waits[0])
+        self.assertFalse(any(call[:2] == ['get', 'pod'] for call in self.Calls()))
 
     def test_success_contract(self):
         result = self.RunRecovery()
@@ -226,32 +241,36 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         rawCalls = [json.loads(line) for line in (self.root / 'oc-argv.jsonl').read_text().splitlines()]
         requests = [call for call in rawCalls if call[0].startswith('--request-timeout=')]
-        self.assertEqual(len(requests), 2)
-        wait, delete = requests
+        self.assertEqual(len(requests), 3)
+        wait, delete, deleted = requests
         self.assertEqual(wait[:2], ['--request-timeout=185s', 'wait'])
         self.assertIn('--timeout=180s', wait)
         self.assertEqual(delete[:2], ['--request-timeout=65s', 'delete'])
-        self.assertIn('--timeout=60s', delete)
+        self.assertIn('--wait=false', delete)
+        self.assertEqual(deleted[:2], ['--request-timeout=65s', 'wait'])
+        self.assertIn('--for=delete', deleted)
+        self.assertIn('--timeout=60s', deleted)
         self.assertTrue(all(call[0] in ('get', 'apply', 'exec', 'cp', '-n') for call in rawCalls if call not in requests))
         discovery, = [call for call in rawCalls if call[0] == '-n']
         self.assertEqual(discovery[:3], ['-n', 'fixture-ns', 'exec'])
         self.assertEqual(discovery[discovery.index('--') + 1:],
                          ['guestfish', '--ro', '-a', '/dev/vda', 'run', ':', 'list-filesystems'])
         deadlines = [json.loads(line) for line in (self.root / 'timeouts.jsonl').read_text().splitlines()]
-        self.assertEqual(len(deadlines), 2)
+        self.assertEqual(len(deadlines), 3)
         self.assertEqual(deadlines[0][:5], ['--signal=TERM', '--kill-after=5', '70', 'oc', '--request-timeout=65s'])
-        self.assertEqual(deadlines[1][:4], ['--signal=TERM', '--kill-after=5', '60', 'python3'])
+        self.assertEqual(deadlines[1][:5], ['--signal=TERM', '--kill-after=5', '70', 'oc', '--request-timeout=65s'])
+        self.assertEqual(deadlines[2][:4], ['--signal=TERM', '--kill-after=5', '60', 'python3'])
         source = recovery.read_text()
         self.assertNotRegex(source, r'\bOc\b')
         self.assertNotIn('cmdTimeout', source)
         self.assertNotIn('BSOD_DET__COMMAND__TIMEOUT', source)
         self.AssertDeleted()
 
-    def test_all_die_messages_have_consistent_grammar(self):
+    def test_direct_failure_breadcrumbs_replace_die(self):
         source = recovery.read_text()
-        messages = re.findall(r'\bDie ([\'"])(.*?)\1', source)
+        self.assertNotRegex(source, r'\bDie\b')
+        messages = re.findall(r': ([\'"])(.*?)\1', source)
         self.assertEqual(len(messages), 6)
-        self.assertEqual(len(re.findall(r'\bDie\b', source)), len(messages) + 1)
         for quote, message in messages:
             with self.subTest(message=message):
                 self.assertTrue(message[0].isupper())
@@ -268,7 +287,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_metadata_only_output_contract(self):
         source = recovery.read_text()
-        self.assertNotIn('--out', source[:source.index('function Die')])
+        self.assertNotIn('--out', source[:source.index("typeset tool=")])
         self.assertNotIn('expectedOut', source)
         self.assertNotIn('realpath', source)
         self.assertNotIn('${outDir##*/}', source)
@@ -354,7 +373,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual((external / 'events.json').read_text(), 'external-stale')
 
     def test_invalid_metadata_output_rejected_before_oc_or_writes(self):
-        for scenario in ('missing', 'null', 'empty', 'non-string', 'missing-target', 'file'):
+        for scenario in ('missing', 'null', 'empty', 'non-string', 'file'):
             with self.subTest(scenario=scenario):
                 case = RecoveryTests('test_success_contract')
                 case.setUp()
@@ -363,16 +382,94 @@ class RecoveryTests(unittest.TestCase):
                     del case.metadata['outputDir']
                 elif scenario in ('null', 'empty', 'non-string'):
                     case.metadata['outputDir'] = {'null': None, 'empty': '', 'non-string': 42}[scenario]
-                elif scenario == 'missing-target':
-                    case.metadata['outputDir'] = str(case.root / 'missing')
                 elif scenario == 'file':
                     case.metadata['outputDir'] = str(case.root / 'fixture.evtx')
                 before = {path.name: path.read_bytes() for path in case.out.iterdir()}
                 result = case.RunRecovery()
                 self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn('ERROR:', result.stderr)
+                self.assertIn('Cannot create output directory:' if scenario == 'file' else
+                              'Metadata lacks a non-empty string:', result.stderr)
                 self.assertFalse(case.Calls())
                 self.assertEqual({path.name: path.read_bytes() for path in case.out.iterdir()}, before)
+
+    def test_missing_output_directory_is_created_literally(self):
+        target = self.root / 'new output' / 'nested'
+        self.metadata['outputDir'] = str(target) + '/.'
+        result = self.RunRecovery()
+        self.assertTrue(target.is_dir(), result.stderr)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+        self.assertTrue(any(call[0] == 'apply' for call in self.Calls()))
+        copies = [call for call in self.Calls() if call[0] == 'cp']
+        self.assertTrue(copies)
+        self.assertTrue(all(call[2].startswith(self.metadata['outputDir'] + '/') for call in copies))
+        summary = json.loads((target / 'extraction-summary.json').read_text())
+        self.assertIn('memory', summary['missingRequiredArtifactTypes'])
+        self.assertEqual(result.returncode, 1)
+        self.AssertDeleted()
+
+    def test_output_creation_failure_precedes_api_and_logs(self):
+        target = self.root / 'denied output'
+        self.metadata['outputDir'] = str(target)
+        mock = self.bin / 'mkdir'
+        mock.write_text('#!/usr/bin/env bash\nprintf "mock permission denied\\n" 1>&2\nexit 73\n')
+        mock.chmod(0o755)
+        result = self.RunRecovery()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('mock permission denied', result.stderr)
+        self.assertFalse(target.exists())
+        self.assertFalse(self.Calls())
+
+    def test_unsafe_failures_exit_even_when_sourced_conditionally(self):
+        for scenario in ('api-error', 'bad-json', 'attached-pvc', 'attached-dv', 'metadata-error'):
+            with self.subTest(scenario=scenario):
+                case = RecoveryTests('test_success_contract')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                if scenario == 'metadata-error':
+                    case.metadata['guestPvc'] = False
+                case.meta.write_text(json.dumps(case.metadata))
+                command = 'if source "$1" --metadata "$2"; then :; fi; touch "$3"'
+                sentinel = case.root / 'must-not-continue'
+                result = subprocess.run(['bash', '-c', command, 'conditional-extractor', str(recovery),
+                                         str(case.meta), str(sentinel)], env=dict(case.env, SCENARIO=scenario),
+                                        text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertFalse(sentinel.exists())
+                self.assertFalse(any(call[0] == 'apply' for call in case.Calls()))
+
+    def test_cleanup_absent_helper_is_idempotent_and_waited(self):
+        source = recovery.read_text()
+        helpers = '\n'.join(re.search(r'^function ' + name + r' \(\) \{\n.*?^\}', source,
+                                      re.MULTILINE | re.DOTALL).group() for name in ('RecordError', 'Cleanup'))
+        command = ('set -euxo pipefail; shopt -s inherit_errexit\n'
+                   'typeset -i isClean=0 hasPod=1\n'
+                   'typeset helperPod=fixture-pod ns=fixture-ns scrName=extractor\n'
+                   'typeset extractLog="${1}/extraction.log" stageErrors="${1}/stage-errors.jsonl"\n'
+                   + helpers + '\nCleanup\nCleanup\n')
+        result = subprocess.run(['bash', '-c', command, 'absent-helper', str(self.out)], env=self.env,
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([call[0] for call in self.Calls()], ['delete', 'wait'])
+        self.AssertDeleted()
+
+    def test_cleanup_wait_and_delete_failures_are_recorded(self):
+        for scenario in ('cleanup-error', 'cleanup-wait-error', 'cleanup-wait-timeout'):
+            with self.subTest(scenario=scenario):
+                case = RecoveryTests('test_success_contract')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                result = case.RunRecovery(scenario)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                case.AssertDeleted()
+                errors = [json.loads(line) for line in (case.out / 'stage-errors.jsonl').read_text().splitlines()]
+                self.assertTrue(any(error['stage'] == 'cleanup' for error in errors))
+                self.assertIn('mock delete failure' if scenario == 'cleanup-error' else
+                              'mock deletion wait failed', (case.out / 'extraction.log').read_text())
+
+    def test_sigint_cleans_once(self):
+        result = self.RunRecovery('signal-int')
+        self.assertEqual(result.returncode, 130, result.stderr)
+        self.AssertDeleted()
 
     def test_obsolete_storage_and_image_policy_is_not_consulted(self):
         identity = self.root / 'identity'
@@ -451,7 +548,8 @@ source "$1" "${@:2}"
         self.metadata['guestPvc'] = ''
         result = self.RunRecovery(script=alias)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(f'{alias.stem}: ERROR:', result.stderr)
+        self.assertIn(f'typeset scrName={alias.name}', result.stderr)
+        self.assertIn('Metadata lacks a non-empty string: guestPvc', result.stderr)
         self.assertFalse(self.Calls())
 
     def test_metadata_guard_rejects_missing_or_unreadable_inputs(self):
@@ -532,7 +630,9 @@ source "$1" "${@:2}"
     def test_failed_apply_stops_before_extraction(self):
         result = self.RunRecovery('apply-error')
         self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([call[0] for call in self.Calls()], ['get', 'apply'])
+        self.assertEqual([call[0] for call in self.Calls()], ['get', 'apply', 'delete', 'wait'])
+        self.AssertDeleted()
+        self.assertFalse((self.root / 'helper-pod').exists())
 
     def test_unsafe_inputs_never_apply(self):
         for scenario in ('api-error', 'bad-json', 'attached-pvc', 'attached-dv', 'stale'):

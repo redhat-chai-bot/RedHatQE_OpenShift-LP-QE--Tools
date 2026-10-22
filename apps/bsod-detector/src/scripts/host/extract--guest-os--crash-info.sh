@@ -22,14 +22,13 @@ done
     exit 2
 }
 
-function Die () {
-    echo "${scrName%.sh}: ERROR: $*" 1>&2
-    exit 1
-}
-
 typeset tool=''
 for tool in oc jq python3 sha256sum timeout; do
-    command -v "${tool}" 1> /dev/null || Die "Required tool missing: ${tool}"
+    command -v "${tool}" 1> /dev/null || {
+        : "Required tool missing: ${tool}"
+        false
+        exit 1
+    }
 done
 
 typeset runId='' ns='' vm='' guestPVC='' field=''
@@ -38,15 +37,15 @@ for field in "${!fieldArr[@]}"; do
     typeset -n fieldRef="${field}"
     fieldRef="$(jq -er --arg key "${fieldArr[${field}]}" \
         '.[$key] | select((type == "string") and (length > 0))' "${metadataFile}")" ||
-        Die "Metadata lacks a non-empty string: ${fieldArr[${!fieldRef}]}"
+        { : "Metadata lacks a non-empty string: ${fieldArr[${!fieldRef}]}"; false; exit 1; }
 done
 unset -n fieldRef
-[ -d "${outDir}" ] || Die "Output path is not a directory: ${outDir}"
+mkdir -p "${outDir}" || { : "Cannot create output directory: ${outDir}"; false; exit 1; }
 
 # Watcher-owned captures may exist, but extraction must not overwrite stale data.
 typeset stale=''
 stale="$(find -H "${outDir}" -mindepth 1 \( -name MEMORY.DMP -o -name Minidump -o -name 'guestFS_*' -o -name events.json -o -name extraction-summary.json -o -name checksums.sha256 \) -print -quit)"
-[ -z "${stale}" ] || Die "Pre-existing extraction artifact rejected: ${stale}"
+[ -z "${stale}" ] || { : "Pre-existing extraction artifact rejected: ${stale}"; false; exit 1; }
 
 typeset stageErrors="${outDir}/stage-errors.jsonl"
 touch "${stageErrors}"
@@ -55,7 +54,7 @@ typeset extractLog="${outDir}/extraction.log"
 : 1> "${extractLog}"
 chmod 0600 "${extractLog}"
 typeset -i hasPod=0 isClean=0
-typeset pod='' container='libguestfs'
+typeset helperPod='' container='libguestfs'
 
 function RecordError () {
     typeset stage="${1:?}" at=''
@@ -72,14 +71,16 @@ function Cleanup () {
     isClean=1
     typeset -i status=0
     if ((hasPod)); then
-        if oc get pod "${pod}" -n "${ns}" 1> /dev/null; then
-            # Allow the 60s deletion wait to finish before the transport/process deadlines.
-            timeout --signal=TERM --kill-after=5 70 oc --request-timeout=65s \
-                delete pod "${pod}" -n "${ns}" --wait=true --timeout=60s 1>> "${extractLog}" 2>&1 || {
-                RecordError cleanup "failed to delete guestfs-ntfs pod ${pod}"
-                status=1
-            }
-        fi
+        timeout --signal=TERM --kill-after=5 70 oc --request-timeout=65s \
+            delete pod "${helperPod}" -n "${ns}" --ignore-not-found --wait=false 1>> "${extractLog}" 2>&1 || {
+            RecordError cleanup "failed to delete guestfs-ntfs pod ${helperPod}"
+            status=1
+        }
+        timeout --signal=TERM --kill-after=5 70 oc --request-timeout=65s \
+            wait pod "${helperPod}" -n "${ns}" --for=delete --timeout=60s 1>> "${extractLog}" 2>&1 || {
+            RecordError cleanup "failed waiting for guestfs-ntfs pod ${helperPod} deletion"
+            status=1
+        }
         hasPod=0
     fi
     return "${status}"
@@ -105,7 +106,7 @@ function FindNTFS () {
         fi
     done 0< <(
         oc -n "${ns}" exec \
-            "${pod}" \
+            "${helperPod}" \
             -c "${container}" \
             -- \
             guestfish \
@@ -121,12 +122,20 @@ function FindNTFS () {
 
 # Uncertain attachment state must block extraction, including DataVolume references.
 typeset vmiJson='' attachedVmis=''
-vmiJson="$(oc get vmi -n "${ns}" -o json)" || Die "Cannot list VMIs in namespace ${ns} — API error prevents safe PVC attachment verification."
+vmiJson="$(oc get vmi -n "${ns}" -o json)" || {
+    : "Cannot list VMIs in namespace ${ns} — API error prevents safe PVC attachment verification."
+    false
+    exit 1
+}
 attachedVmis="$(jq -r --arg pvc "${guestPVC}" '
   .items[] | select(
     (.status.phase == "Running") and
     (.spec.volumes // [] | map(.persistentVolumeClaim.claimName // "", .dataVolume.name // "") | any(. == $pvc))
-  ) | .metadata.name' 0<<<"${vmiJson}")" || Die 'Cannot parse VMI list — PVC attachment state uncertain.'
+  ) | .metadata.name' 0<<<"${vmiJson}")" || {
+    : 'Cannot parse VMI list — PVC attachment state uncertain.'
+    false
+    exit 1
+}
 if [ -n "${attachedVmis}" ]; then
     RecordError extraction 'source PVC is attached to a VMI (direct or DataVolume); cannot safely mount'
     exit 1
@@ -134,9 +143,10 @@ fi
 
 typeset suffix=''
 suffix="$(date -u +%s)-$$"
-pod="guestfs-ntfs-${suffix}"
+helperPod="guestfs-ntfs-${suffix}"
 typeset guestfsImage="${BSOD_DET__GUESTFS__NTFS_IMAGE:-quay.io/konveyor/oadp-vmfr-access:latest}"
-jq -n --arg name "${pod}" --arg ns "${ns}" --arg image "${guestfsImage}" --arg pvc "${guestPVC}" '
+hasPod=1
+jq -n --arg name "${helperPod}" --arg ns "${ns}" --arg image "${guestfsImage}" --arg pvc "${guestPVC}" '
   {
     apiVersion:"v1", kind:"Pod",
     metadata:{name:$name,namespace:$ns,labels:{app:"bsod-guestfs-extraction"}},
@@ -167,12 +177,11 @@ jq -n --arg name "${pod}" --arg ns "${ns}" --arg image "${guestfsImage}" --arg p
     }
   }' | oc apply -f - 1>> "${extractLog}"
 
-hasPod=1
-oc --request-timeout=185s wait pod "${pod}" -n "${ns}" --for=jsonpath='{.status.phase}'=Running --timeout=180s 1>> "${extractLog}" 2>&1 || {
-    RecordError extraction-pod "guestfs-ntfs pod '${pod}' startup timed out"
+oc --request-timeout=185s wait pod "${helperPod}" -n "${ns}" --for=jsonpath='{.status.phase}'=Running --timeout=180s 1>> "${extractLog}" 2>&1 || {
+    RecordError extraction-pod "guestfs-ntfs pod '${helperPod}' startup timed out"
     exit 1
 }
-oc exec -n "${ns}" "${pod}" -c "${container}" -- \
+oc exec -n "${ns}" "${helperPod}" -c "${container}" -- \
     guestfish --ro -a /dev/vda run : list-filesystems 1>> "${extractLog}" 2>&1 || {
     RecordError extraction-pod 'guestfish not available or block device not accessible'
     exit 1
@@ -204,7 +213,7 @@ for ntfsPart in "${ntfsArr[@]}"; do
         tempArr+=("${podTemp}")
     done
     batchArr+=(: umount-all)
-    oc exec -n "${ns}" "${pod}" -c "${container}" -- \
+    oc exec -n "${ns}" "${helperPod}" -c "${container}" -- \
         guestfish "${batchArr[@]}" 1>> "${extractLog}" 2>&1 || true
 
     typeset -i index=0
@@ -213,13 +222,13 @@ for ntfsPart in "${ntfsArr[@]}"; do
         index+=1
         typeset dest="${outDir}/guestFS_${partId}${filePath}"
         mkdir -p "${dest%/*}"
-        if oc cp "${ns}/${pod}:${podTemp}" "${dest}" -c "${container}" 2>> "${extractLog}" && [ -s "${dest}" ]; then
+        if oc cp "${ns}/${helperPod}:${podTemp}" "${dest}" -c "${container}" 2>> "${extractLog}" && [ -s "${dest}" ]; then
             chmod 0600 "${dest}"
             hasLogs=1
         else
             rm -f "${dest}" || true
         fi
-        oc exec -n "${ns}" "${pod}" -c "${container}" -- rm -f "${podTemp}" || true
+        oc exec -n "${ns}" "${helperPod}" -c "${container}" -- rm -f "${podTemp}" || true
     done
     if ((hasLogs)); then
         break
