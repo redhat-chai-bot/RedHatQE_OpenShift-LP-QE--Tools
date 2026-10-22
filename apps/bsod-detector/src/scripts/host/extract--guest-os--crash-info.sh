@@ -95,17 +95,19 @@ trap 'OnSignal 130' INT
 trap 'OnSignal 143' TERM
 
 function FindNTFS () {
-    typeset output='' device='' fsType=''
-    output="$(
-        oc exec -n "${ns}" "${pod}" -c "${container}" -- \
-            guestfish --ro -a /dev/vda run : list-filesystems 2>> "${extractLog}"
-    )" || return 1
+    typeset device='' fsType=''
+    typeset -i producerPid=0
     typeset -a partArr=()
     while IFS=': ' read -r device fsType; do
         if [ -n "${device}" ] && [ "${fsType}" = ntfs ]; then
             partArr+=("${device}")
         fi
-    done 0<<< "${output}"
+    done 0< <(
+        oc -n "${ns}" exec "${pod}" -c "${container}" -- \
+            guestfish --ro -a /dev/vda run : list-filesystems 2>> "${extractLog}"
+    )
+    producerPid=$!
+    wait "${producerPid}" || return 1
     ((${#partArr[@]})) || return 1
     printf '%s\n' "${partArr[@]}"
     return 0

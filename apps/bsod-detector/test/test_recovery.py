@@ -23,6 +23,9 @@ with (root / 'oc-argv.jsonl').open('a') as calls:
     calls.write(json.dumps(args) + '\n')
 if args[0].startswith('--request-timeout='):
     args.pop(0)
+if args[:1] == ['-n']:
+    namespace = args[1]
+    args = [args[2], '-n', namespace, *args[3:]]
 with (root / 'calls.jsonl').open('a') as calls:
     calls.write(json.dumps(args) + '\n')
 scenario = os.environ.get('SCENARIO', '')
@@ -229,7 +232,11 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn('--timeout=180s', wait)
         self.assertEqual(delete[:2], ['--request-timeout=65s', 'delete'])
         self.assertIn('--timeout=60s', delete)
-        self.assertTrue(all(call[0] in ('get', 'apply', 'exec', 'cp') for call in rawCalls if call not in requests))
+        self.assertTrue(all(call[0] in ('get', 'apply', 'exec', 'cp', '-n') for call in rawCalls if call not in requests))
+        discovery, = [call for call in rawCalls if call[0] == '-n']
+        self.assertEqual(discovery[:3], ['-n', 'fixture-ns', 'exec'])
+        self.assertEqual(discovery[discovery.index('--') + 1:],
+                         ['guestfish', '--ro', '-a', '/dev/vda', 'run', ':', 'list-filesystems'])
         deadlines = [json.loads(line) for line in (self.root / 'timeouts.jsonl').read_text().splitlines()]
         self.assertEqual(len(deadlines), 2)
         self.assertEqual(deadlines[0][:5], ['--signal=TERM', '--kill-after=5', '70', 'oc', '--request-timeout=65s'])
@@ -505,7 +512,11 @@ source "$1" "${@:2}"
 
     def test_find_ntfs_status_in_conditional_context(self):
         helper = re.search(r'^function FindNTFS \(\) \{\n.*?^\}', recovery.read_text(), re.MULTILINE | re.DOTALL).group()
-        for scenario in ('', 'discovery-partial-error', 'no-ntfs', 'empty-filesystems'):
+        self.assertIn('done 0< <(\n        oc -n "${ns}" exec', helper)
+        self.assertNotIn('output=', helper)
+        self.assertNotIn('<<<', helper)
+        self.assertIn('producerPid=$!\n    wait "${producerPid}" || return 1', helper)
+        for scenario in ('', 'discovery-error', 'discovery-partial-error', 'no-ntfs', 'empty-filesystems'):
             with self.subTest(scenario=scenario):
                 (self.root / 'probe-done').touch()
                 command = ('set -euxo pipefail; shopt -s inherit_errexit\n'
@@ -515,6 +526,8 @@ source "$1" "${@:2}"
                                         env=dict(self.env, SCENARIO=scenario), text=True, capture_output=True, timeout=10)
                 self.assertEqual(result.returncode, 0 if not scenario else 1, result.stderr)
                 self.assertEqual(result.stdout, '/dev/sda2\n/dev/sda3\n/dev/sda4\n' if not scenario else '')
+                if scenario.startswith('discovery-'):
+                    self.assertIn('mock discovery failure', (self.root / 'discovery.log').read_text())
 
     def test_failed_apply_stops_before_extraction(self):
         result = self.RunRecovery('apply-error')
