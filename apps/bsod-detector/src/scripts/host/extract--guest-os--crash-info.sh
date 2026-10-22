@@ -28,50 +28,24 @@ function Die () {
 }
 
 typeset tool=''
-for tool in oc jq python3 sha256sum findmnt timeout; do
+for tool in oc jq python3 sha256sum timeout; do
     command -v "${tool}" 1> /dev/null || Die "Required tool missing: ${tool}"
 done
 
 typeset runId=''
-runId="$(jq -er .runId "${metadataFile}")"
+runId="$(jq -er '.runId | select(type == "string" and length > 0)' "${metadataFile}")" || Die 'Metadata lacks a non-empty run ID.'
 outDir="$(jq -er '.outputDir | select(type == "string" and length > 0)' "${metadataFile}")" || Die 'Metadata lacks a non-empty output directory.'
 [ -d "${outDir}" ] || Die "Output path is not a directory: ${outDir}"
-
-typeset mountTarget='' storageId=''
-mountTarget="$(jq -er .evidenceMount.target "${metadataFile}")"
-case "$(jq -r .evidenceMount.kind "${metadataFile}")" in
-    (pvc|network|csi) ;;
-    (*) Die 'Metadata does not prove persistent evidence volume kind.';;
-esac
-[ -n "$(jq -r .evidenceMount.id "${metadataFile}")" ] || Die 'Metadata lacks stable evidence storage ID.'
-storageId="$(jq -er .evidenceMount.id "${metadataFile}")"
-typeset marker="${mountTarget}/.bsod-storage-identity"
-
-# An identity marker permits the preflight test/dev storage contract.
-if [ ! -f "${marker}" ] || [ -L "${marker}" ] || [ "$(0< "${marker}")" != "${storageId}" ]; then
-    typeset mountJson='' actualMount='' expectedMount=''
-    mountJson="$(timeout --signal=TERM --kill-after=5 10 findmnt -J -M "${mountTarget}" -o TARGET,SOURCE,FSTYPE,MAJ:MIN)" || Die 'Validated evidence mount is no longer mounted.'
-    actualMount="$(jq -c '.filesystems[0] | {target:.target,source:.source,fsType:.fstype,device:.["maj:min"]}' 0<<<"${mountJson}")"
-    expectedMount="$(jq -c '.evidenceMount | {target,source,fsType,device}' "${metadataFile}")"
-    [ "${actualMount}" = "${expectedMount}" ] || Die "Evidence mount identity changed: expected ${expectedMount}, got ${actualMount}"
-fi
 
 # Watcher-owned captures may exist, but extraction must not overwrite stale data.
 typeset stale=''
 stale="$(find -H "${outDir}" -mindepth 1 \( -name MEMORY.DMP -o -name Minidump -o -name 'guestFS_*' -o -name events.json -o -name extraction-summary.json -o -name checksums.sha256 \) -print -quit)"
 [ -z "${stale}" ] || Die "Pre-existing extraction artifact rejected: ${stale}"
 
-typeset ns='' vm='' guestPvc='' image=''
-ns="$(jq -er .namespace "${metadataFile}")"
-vm="$(jq -er .vm "${metadataFile}")"
-guestPvc="$(jq -er .guestPvc "${metadataFile}")"
-image="$(jq -er .recoveryImage "${metadataFile}")"
-typeset field=''
-for field in snapshotClass storageClass storageSize volumeMode armedEpoch; do
-    jq -er ".${field}" "${metadataFile}" 1> /dev/null
-done
-jq -c .preCrashInventory "${metadataFile}" 1> /dev/null
-{ [[ "${image}" =~ @sha256:[0-9a-fA-F]{64}$ ]] && [ "$(jq -r .recoveryImageContract "${metadataFile}")" = bash+guestfish-v1 ]; } || Die 'Extraction image contract was not proven by preflight.'
+typeset ns='' vm='' guestPvc=''
+ns="$(jq -er '.namespace | select(type == "string" and length > 0)' "${metadataFile}")" || Die 'Metadata lacks a non-empty namespace.'
+vm="$(jq -er '.vm | select(type == "string" and length > 0)' "${metadataFile}")" || Die 'Metadata lacks a non-empty VM name.'
+guestPvc="$(jq -er '.guestPvc | select(type == "string" and length > 0)' "${metadataFile}")" || Die 'Metadata lacks a non-empty guest PVC.'
 
 typeset stageErrors="${outDir}/stage-errors.jsonl"
 touch "${stageErrors}"

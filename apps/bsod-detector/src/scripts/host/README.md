@@ -236,7 +236,9 @@ The output directory comes only from metadata `.outputDir`; there is no extracto
 The extractor preserves the provided path spelling and accepts existing directory aliases and arbitrary directory names.
 Metadata `.runId` is retained in the extraction summary, independently of the output directory name.
 Stale-output scanning follows a command-line directory alias, not symlinks encountered below it.
-Persistent storage identity (including identity-marker symlink protection) and stale-artifact checks still apply.
+The extractor needs only `runId`, `outputDir`, `namespace`, `vm` and `guestPvc` metadata fields.
+It rejects stale extraction artifacts, but does not revalidate evidence-mount identity or preflight-only storage/image fields.
+Preflight's persistent-storage validation is unchanged; extraction no longer checks whether that mount changed afterwards.
 Container `MODE=recover` takes the same metadata-only arguments; watcher/preflight and archived `MODE=extract` retain their own `--out` options.
 
 **Responsibilities**:

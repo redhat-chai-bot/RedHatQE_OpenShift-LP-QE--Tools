@@ -239,7 +239,7 @@ class RecoveryTests(unittest.TestCase):
     def test_all_die_messages_have_consistent_grammar(self):
         source = recovery.read_text()
         messages = re.findall(r'\bDie ([\'"])(.*?)\1', source)
-        self.assertEqual(len(messages), 11)
+        self.assertEqual(len(messages), 10)
         self.assertEqual(len(re.findall(r'\bDie\b', source)), len(messages) + 1)
         for quote, message in messages:
             with self.subTest(message=message):
@@ -247,7 +247,7 @@ class RecoveryTests(unittest.TestCase):
                 if ': ' not in message:
                     self.assertTrue(message.endswith('.'))
         self.assertIn(('"', 'Required tool missing: ${tool}'), messages)
-        self.assertIn(("'", 'Metadata lacks stable evidence storage ID.'), messages)
+        self.assertIn(("'", 'Metadata lacks a non-empty guest PVC.'), messages)
 
     def test_relative_host_path_resolves_helpers(self):
         result = self.RunRecovery(script=f'./{recovery.name}', cwd=hostDir)
@@ -262,7 +262,10 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIn('realpath', source)
         self.assertNotIn('${outDir##*/}', source)
         self.assertNotIn('[ ! -L "${outDir}" ]', source)
-        self.assertIn('[ -L "${marker}" ]', source)
+        for removed in ('evidenceMount', 'storageId', 'marker', 'findmnt', 'recoveryImage',
+                        'snapshotClass', 'storageClass', 'storageSize', 'volumeMode',
+                        'armedEpoch', 'preCrashInventory'):
+            self.assertNotIn(removed, source)
         result = self.RunRecovery()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.out / 'checksums.sha256').is_file())
@@ -360,16 +363,19 @@ class RecoveryTests(unittest.TestCase):
                 self.assertFalse(case.Calls())
                 self.assertEqual({path.name: path.read_bytes() for path in case.out.iterdir()}, before)
 
-    def test_marker_symlink_still_requires_mount_identity(self):
+    def test_obsolete_storage_and_image_policy_is_not_consulted(self):
         identity = self.root / 'identity'
         self.marker.rename(identity)
         self.marker.symlink_to(identity)
         self.metadata['evidenceMount']['source'] = 'other:/mount'
+        self.metadata['evidenceMount']['kind'] = 'temporary'
+        self.metadata['evidenceMount']['id'] = ''
+        self.metadata['recoveryImage'] = 'unused-unpinned-image'
+        self.metadata['recoveryImageContract'] = 'unused-contract'
+        (self.bin / 'findmnt').write_text('#!/bin/sh\nexit 99\n')
         result = self.RunRecovery()
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn('Evidence mount identity changed:', result.stderr)
-        self.assertFalse(self.Calls())
-        self.assertFalse((self.out / 'extraction.log').exists())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.AssertDeleted()
 
     def test_watcher_recovery_uses_metadata_only(self):
         watcher = (hostDir / 'watch-crash.sh').read_text()
@@ -431,7 +437,7 @@ source "$1" "${@:2}"
                 result = self.RunRecovery('', *args, script=alias)
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertIn(message, result.stdout if expected == 0 else result.stderr)
-        self.metadata['recoveryImage'] = 'unpinned'
+        self.metadata['guestPvc'] = ''
         result = self.RunRecovery(script=alias)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(f'{alias.stem}: ERROR:', result.stderr)
@@ -481,25 +487,13 @@ source "$1" "${@:2}"
         self.assertEqual([call[0] for call in self.Calls()], ['get', 'apply'])
 
     def test_unsafe_inputs_never_apply(self):
-        for scenario in ('api-error', 'bad-json', 'attached-pvc', 'attached-dv', 'stale', 'mount', 'image',
-                         'image-contract', 'storage-kind', 'storage-id'):
+        for scenario in ('api-error', 'bad-json', 'attached-pvc', 'attached-dv', 'stale'):
             with self.subTest(scenario=scenario):
                 case = RecoveryTests('test_success_contract')
                 case.setUp()
                 self.addCleanup(case.doCleanups)
                 if scenario == 'stale':
                     (case.out / 'events.json').write_text('stale')
-                if scenario == 'mount':
-                    case.marker.unlink()
-                    case.metadata['evidenceMount']['source'] = 'other:/mount'
-                if scenario == 'image':
-                    case.metadata['recoveryImage'] = 'registry.test/unpinned'
-                if scenario == 'image-contract':
-                    case.metadata['recoveryImageContract'] = 'unsupported'
-                if scenario == 'storage-kind':
-                    case.metadata['evidenceMount']['kind'] = 'temporary'
-                if scenario == 'storage-id':
-                    case.metadata['evidenceMount']['id'] = ''
                 result = case.RunRecovery(scenario)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
                 self.assertFalse(any(call[0] == 'apply' for call in case.Calls()))
@@ -509,10 +503,33 @@ source "$1" "${@:2}"
                 if scenario == 'bad-json':
                     self.assertIn('Cannot parse VMI list — PVC attachment state uncertain.', result.stderr)
 
-    def test_native_mount_contract(self):
+    def test_only_consumed_metadata_fields_are_required(self):
+        self.metadata = {key: self.metadata[key] for key in
+                         ('runId', 'outputDir', 'namespace', 'vm', 'guestPvc')}
         self.marker.unlink()
+        (self.bin / 'findmnt').unlink()
         result = self.RunRecovery()
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.AssertDeleted()
+
+    def test_malformed_required_fields_fail_before_mutation(self):
+        for field, label in (('runId', 'run ID'), ('namespace', 'namespace'),
+                             ('vm', 'VM name'), ('guestPvc', 'guest PVC')):
+            for value in ('missing', None, '', 42, [], {}):
+                with self.subTest(field=field, value=value):
+                    case = RecoveryTests('test_success_contract')
+                    case.setUp()
+                    self.addCleanup(case.doCleanups)
+                    if value == 'missing':
+                        del case.metadata[field]
+                    else:
+                        case.metadata[field] = value
+                    before = {path.name: path.read_bytes() for path in case.out.iterdir()}
+                    result = case.RunRecovery()
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn(f'Metadata lacks a non-empty {label}.', result.stderr)
+                    self.assertFalse(case.Calls())
+                    self.assertEqual({path.name: path.read_bytes() for path in case.out.iterdir()}, before)
 
     def test_signal_cleans_once(self):
         result = self.RunRecovery('signal')
