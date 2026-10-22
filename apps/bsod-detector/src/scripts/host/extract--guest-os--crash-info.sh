@@ -77,8 +77,7 @@ function Cleanup () {
 trap Cleanup EXIT
 
 function FindNTFS () {
-    typeset output='' device='' fsType=''
-    output="$()" || return 1
+    typeset device='' fsType=''
     typeset -a partArr=()
 
     while IFS=': ' read -r device fsType; do
@@ -101,11 +100,11 @@ function FindNTFS () {
     true
 }
 
-typeset vmJson='' vmiJson=''
-vmJson="$(oc get vm "${vm}" -n "${ns}" -o json)"
-jq -e -s '((length == 1) and (.[0].status.printableStatus == "Stopped"))' 0<<< "${vmJson}" 1> /dev/null
-vmiJson="$(oc get vmi "${vm}" -n "${ns}" --ignore-not-found -o json)"
-[ -z "${vmiJson}" ]
+jq -e -s '
+    ((length == 1) and (.[0].status.printableStatus == "Stopped"))
+' 0< <(
+    oc -n "${ns}" get vm/"${vm}" -o json
+) 1> /dev/null
 
 helperPod="guestfs-ntfs-$(date -u +%s)-$$"
 typeset guestfsImage="${BSOD_DET__GUESTFS__NTFS_IMAGE:-quay.io/konveyor/oadp-vmfr-access:latest}"

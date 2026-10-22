@@ -247,7 +247,7 @@ Cleanup uses the initialized helper name, native `oc delete --ignore-not-found` 
 
 **Responsibilities**:
 - Validate output path and preflight metadata integrity
-- Require the metadata target VM's printable status to be **Stopped** and its named VMI to be absent; API failures block extraction. Any existing target VMI blocks, including Succeeded/Failed. This point-in-time check is not an exclusive PVC lock and does not prevent other consumers or future starts.
+- Require the metadata target VM's printable status to be **Stopped**, using a direct process substitution; no VMI absence or namespace-wide PVC scan is performed. Empty/malformed responses and non-Stopped statuses block extraction, but valid Stopped JSON followed by an API failure can pass because the producer exit status is not propagated. This point-in-time status check is not an exclusive PVC lock.
 - Create `guestfs-ntfs` pod using `quay.io/konveyor/oadp-vmfr-access` with `force_tcg` backend (no KVM required)
 - Dynamically detect Windows system partition via `guestfish list-filesystems`:
   - Tries each NTFS partition in order (sda3, sda4, etc.)
@@ -446,7 +446,7 @@ trigger-bsod-intentional.sh
   │    ├─ WaitDumpMonitor (non-fatal on timeout)
   │    ├─ StopVM
   │    ├─ extract--guest-os--crash-info.sh
-  │    │    ├─ Require target VM Stopped and target VMI absent
+  │    │    ├─ Require target VM printableStatus Stopped
   │    │    ├─ Create guestfs-ntfs pod
   │    │    ├─ Detect Windows partition dynamically
   │    │    ├─ Batch guestfish download (single QEMU session)
@@ -598,7 +598,7 @@ evidence-summary.json         Final pipeline verdict
 #### Extraction Flow
 
 1. **Validate metadata** (lines 36–62): Ensure output path matches preflight, evidence mount unchanged
-2. **Verify target powered off**: Require metadata target VM printableStatus Stopped and no named VMI; API errors fail closed. Preflight supplies the target-to-guest-PVC association; extraction does not scan namespace-wide PVC consumers.
+2. **Check target VM status**: Require metadata target VM printableStatus Stopped. Preflight supplies the target-to-guest-PVC association; extraction checks neither VMI absence nor namespace-wide PVC consumers. Direct process substitution does not propagate the API producer's exit status; a partial valid Stopped response can pass even when that producer fails.
 3. **Create guestfs-ntfs pod** (lines 299–327): Deploy pod with block device attachment, verify guestfish ready
 4. **Discover NTFS partitions** (lines 340–344): Query guest disk for all NTFS partitions
 5. **Extract .evtx files** (lines 355–408):
