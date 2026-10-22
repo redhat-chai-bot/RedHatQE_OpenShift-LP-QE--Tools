@@ -232,11 +232,13 @@ Writes all collected VM/storage/config data needed by downstream scripts.
 **Purpose**: Offline NTFS artifact extraction from stopped VM disk.
 
 **Usage**: `extract--guest-os--crash-info.sh --metadata PRE_STOP_METADATA.json`.
+Run it as an executable, as the watcher and container entrypoint do; it is not a sourceable shell library.
 The output directory comes only from metadata `.outputDir`; there is no extractor `--out` option.
 The extractor preserves the provided path spelling and accepts existing directory aliases and arbitrary directory names.
 Metadata `.runId` is retained in the extraction summary, independently of the output directory name.
 Stale-output scanning follows a command-line directory alias, not symlinks encountered below it.
 The extractor needs only `runId`, `outputDir`, `namespace`, `vm` and `guestPvc` metadata fields.
+It preserves and validates a watcher-produced dump-parser result, or writes the existing no-dump stub; on-disk dump extraction remains disabled.
 It rejects stale extraction artifacts, but does not revalidate evidence-mount identity or preflight-only storage/image fields.
 Preflight's persistent-storage validation is unchanged; extraction no longer checks whether that mount changed afterwards.
 Container `MODE=recover` takes the same metadata-only arguments; watcher/preflight and archived `MODE=extract` retain their own `--out` options.

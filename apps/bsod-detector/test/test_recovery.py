@@ -419,7 +419,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(target.exists())
         self.assertFalse(self.Calls())
 
-    def test_unsafe_failures_exit_even_when_sourced_conditionally(self):
+    def test_unsafe_failures_stop_executed_script(self):
         for scenario in ('api-error', 'bad-json', 'attached-pvc', 'attached-dv', 'metadata-error'):
             with self.subTest(scenario=scenario):
                 case = RecoveryTests('test_success_contract')
@@ -427,22 +427,18 @@ class RecoveryTests(unittest.TestCase):
                 self.addCleanup(case.doCleanups)
                 if scenario == 'metadata-error':
                     case.metadata['guestPvc'] = False
-                case.meta.write_text(json.dumps(case.metadata))
-                command = 'if source "$1" --metadata "$2"; then :; fi; touch "$3"'
-                sentinel = case.root / 'must-not-continue'
-                result = subprocess.run(['bash', '-c', command, 'conditional-extractor', str(recovery),
-                                         str(case.meta), str(sentinel)], env=dict(case.env, SCENARIO=scenario),
-                                        text=True, capture_output=True, timeout=10)
+                result = case.RunRecovery(scenario)
                 self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertFalse(sentinel.exists())
-                self.assertFalse(any(call[0] == 'apply' for call in case.Calls()))
+                self.assertFalse(any(call[0] in ('apply', 'cp') for call in case.Calls()))
+                self.assertFalse((case.root / 'helper-pod').exists())
+                self.assertFalse((case.out / 'extraction-summary.json').exists())
 
     def test_cleanup_absent_helper_is_idempotent_and_waited(self):
         source = recovery.read_text()
         helpers = '\n'.join(re.search(r'^function ' + name + r' \(\) \{\n.*?^\}', source,
                                       re.MULTILINE | re.DOTALL).group() for name in ('RecordError', 'Cleanup'))
         command = ('set -euxo pipefail; shopt -s inherit_errexit\n'
-                   'typeset -i isClean=0 hasPod=1\n'
+                   'typeset -i hasPod=1\n'
                    'typeset helperPod=fixture-pod ns=fixture-ns scrName=extractor\n'
                    'typeset extractLog="${1}/extraction.log" stageErrors="${1}/stage-errors.jsonl"\n'
                    + helpers + '\nCleanup\nCleanup\n')
