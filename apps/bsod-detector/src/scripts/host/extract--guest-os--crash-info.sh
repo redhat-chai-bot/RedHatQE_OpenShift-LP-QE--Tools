@@ -101,21 +101,11 @@ function FindNTFS () {
     true
 }
 
-# Uncertain attachment state must block extraction, including DataVolume references.
-typeset vmiJson='' attachedVmis=''
-vmiJson="$(oc get vmi -n "${ns}" -o json)" || {
-    : "Cannot list VMIs in namespace ${ns} — API error prevents safe PVC attachment verification."
-    false
-}
-attachedVmis="$(jq -r --arg pvc "${guestPVC}" '
-  .items[] | select(
-    (.status.phase == "Running") and
-    (.spec.volumes // [] | map(.persistentVolumeClaim.claimName // "", .dataVolume.name // "") | any(. == $pvc))
-  ) | .metadata.name' 0<<<"${vmiJson}")" || {
-    : 'Cannot parse VMI list — PVC attachment state uncertain.'
-    false
-}
-[ -z "${attachedVmis}" ]
+typeset vmJson='' vmiJson=''
+vmJson="$(oc get vm "${vm}" -n "${ns}" -o json)"
+jq -e -s '((length == 1) and (.[0].status.printableStatus == "Stopped"))' 0<<< "${vmJson}" 1> /dev/null
+vmiJson="$(oc get vmi "${vm}" -n "${ns}" --ignore-not-found -o json)"
+[ -z "${vmiJson}" ]
 
 helperPod="guestfs-ntfs-$(date -u +%s)-$$"
 typeset guestfsImage="${BSOD_DET__GUESTFS__NTFS_IMAGE:-quay.io/konveyor/oadp-vmfr-access:latest}"

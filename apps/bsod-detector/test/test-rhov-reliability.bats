@@ -156,7 +156,8 @@ case "$1" in
       volumesnapshot) printf true ;;
       pvc) printf Bound ;;
       pod) printf Running ;;
-      vmi) printf '{"items":[]}' ;;
+      vm) printf '{"status":{"printableStatus":"Stopped"}}' ;;
+      vmi) [[ " $* " == *' --ignore-not-found '* ]] || exit 94 ;;
       *) exit 91 ;;
     esac ;;
   exec)

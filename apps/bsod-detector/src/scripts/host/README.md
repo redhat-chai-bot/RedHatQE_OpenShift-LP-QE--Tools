@@ -247,7 +247,7 @@ Cleanup uses the initialized helper name, native `oc delete --ignore-not-found` 
 
 **Responsibilities**:
 - Validate output path and preflight metadata integrity
-- Verify source PVC is not attached to any **running** VMI (direct or DataVolume-backed) — API errors block extraction
+- Require the metadata target VM's printable status to be **Stopped** and its named VMI to be absent; API failures block extraction. Any existing target VMI blocks, including Succeeded/Failed. This point-in-time check is not an exclusive PVC lock and does not prevent other consumers or future starts.
 - Create `guestfs-ntfs` pod using `quay.io/konveyor/oadp-vmfr-access` with `force_tcg` backend (no KVM required)
 - Dynamically detect Windows system partition via `guestfish list-filesystems`:
   - Tries each NTFS partition in order (sda3, sda4, etc.)
@@ -446,7 +446,7 @@ trigger-bsod-intentional.sh
   │    ├─ WaitDumpMonitor (non-fatal on timeout)
   │    ├─ StopVM
   │    ├─ extract--guest-os--crash-info.sh
-  │    │    ├─ Verify PVC not attached to running VMI
+  │    │    ├─ Require target VM Stopped and target VMI absent
   │    │    ├─ Create guestfs-ntfs pod
   │    │    ├─ Detect Windows partition dynamically
   │    │    ├─ Batch guestfish download (single QEMU session)
@@ -598,7 +598,7 @@ evidence-summary.json         Final pipeline verdict
 #### Extraction Flow
 
 1. **Validate metadata** (lines 36–62): Ensure output path matches preflight, evidence mount unchanged
-2. **Verify PVC not attached** (lines 283–297): Check source PVC not mounted to any running VMI
+2. **Verify target powered off**: Require metadata target VM printableStatus Stopped and no named VMI; API errors fail closed. Preflight supplies the target-to-guest-PVC association; extraction does not scan namespace-wide PVC consumers.
 3. **Create guestfs-ntfs pod** (lines 299–327): Deploy pod with block device attachment, verify guestfish ready
 4. **Discover NTFS partitions** (lines 340–344): Query guest disk for all NTFS partitions
 5. **Extract .evtx files** (lines 355–408):

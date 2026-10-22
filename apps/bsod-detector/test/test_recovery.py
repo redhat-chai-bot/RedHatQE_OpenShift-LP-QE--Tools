@@ -30,20 +30,48 @@ with (root / 'calls.jsonl').open('a') as calls:
     calls.write(json.dumps(args) + '\n')
 scenario = os.environ.get('SCENARIO', '')
 if args[0] == 'get':
-    if args[1] == 'vmi':
+    if args[1] == 'vm':
         if scenario == 'api-error':
             print('mock API unavailable', file=sys.stderr)
             sys.exit(17)
         if scenario == 'bad-json':
             print('{')
-        elif scenario in ('attached-pvc', 'attached-dv'):
-            volume = {'persistentVolumeClaim': {'claimName': 'rootdisk'}}
-            if scenario == 'attached-dv':
-                volume = {'dataVolume': {'name': 'rootdisk'}}
-            print(json.dumps({'items': [{'metadata': {'name': 'fixture-vmi'},
-                  'status': {'phase': 'Running'}, 'spec': {'volumes': [volume]}}]}))
+        elif scenario == 'vm-missing':
+            print('mock VM not found', file=sys.stderr)
+            sys.exit(1)
+        elif scenario == 'vm-status-missing':
+            print('{"spec":{"running":false},"status":{"ready":false}}')
+        elif scenario == 'vm-status-null':
+            print('{"status":{"printableStatus":null}}')
+        elif scenario == 'vm-empty':
+            pass
+        elif scenario == 'vm-multiple':
+            print('{"status":{"printableStatus":"Stopped"}}\n{"status":{"printableStatus":"Stopped"}}')
+        elif scenario == 'vm-status-bool':
+            print('{"status":{"printableStatus":true}}')
+        elif scenario.startswith('vm-status-'):
+            status = scenario.removeprefix('vm-status-')
+            print(json.dumps({'spec': {'running': False}, 'status': {'ready': False, 'printableStatus': status}}))
+        elif scenario == 'vm-api-partial':
+            print('{"status":{"printableStatus":"Stopped"}}')
+            print('mock VM API unavailable', file=sys.stderr)
+            sys.exit(17)
         else:
-            print('{"items":[]}')
+            print('{"status":{"printableStatus":"Stopped"}}')
+    elif args[1] == 'vmi':
+        if scenario in ('vmi-api-error', 'vmi-api-partial'):
+            if scenario == 'vmi-api-partial':
+                print('{"status":{"phase":"Failed"}}')
+            print('mock VMI API unavailable', file=sys.stderr)
+            sys.exit(16)
+        if scenario == 'vmi-bad-json':
+            print('{')
+        elif scenario.startswith('vmi-phase-'):
+            print(json.dumps({'status': {'phase': scenario.removeprefix('vmi-phase-')}}))
+        elif scenario == 'vmi-no-phase':
+            print('{}')
+        elif '--ignore-not-found' not in args:
+            sys.exit(94)
     elif args[1] == 'pod':
         print('Running')
     else:
@@ -283,7 +311,7 @@ class RecoveryTests(unittest.TestCase):
         source = recovery.read_text()
         self.assertNotRegex(source, r'\bDie\b')
         messages = re.findall(r': ([\'"])(.*?)\1', source)
-        self.assertEqual(len(messages), 6)
+        self.assertEqual(len(messages), 4)
         for quote, message in messages:
             with self.subTest(message=message):
                 self.assertTrue(message[0].isupper())
@@ -379,8 +407,8 @@ class RecoveryTests(unittest.TestCase):
         (external / 'events.json').write_text('external-stale')
         (self.out / 'nested alias').symlink_to(external, target_is_directory=True)
         result = self.RunRecovery('api-error')
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn('Cannot list VMIs', result.stderr)
+        self.assertEqual(result.returncode, 17, result.stderr)
+        self.assertIn('mock API unavailable', result.stderr)
         self.assertNotIn('Pre-existing extraction artifact rejected:', result.stderr)
         self.assertEqual([call[0] for call in self.Calls()], ['get'])
         self.assertEqual((external / 'events.json').read_text(), 'external-stale')
@@ -432,8 +460,45 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(target.exists())
         self.assertFalse(self.Calls())
 
+    def test_stopped_target_without_vmi_allows_extraction(self):
+        result = self.RunRecovery()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reads = [call for call in self.Calls() if call[0] == 'get']
+        self.assertEqual(reads, [
+            ['get', 'vm', 'fixture-vm', '-n', 'fixture-ns', '-o', 'json'],
+            ['get', 'vmi', 'fixture-vm', '-n', 'fixture-ns', '--ignore-not-found', '-o', 'json'],
+        ])
+        self.AssertDeleted()
+
+    def test_powered_off_guard_rejects_before_helper_mutation(self):
+        scenarios = (
+            'vm-status-Running', 'vm-status-Starting', 'vm-status-Stopping',
+            'vm-status-Unknown', 'vm-status-', 'vm-status-missing', 'vm-status-null',
+            'vm-status-bool', 'vm-missing', 'vm-empty', 'vm-multiple', 'bad-json',
+            'api-error', 'vm-api-partial', 'vmi-api-error', 'vmi-api-partial',
+            'vmi-bad-json', 'vmi-no-phase', 'vmi-phase-', 'vmi-phase-Pending',
+            'vmi-phase-Scheduling', 'vmi-phase-Scheduled', 'vmi-phase-Running',
+            'vmi-phase-Succeeded', 'vmi-phase-Failed', 'vmi-phase-Unknown',
+        )
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario):
+                case = RecoveryTests('test_success_contract')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                before = {path.name: path.read_bytes() for path in case.out.iterdir()}
+                result = case.RunRecovery(scenario)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(case.Calls())
+                self.assertTrue(all(call[0] == 'get' for call in case.Calls()))
+                self.assertFalse((case.root / 'pod.json').exists())
+                self.assertEqual(before, {path.name: path.read_bytes() for path in case.out.iterdir()})
+                if scenario in ('api-error', 'vm-api-partial'):
+                    self.assertEqual(result.returncode, 17, result.stderr)
+                if scenario in ('vmi-api-error', 'vmi-api-partial'):
+                    self.assertEqual(result.returncode, 16, result.stderr)
+
     def test_unsafe_failures_stop_executed_script(self):
-        for scenario in ('api-error', 'bad-json', 'attached-pvc', 'attached-dv', 'metadata-error'):
+        for scenario in ('api-error', 'bad-json', 'vmi-phase-Running', 'vmi-phase-Failed', 'metadata-error'):
             with self.subTest(scenario=scenario):
                 case = RecoveryTests('test_success_contract')
                 case.setUp()
@@ -441,7 +506,7 @@ class RecoveryTests(unittest.TestCase):
                 if scenario == 'metadata-error':
                     case.metadata['guestPvc'] = False
                 result = case.RunRecovery(scenario)
-                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
                 self.assertFalse(any(call[0] in ('apply', 'cp') for call in case.Calls()))
                 self.assertFalse((case.root / 'helper-pod').exists())
                 self.assertFalse((case.out / 'extraction-summary.json').exists())
@@ -453,7 +518,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_empty_helper_exit_trap_makes_no_cleanup_calls(self):
         result = self.RunRecovery('api-error')
-        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.returncode, 17, result.stderr)
         self.assertEqual([call[0] for call in self.Calls()], ['get'])
         self.assertIn('Cleanup', result.stderr)
         self.assertIn("'[' -z '' ']'", result.stderr)
@@ -466,7 +531,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 25, result.stderr)
         self.assertIn('mock startup timeout', result.stderr)
         self.assertIn('mock delete failure', result.stderr)
-        self.assertEqual([call[0] for call in self.Calls()], ['get', 'apply', 'wait', 'delete'])
+        self.assertEqual([call[0] for call in self.Calls()], ['get', 'get', 'apply', 'wait', 'delete'])
         self.assertTrue((self.root / 'helper-pod').exists())
         self.assertFalse((self.out / 'extraction-summary.json').exists())
 
@@ -700,12 +765,12 @@ source "$1" "${@:2}"
     def test_failed_apply_stops_before_extraction(self):
         result = self.RunRecovery('apply-error')
         self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([call[0] for call in self.Calls()], ['get', 'apply', 'delete', 'wait'])
+        self.assertEqual([call[0] for call in self.Calls()], ['get', 'get', 'apply', 'delete', 'wait'])
         self.AssertDeleted()
         self.assertFalse((self.root / 'helper-pod').exists())
 
     def test_unsafe_inputs_never_apply(self):
-        for scenario in ('api-error', 'bad-json', 'attached-pvc', 'attached-dv', 'stale'):
+        for scenario in ('api-error', 'bad-json', 'vmi-phase-Running', 'vmi-phase-Failed', 'stale'):
             with self.subTest(scenario=scenario):
                 case = RecoveryTests('test_success_contract')
                 case.setUp()
@@ -716,10 +781,9 @@ source "$1" "${@:2}"
                 self.assertNotEqual(result.returncode, 0, result.stderr)
                 self.assertFalse(any(call[0] == 'apply' for call in case.Calls()))
                 if scenario == 'api-error':
-                    self.assertIn('Cannot list VMIs in namespace fixture-ns — API error prevents safe PVC attachment verification.', result.stderr)
                     self.assertIn('mock API unavailable', result.stderr)
                 if scenario == 'bad-json':
-                    self.assertIn('Cannot parse VMI list — PVC attachment state uncertain.', result.stderr)
+                    self.assertIn('parse error', result.stderr)
 
     def test_only_consumed_metadata_fields_are_required(self):
         self.metadata = {key: self.metadata[key] for key in
