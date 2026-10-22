@@ -42,7 +42,7 @@
 #   # Recover evidence from a hard-frozen VM
 #   podman run --rm -e MODE=recover \
 #     -v /mnt/persistent-bsod-evidence:/evidence bsod-detector \
-#     --metadata /evidence/<run>/recovery-metadata.json --out /evidence/<run>
+#     --metadata /evidence/<run>/recovery-metadata.json
 #
 #   # Offline dump extraction from a disk image (original use case)
 #   podman run --rm -e MODE=extract \

@@ -10,16 +10,15 @@ typeset metadataFile='' outDir=''
 while (($#)); do
     case "${1}" in
         (--metadata)    metadataFile="${2:?}"; shift 2;;
-        (--out)         outDir="${2:?}"; shift 2;;
         (-h|--help)
-            echo "usage: ${scrName} --metadata PRE_STOP_METADATA.json --out VALIDATED_RUN_DIR"
+            echo "usage: ${scrName} --metadata PRE_STOP_METADATA.json"
             exit 0
             ;;
         (*) echo "${scrName%.sh}: unknown argument: ${1}" 1>&2; exit 2;;
     esac
 done
-{ [ -r "${metadataFile}" ] && [ -n "${outDir}" ]; } || {
-    echo "${scrName%.sh}: --metadata and --out are required" 1>&2
+[ -r "${metadataFile}" ] || {
+    echo "${scrName%.sh}: --metadata is required and must be readable" 1>&2
     exit 2
 }
 
@@ -33,12 +32,12 @@ for tool in oc jq python3 sha256sum findmnt timeout realpath; do
     command -v "${tool}" 1> /dev/null || Die "Required tool missing: ${tool}"
 done
 
-typeset runId='' expectedOut=''
+typeset runId=''
 runId="$(jq -er .runId "${metadataFile}")"
-expectedOut="$(jq -er .outputDir "${metadataFile}")"
-outDir="$(realpath -e "${outDir}")"
-{ [ "${outDir}" = "${expectedOut}" ] && [ "${outDir##*/}" = "${runId}" ]; } || Die 'Output path/run ID does not match preflight metadata.'
-[ ! -L "${outDir}" ] || Die 'Output path must not be a symlink.'
+outDir="$(jq -er '.outputDir | select(type == "string" and length > 0)' "${metadataFile}")" || Die 'Metadata lacks a non-empty output directory.'
+outDir="$(realpath -e "${outDir}")" || Die "Output directory cannot be resolved: ${outDir}"
+[ -d "${outDir}" ] || Die "Output path is not a directory: ${outDir}"
+[ "${outDir##*/}" = "${runId}" ] || Die 'Output directory does not match metadata run ID.'
 
 typeset mountTarget='' storageId=''
 mountTarget="$(jq -er .evidenceMount.target "${metadataFile}")"

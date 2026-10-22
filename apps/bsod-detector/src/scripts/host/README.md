@@ -231,6 +231,12 @@ Writes all collected VM/storage/config data needed by downstream scripts.
 
 **Purpose**: Offline NTFS artifact extraction from stopped VM disk.
 
+**Usage**: `extract--guest-os--crash-info.sh --metadata PRE_STOP_METADATA.json`.
+The output directory comes only from metadata `.outputDir`; there is no extractor `--out` option.
+Directory aliases are resolved to an existing directory whose basename must match metadata `.runId`.
+Persistent storage identity (including identity-marker symlink protection) and stale-artifact checks still apply.
+Container `MODE=recover` takes the same metadata-only arguments; watcher/preflight and archived `MODE=extract` retain their own `--out` options.
+
 **Responsibilities**:
 - Validate output path and preflight metadata integrity
 - Verify source PVC is not attached to any **running** VMI (direct or DataVolume-backed) — API errors block extraction

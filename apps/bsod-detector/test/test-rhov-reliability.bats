@@ -201,7 +201,7 @@ run_recovery() {
   run env PATH="$BATS_TMPDIR/mockbin:$PATH" REAL_PYTHON="$REAL_PYTHON" EVIDENCE_ROOT="$EVIDENCE_ROOT" \
     OC_LOG="$OC_LOG" BSOD_EXTRACT_EVTX_BIN="$BATS_TMPDIR/mockbin/extract-evtx" \
     MISSING_GUESTFISH="${MISSING_GUESTFISH:-0}" DUMP_CODE="${DUMP_CODE:-10}" EVTX_FAIL="${EVTX_FAIL:-0}" MOUNT_SOURCE="${MOUNT_SOURCE:-}" \
-    bash "$HOST_DIR/extract--guest-os--crash-info.sh" --metadata "$BATS_TMPDIR/metadata.json" --out "$EVIDENCE_ROOT/fixture-recovery-001"
+    bash "$HOST_DIR/extract--guest-os--crash-info.sh" --metadata "$BATS_TMPDIR/metadata.json"
 }
 
 write_elf_memory_fixture() {
@@ -287,7 +287,8 @@ echo '{"ok":true}'
 EOF
   cat > "$BATS_TMPDIR/mockbin/recovery" <<'EOF'
 #!/usr/bin/env bash
-while (($#)); do [[ "$1" == --out ]] && { out="$2"; break; }; shift; done
+[[ "$1" == --metadata && "$#" == 2 ]] || exit 2
+out="$(jq -er .outputDir "$2")"
 "$REAL_PYTHON" -c 'import struct,sys,pathlib; p=pathlib.Path(sys.argv[1]); d=bytearray(8192); d[:8]=b"PAGEDU64"; struct.pack_into("<I",d,0x38,10); (p/"MEMORY.DMP").write_bytes(d); e=bytearray(4096); e[:8]=b"ElfFile\x00"; struct.pack_into("<I",e,0x78,4096); (p/"System.evtx").write_bytes(e)' "$out"
 echo '{"ok":true}' > "$out/parse-dump-header.json"
 echo '{"ok":true}' > "$out/events.json"

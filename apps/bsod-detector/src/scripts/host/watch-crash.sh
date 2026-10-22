@@ -361,7 +361,7 @@ function RestartVM () {
 function Recover () {
   typeset recoveryTimeout=3600 recoveryBin="${scriptDir}/extract--guest-os--crash-info.sh"
   [[ -x "${recoveryBin}" ]] || { RecordError recovery "recovery script missing: ${recoveryBin}"; return 1; }
-  RunTimed "${recoveryTimeout}" "${recoveryBin}" --metadata "${metadataFile}" --out "${outDir}" >>"${pipelineLog}" 2>&1
+  RunTimed "${recoveryTimeout}" "${recoveryBin}" --metadata "${metadataFile}" >>"${pipelineLog}" 2>&1
 }
 function CrashResponse () {
   typeset state="${1:?}"; typeset failed=0

@@ -155,7 +155,7 @@ class RecoveryTests(unittest.TestCase):
 
     def RunRecovery(self, scenario='', *args, script=recovery, cwd=None):
         self.meta.write_text(json.dumps(self.metadata))
-        return subprocess.run([str(script), *(args or ('--metadata', str(self.meta), '--out', str(self.out)))],
+        return subprocess.run([str(script), *(args or ('--metadata', str(self.meta)))],
                               cwd=cwd, env=dict(self.env, SCENARIO=scenario), text=True, capture_output=True, timeout=10)
 
     def Calls(self):
@@ -239,7 +239,7 @@ class RecoveryTests(unittest.TestCase):
     def test_all_die_messages_have_consistent_grammar(self):
         source = recovery.read_text()
         messages = re.findall(r'\bDie ([\'"])(.*?)\1', source)
-        self.assertEqual(len(messages), 11)
+        self.assertEqual(len(messages), 13)
         self.assertEqual(len(re.findall(r'\bDie\b', source)), len(messages) + 1)
         for quote, message in messages:
             with self.subTest(message=message):
@@ -253,6 +253,83 @@ class RecoveryTests(unittest.TestCase):
         result = self.RunRecovery(script=f'./{recovery.name}', cwd=hostDir)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads((self.out / 'extraction-summary.json').read_text())['ok'])
+        self.AssertDeleted()
+
+    def test_metadata_only_output_contract(self):
+        source = recovery.read_text()
+        self.assertNotIn('--out', source[:source.index('function Die')])
+        self.assertNotIn('expectedOut', source)
+        self.assertNotIn('[ ! -L "${outDir}" ]', source)
+        self.assertIn('[ -L "${marker}" ]', source)
+        result = self.RunRecovery()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.out / 'checksums.sha256').is_file())
+        self.AssertDeleted()
+
+    def test_metadata_directory_aliases_resolve_to_run_target(self):
+        for isDifferentName in (False, True):
+            with self.subTest(isDifferentName=isDifferentName):
+                case = RecoveryTests('test_success_contract')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                alias = case.root / 'different alias'
+                alias.symlink_to(case.out if isDifferentName else case.root, target_is_directory=True)
+                case.metadata['outputDir'] = str(alias if isDifferentName else alias / case.out.name)
+                result = case.RunRecovery()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                summary = json.loads((case.out / 'extraction-summary.json').read_text())
+                self.assertTrue(summary['ok'])
+                self.assertTrue((case.out / 'checksums.sha256').is_file())
+                case.AssertDeleted()
+
+    def test_invalid_metadata_output_rejected_before_oc_or_writes(self):
+        for scenario in ('missing', 'null', 'empty', 'non-string', 'missing-target', 'file', 'run-id'):
+            with self.subTest(scenario=scenario):
+                case = RecoveryTests('test_success_contract')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                if scenario == 'missing':
+                    del case.metadata['outputDir']
+                elif scenario in ('null', 'empty', 'non-string'):
+                    case.metadata['outputDir'] = {'null': None, 'empty': '', 'non-string': 42}[scenario]
+                elif scenario == 'missing-target':
+                    case.metadata['outputDir'] = str(case.root / 'missing')
+                elif scenario == 'file':
+                    case.metadata['outputDir'] = str(case.root / 'fixture.evtx')
+                else:
+                    case.metadata['runId'] = 'wrong-run'
+                before = {path.name: path.read_bytes() for path in case.out.iterdir()}
+                result = case.RunRecovery()
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('ERROR:', result.stderr)
+                self.assertFalse(case.Calls())
+                self.assertEqual({path.name: path.read_bytes() for path in case.out.iterdir()}, before)
+
+    def test_marker_symlink_still_requires_mount_identity(self):
+        identity = self.root / 'identity'
+        self.marker.rename(identity)
+        self.marker.symlink_to(identity)
+        self.metadata['evidenceMount']['source'] = 'other:/mount'
+        result = self.RunRecovery()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('Evidence mount identity changed:', result.stderr)
+        self.assertFalse(self.Calls())
+        self.assertFalse((self.out / 'extraction.log').exists())
+
+    def test_watcher_recovery_uses_metadata_only(self):
+        watcher = (hostDir / 'watch-crash.sh').read_text()
+        runTimed = re.search(r'^function RunTimed \(\) \{.*\}$', watcher, re.MULTILINE).group()
+        recover = re.search(r'^function Recover \(\) \{\n.*?^\}', watcher, re.MULTILINE | re.DOTALL).group()
+        self.meta.write_text(json.dumps(self.metadata))
+        command = ('set -euxo pipefail; shopt -s inherit_errexit\n'
+                   'typeset scriptDir="${1}" metadataFile="${2}" pipelineLog="${3}"\n'
+                   + runTimed + '\n' + recover + '\nRecover\n')
+        result = subprocess.run(['bash', '-c', command, 'watcher-fixture', str(hostDir),
+                                 str(self.meta), str(self.root / 'pipeline.log')],
+                                cwd=self.root, env=self.env, text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr + (self.root / 'pipeline.log').read_text())
+        self.assertTrue(json.loads((self.out / 'extraction-summary.json').read_text())['ok'])
+        self.assertNotIn('--out', recover)
         self.AssertDeleted()
 
     def test_relative_repository_path_resolves_helpers(self):
@@ -280,7 +357,7 @@ function exec () {
 source "$1" "${@:2}"
 '''
         result = subprocess.run(['bash', '-c', command, 'container-fixture', str(entrypoint),
-                                 '--metadata', str(self.meta), '--out', str(self.out)], cwd=self.root,
+                                 '--metadata', str(self.meta)], cwd=self.root,
                                 env=dict(self.env, MODE='recover', EVIDENCE_DIR=str(self.root),
                                          MOCK_EXTRACTOR=str(recovery), MOCK_EXTRACTOR_NAME=recovery.name),
                                 text=True, capture_output=True, timeout=10)
@@ -294,7 +371,7 @@ source "$1" "${@:2}"
         for args, expected, message in (
                 (('--help',), 0, f'usage: {alias.name} '),
                 (('--unknown',), 2, f'{alias.stem}: unknown argument:'),
-                (('--out', str(self.out)), 2, f'{alias.stem}: --metadata and --out are required')):
+                (('--metadata', str(self.root / 'missing.json')), 2, f'{alias.stem}: --metadata is required and must be readable')):
             with self.subTest(args=args):
                 result = self.RunRecovery('', *args, script=alias)
                 self.assertEqual(result.returncode, expected, result.stderr)
@@ -306,12 +383,13 @@ source "$1" "${@:2}"
         self.assertFalse(self.Calls())
 
     def test_metadata_guard_rejects_missing_or_unreadable_inputs(self):
-        for args in (('--metadata', str(self.meta)),
-                     ('--metadata', str(self.root / 'missing.json'), '--out', str(self.out))):
+        for args in ((),
+                     ('--metadata', str(self.root / 'missing.json'))):
             with self.subTest(args=args):
-                result = self.RunRecovery('', *args)
+                result = (self.RunRecovery('', *args) if args else
+                          subprocess.run([str(recovery)], env=self.env, text=True, capture_output=True, timeout=10))
                 self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertIn('--metadata and --out are required', result.stderr)
+                self.assertIn('--metadata is required and must be readable', result.stderr)
         self.assertFalse(self.Calls())
 
     def test_preserves_watcher_parser(self):
