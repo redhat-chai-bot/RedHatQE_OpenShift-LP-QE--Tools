@@ -141,6 +141,7 @@ make_recovery_mocks() {
 #!/usr/bin/env bash
 [[ "${1:-}" == --request-timeout=* ]] && shift
 printf '%s\n' "$*" >> "$OC_LOG"
+if [ "${1:-}" = -n ]; then shift 2; fi
 if [[ "${1:-}" == cp ]]; then
   target="$3"
   mkdir -p "$(dirname "$target")"
@@ -227,6 +228,7 @@ write_elf_memory_fixture() {
   [ "$(jq -r .ok "$summary")" = true ]
   [ "$(jq -r '.missingRequiredArtifactTypes|length' "$summary")" -eq 0 ]
   [ ! -e "$EVIDENCE_ROOT/fixture-recovery-001/bsod-screenshot.png" ]
+  grep -q '^-n fixture-ns exec .*guestfish --ro -a /dev/vda run : list-filesystems' "$OC_LOG"
   grep -q '^delete pod ' "$OC_LOG"
   ! grep -q '^delete pvc ' "$OC_LOG"
   ! grep -q '^delete volumesnapshot ' "$OC_LOG"
