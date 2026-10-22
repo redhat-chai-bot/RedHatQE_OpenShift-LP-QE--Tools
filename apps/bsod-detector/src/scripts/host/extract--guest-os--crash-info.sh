@@ -95,22 +95,28 @@ trap 'OnSignal 130' INT
 trap 'OnSignal 143' TERM
 
 function FindNTFS () {
-    typeset device='' fsType=''
-    typeset -i producerPid=0
+    typeset output='' device='' fsType=''
+    output="$()" || return 1
     typeset -a partArr=()
+
     while IFS=': ' read -r device fsType; do
         if [ -n "${device}" ] && [ "${fsType}" = ntfs ]; then
             partArr+=("${device}")
         fi
     done 0< <(
-        oc -n "${ns}" exec "${pod}" -c "${container}" -- \
-            guestfish --ro -a /dev/vda run : list-filesystems 2>> "${extractLog}"
+        oc -n "${ns}" exec \
+            "${pod}" \
+            -c "${container}" \
+            -- \
+            guestfish \
+            --ro \
+            -a /dev/vda \
+            run : list-filesystems
     )
-    producerPid=$!
-    wait "${producerPid}" || return 1
-    ((${#partArr[@]})) || return 1
+    ((${#partArr[@]}))
     printf '%s\n' "${partArr[@]}"
-    return 0
+
+    true
 }
 
 # Uncertain attachment state must block extraction, including DataVolume references.
