@@ -52,9 +52,8 @@ By default, each pipeline run writes under `/mnt/persistent-bsod-evidence/`; `BS
 | `parse-dump-header.json` | ~146 B | After VM stopped | `extract--guest-os--crash-info.sh` | Parses a readable on-disk dump if present; otherwise writes a no-dump stub. The ELF-to-Windows-DMP conversion is disabled in the pipeline. |
 | `events.json` | ~162 B | After VM stopped | `extract--guest-os--crash-info.sh` | Stub. The EVTX parser is archived at `apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py`; its lookup data is maintained in active `apps/bsod-detector/src/data`. |
 | `checksums.sha256` | ~900 B | After VM stopped | `extract--guest-os--crash-info.sh` | SHA-256 manifest of all evidence files (integrity verification) |
-| `extraction.log` | ~3–5 KB | After VM stopped | `extract--guest-os--crash-info.sh` | Step-by-step guestfish extraction trace |
 | `extraction-summary.json` | ~3 KB | After VM stopped | `reliability.py write-summary` | Recovery phase artifact inventory — type, format, size, sha256, valid flag per file |
-| `stage-errors.jsonl` | 0 B (success) | Throughout | `watch-crash.sh` + `extract--guest-os--crash-info.sh` | One JSON line per stage failure. Empty on clean run |
+| `stage-errors.jsonl` | 0 B (success) | Throughout | `watch-crash.sh` | Watcher stage failures. Extraction does not append entries; native extraction output is inherited by the watcher log. |
 | `evidence-summary.json` | ~3 KB | End of pipeline | `watch-crash.sh` → `reliability.py write-summary` | Final pipeline verdict: `ok: true/false`, missing artifact types, invalid artifacts |
 | `watcher.log` | ~100–120 KB | Throughout | `watch-crash.sh` | Full timestamped execution trace of the entire pipeline |
 
@@ -65,7 +64,7 @@ At BSOD      → bsod-screenshot.png, vm-memory.elf.tar.gz (~5–10 min),
                domain.xml, launcher-compute.log, host-signals.json
 After stop   → guestFS_sda3/.../System.evtx, Application.evtx,
                parse-dump-header.json, events.json, checksums.sha256,
-               extraction.log, extraction-summary.json
+               extraction-summary.json
 End          → stage-errors.jsonl, evidence-summary.json, watcher.log
 ```
 
@@ -362,8 +361,8 @@ cd /mnt/persistent-bsod-evidence/20261013T070250Z-intentional-837674-22539
 sha256sum -c checksums.sha256  # Verify all files
 ```
 
-#### `extraction.log` (3.6 KB)
-**What it contains**: Step-by-step trace of guestfish NTFS extraction.
+#### Historical extraction trace example
+The former `extraction.log` is no longer produced. Extraction now inherits stdout/stderr, captured in `watcher.log` by the watcher. The following historical trace illustrates the extraction steps.
 
 **Example**:
 ```
@@ -735,7 +734,7 @@ run=/path/to/run
 cat $run/stage-errors.jsonl | jq .
 cat $run/evidence-summary.json   | jq '{ok,stageErrors,missingRequiredArtifactTypes,invalidArtifacts}'
 cat $run/extraction-summary.json | jq '{ok,stageErrors,missingRequiredArtifactTypes,invalidArtifacts}'
-tail -30 $run/extraction.log
+tail -30 $run/watcher.log
 ```
 
 ---

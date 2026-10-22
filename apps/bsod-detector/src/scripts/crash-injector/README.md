@@ -80,9 +80,8 @@ The table below shows what each file is, who writes it, and at which pipeline ph
 | `guestFS_sda3/Windows/System32/winevt/Logs/Application.evtx` | ~6 MB | After VM stopped | `extract--guest-os--crash-info.sh` → guestfs-ntfs pod → `guestfish` | Windows Application EventLog extracted offline from NTFS partition. Contains Application/1001 LiveKernelEvent and app-level crash records |
 | `events.json` | ~162 B | After VM stopped | `extract--guest-os--crash-info.sh` | **Stub.** The EVTX parser is archived at `apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py`; its lookup data is maintained in active `apps/bsod-detector/src/data`. |
 | `checksums.sha256` | ~900 B | After VM stopped | `extract--guest-os--crash-info.sh` | SHA-256 hashes of all evidence files (except log files and summary files generated after this point). Used by reliability.py to detect tampering |
-| `extraction.log` | ~3–5 KB | After VM stopped | `extract--guest-os--crash-info.sh` | Step-by-step guestfish extraction trace — partition discovery, guestfish commands, oc cp transfers, file sizes |
 | `extraction-summary.json` | ~3 KB | After VM stopped | `reliability.py write-summary` | Artifact inventory from recovery phase — lists every file with type, format, size, sha256, valid flag. Reports missing types or invalid artifacts |
-| `stage-errors.jsonl` | 0 B (success) | Throughout | `watch-crash.sh` + `extract--guest-os--crash-info.sh` | One JSON line per stage failure — stage name, error message, timestamp. Empty on clean run |
+| `stage-errors.jsonl` | 0 B (success) | Throughout | `watch-crash.sh` | Watcher stage failures; extraction does not append entries and inherits stdout/stderr into the watcher log. |
 | `evidence-summary.json` | ~3 KB | End of pipeline | `watch-crash.sh` → `reliability.py write-summary` | Final pipeline verdict — `ok: true/false`, consolidated stage errors, missing required artifact types, invalid artifacts |
 | `watcher.log` | ~100–120 KB | Throughout | `watch-crash.sh` | Full timestamped execution trace of the entire pipeline — QGA pings, BSOD detection, memory capture, stop VM, recovery, restart |
 
@@ -111,7 +110,6 @@ Pipeline start
   │         → parse-dump-header.json     (stub)
   │         → events.json               (stub)
   │         → checksums.sha256
-  │         → extraction.log
   │         → extraction-summary.json
   │
   ├─── [VM restarted] virtctl start
@@ -167,8 +165,8 @@ virtctl start win2022-vm-hjoshi1 -n windows-bsod
 |---|---|---|
 | QGA ping failed | `watcher.log` | VM frozen from previous BSOD — restart with virtctl |
 | rebootRequired=true | preflight output | CrashDumpEnabled changed — do virtctl stop/start |
-| source PVC attached | `extraction.log` | StopVM failed or VMI still running |
-| oc cp unexpected EOF | `extraction.log` | Retry — transient network issue |
+| source PVC attached | `watcher.log` | StopVM failed or VMI still running |
+| oc cp unexpected EOF | `watcher.log` | Retry — transient network issue |
 | missing: memory | `extraction-summary.json` | vm-memory.elf.tar.gz missing — virtctl dump failed |
 | missing: evtx | `extraction-summary.json` | No System.evtx on any NTFS partition |
 

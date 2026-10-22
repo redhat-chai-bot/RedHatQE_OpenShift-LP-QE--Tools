@@ -435,20 +435,18 @@ class RecoveryTests(unittest.TestCase):
 
     def test_cleanup_absent_helper_is_idempotent_and_waited(self):
         source = recovery.read_text()
-        helpers = '\n'.join(re.search(r'^function ' + name + r' \(\) \{\n.*?^\}', source,
-                                      re.MULTILINE | re.DOTALL).group() for name in ('RecordError', 'Cleanup'))
+        cleanup = re.search(r'^function Cleanup \(\) \{\n.*?^\}', source, re.MULTILINE | re.DOTALL).group()
         command = ('set -euxo pipefail; shopt -s inherit_errexit\n'
                    'typeset -i hasPod=1\n'
-                   'typeset helperPod=fixture-pod ns=fixture-ns scrName=extractor\n'
-                   'typeset extractLog="${1}/extraction.log" stageErrors="${1}/stage-errors.jsonl"\n'
-                   + helpers + '\nCleanup\nCleanup\n')
+                   'typeset helperPod=fixture-pod ns=fixture-ns\n'
+                   + cleanup + '\nCleanup\nCleanup\n')
         result = subprocess.run(['bash', '-c', command, 'absent-helper', str(self.out)], env=self.env,
                                 text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([call[0] for call in self.Calls()], ['delete', 'wait'])
         self.AssertDeleted()
 
-    def test_cleanup_wait_and_delete_failures_are_recorded(self):
+    def test_cleanup_wait_and_delete_failures_remain_visible(self):
         for scenario in ('cleanup-error', 'cleanup-wait-error', 'cleanup-wait-timeout'):
             with self.subTest(scenario=scenario):
                 case = RecoveryTests('test_success_contract')
@@ -457,10 +455,10 @@ class RecoveryTests(unittest.TestCase):
                 result = case.RunRecovery(scenario)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 case.AssertDeleted()
-                errors = [json.loads(line) for line in (case.out / 'stage-errors.jsonl').read_text().splitlines()]
-                self.assertTrue(any(error['stage'] == 'cleanup' for error in errors))
+                self.assertFalse((case.out / 'stage-errors.jsonl').exists())
+                self.assertFalse((case.out / 'extraction.log').exists())
                 self.assertIn('mock delete failure' if scenario == 'cleanup-error' else
-                              'mock deletion wait failed', (case.out / 'extraction.log').read_text())
+                              'mock deletion wait failed', result.stderr)
 
     def test_sigint_cleans_once(self):
         result = self.RunRecovery('signal-int')
@@ -571,7 +569,8 @@ source "$1" "${@:2}"
         result = self.RunRecovery()
         self.assertEqual(result.returncode, 1)
         self.AssertDeleted()
-        self.assertIn('dump-parse', (self.out / 'stage-errors.jsonl').read_text())
+        self.assertIn("jq -e '.ok == true'", result.stderr)
+        self.assertFalse((self.out / 'stage-errors.jsonl').exists())
 
     def test_failure_stages(self):
         for scenario in ('wait-error', 'no-guestfish', 'discovery-error', 'exec-error', 'copy-error',
@@ -581,7 +580,8 @@ source "$1" "${@:2}"
                 case.setUp()
                 self.addCleanup(case.doCleanups)
                 result = case.RunRecovery(scenario)
-                self.assertNotEqual(result.returncode, 0, result.stderr)
+                expected = {'wait-error': 19, 'no-guestfish': 20, 'exec-error': 27}.get(scenario, 1)
+                self.assertEqual(result.returncode, expected, result.stderr)
                 case.AssertDeleted()
                 if scenario != 'cleanup-error':
                     self.assertFalse(list(case.out.glob('**/*.evtx')))
@@ -598,11 +598,9 @@ source "$1" "${@:2}"
                 self.assertFalse(any(call[0] == 'cp' for call in case.Calls()))
                 self.assertFalse((case.out / 'parse-dump-header.json').exists())
                 self.assertFalse((case.out / 'extraction-summary.json').exists())
-                errors = [json.loads(line) for line in (case.out / 'stage-errors.jsonl').read_text().splitlines()]
-                self.assertEqual(errors[0]['stage'], 'extraction')
-                self.assertIn('NTFS discovery failed or found no NTFS partitions', errors[0]['error'])
+                self.assertFalse((case.out / 'stage-errors.jsonl').exists())
                 if scenario.startswith('discovery-'):
-                    self.assertIn('mock discovery failure', (case.out / 'extraction.log').read_text())
+                    self.assertIn('mock discovery failure', result.stderr)
 
     def test_find_ntfs_status_in_conditional_context(self):
         helper = re.search(r'^function FindNTFS \(\) \{\n.*?^\}', recovery.read_text(), re.MULTILINE | re.DOTALL).group()
@@ -722,7 +720,37 @@ source "$1" "${@:2}"
         result = self.RunRecovery('signal')
         self.assertEqual(result.returncode, 143, result.stderr)
         self.AssertDeleted()
-        self.assertIn('interrupted', (self.out / 'stage-errors.jsonl').read_text())
+        self.assertFalse((self.out / 'stage-errors.jsonl').exists())
+
+    def test_extractor_inherits_streams_without_log_artifacts(self):
+        source = recovery.read_text()
+        for obsolete in ('RecordError', 'extractLog', 'stageErrors', 'extraction.log'):
+            self.assertNotIn(obsolete, source)
+        mock = self.bin / 'oc'
+        mock.write_text(mock.read_text().replace('args = sys.argv[1:]',
+                        'args = sys.argv[1:]\nif args[0] == "apply": print("mock native stdout")\n'
+                        'print("mock native stderr", file=sys.stderr)'))
+        result = self.RunRecovery()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('mock native stdout', result.stdout)
+        self.assertIn('mock native stderr', result.stderr)
+        self.assertFalse((self.out / 'extraction.log').exists())
+        self.assertFalse((self.out / 'stage-errors.jsonl').exists())
+        self.AssertDeleted()
+
+    def test_watcher_stage_errors_are_read_without_modification(self):
+        errors = self.out / 'stage-errors.jsonl'
+        content = '{"stage":"watcher","error":"prior watcher failure","at":"fixture"}\n'
+        errors.write_text(content)
+        errors.chmod(0o640)
+        result = self.RunRecovery()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(errors.read_text(), content)
+        self.assertEqual(errors.stat().st_mode & 0o777, 0o640)
+        summary = json.loads((self.out / 'extraction-summary.json').read_text())
+        self.assertEqual(summary['stageErrors'], [json.loads(content)])
+        self.assertFalse(summary['ok'])
+        self.AssertDeleted()
 
     def test_cli_statuses(self):
         for args, expected in ((('--help',), 0), (('--unknown',), 2), (('--out', str(self.out)), 2)):

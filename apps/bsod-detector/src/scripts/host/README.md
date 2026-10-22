@@ -242,6 +242,7 @@ It preserves and validates a watcher-produced dump-parser result, or writes the 
 It rejects stale extraction artifacts, but does not revalidate evidence-mount identity or preflight-only storage/image fields.
 Preflight's persistent-storage validation is unchanged; extraction no longer checks whether that mount changed afterwards.
 Container `MODE=recover` takes the same metadata-only arguments; watcher/preflight and archived `MODE=extract` retain their own `--out` options.
+Extraction inherits stdout/stderr (captured in `watcher.log` when called by the watcher); it creates no `extraction.log` or stage-error entries. Summary generation still reads an existing watcher-owned `stage-errors.jsonl`, without creating or modifying it.
 
 **Responsibilities**:
 - Validate output path and preflight metadata integrity
@@ -269,7 +270,6 @@ guestFS_sda3/
 parse-dump-header.json   (stub — on-disk dumps blocked on KVM)
 events.json              (stub — optional parser is archived, not in the active script tree)
 checksums.sha256         (manifest of evidence files)
-extraction.log           (guestfish extraction trace)
 extraction-summary.json  (artifact inventory and validation)
 ```
 
@@ -587,11 +587,8 @@ evidence-summary.json         Final pipeline verdict
 | `Die()` | Print fatal error and exit with code 1 |
 | `RunTimed()` | Execute with timeout |
 | `Oc()` | Wrapper around kubectl/oc |
-| `Log()` | Print timestamped message to stdout and extraction log |
-| `RecordError()` | Append error to stage-errors.jsonl |
 | `CleanupGuestfishCache()` | Remove leftover cache files from libguestfs |
 | `Cleanup()` | EXIT trap: delete guestfs-ntfs pod, cleanup cache |
-| `OnSignal()` | Signal trap: record interruption, exit |
 | `WaitJsonPath()` | Poll Kubernetes resource until jsonpath expression matches |
 | `DiscoverNTFSPartitions()` | Use guestfish list-filesystems to detect NTFS partitions on guest disk |
 | `ExtractNTFSFile()` | Extract single file via guestfish (partition + Windows path) → oc cp to host |
@@ -621,7 +618,6 @@ guestFS_sda3/
 parse-dump-header.json        (Dump metadata, or stub if no on-disk dump)
 events.json                   (stub — archived parser is optional and not called by the active pipeline)
 checksums.sha256              (Manifest of all evidence files)
-extraction.log                (Guestfish extraction trace)
 extraction-summary.json       (Artifact inventory & validation)
 ```
 

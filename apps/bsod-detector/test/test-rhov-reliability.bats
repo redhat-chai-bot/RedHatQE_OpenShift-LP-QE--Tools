@@ -245,7 +245,9 @@ write_elf_memory_fixture() {
   write_elf_memory_fixture "$EVIDENCE_ROOT/fixture-recovery-001/vm-memory.elf"; run_recovery
   [ "$status" -eq 0 ]
   rm -rf "$EVIDENCE_ROOT/fixture-recovery-001"; write_recovery_metadata; MISSING_GUESTFISH=1; run_recovery
-  [ "$status" -ne 0 ]; grep -q 'guestfish not available or block device not accessible' "$EVIDENCE_ROOT/fixture-recovery-001/stage-errors.jsonl"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *guestfish* ]]
+  [ ! -e "$EVIDENCE_ROOT/fixture-recovery-001/stage-errors.jsonl" ]
 }
 
 make_watcher_mocks() {

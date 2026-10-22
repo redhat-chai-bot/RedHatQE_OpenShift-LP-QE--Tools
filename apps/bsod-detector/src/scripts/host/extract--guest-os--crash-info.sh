@@ -61,50 +61,23 @@ typeset stale=''
 stale="$(find -H "${outDir}" -mindepth 1 \( -name MEMORY.DMP -o -name Minidump -o -name 'guestFS_*' -o -name events.json -o -name extraction-summary.json -o -name checksums.sha256 \) -print -quit)"
 [ -z "${stale}" ] || { : "Pre-existing extraction artifact rejected: ${stale}"; false; }
 
-typeset stageErrors="${outDir}/stage-errors.jsonl"
-touch "${stageErrors}"
-chmod 0600 "${stageErrors}"
-typeset extractLog="${outDir}/extraction.log"
-: 1> "${extractLog}"
-chmod 0600 "${extractLog}"
 typeset -i hasPod=0
 typeset helperPod='' container='libguestfs'
-
-function RecordError () {
-    typeset stage="${1:?}" at=''
-    shift
-    at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    jq -cn --arg stage "${stage}" --arg error "$*" --arg at "${at}" \
-        '{stage:$stage,error:$error,at:$at}' 1>> "${stageErrors}"
-    echo "${scrName%.sh}: ERROR [${stage}]: $*" 1>&2
-    return 0
-}
 
 function Cleanup () {
     ((hasPod)) || return 0
     hasPod=0
     typeset -i status=0
     timeout --signal=TERM --kill-after=5 70 oc --request-timeout=65s \
-        delete pod "${helperPod}" -n "${ns}" --ignore-not-found --wait=false 1>> "${extractLog}" 2>&1 || {
-        RecordError cleanup "failed to delete guestfs-ntfs pod ${helperPod}"
-        status=1
-    }
+        delete pod "${helperPod}" -n "${ns}" --ignore-not-found --wait=false || status=1
     timeout --signal=TERM --kill-after=5 70 oc --request-timeout=65s \
-        wait pod "${helperPod}" -n "${ns}" --for=delete --timeout=60s 1>> "${extractLog}" 2>&1 || {
-        RecordError cleanup "failed waiting for guestfs-ntfs pod ${helperPod} deletion"
-        status=1
-    }
+        wait pod "${helperPod}" -n "${ns}" --for=delete --timeout=60s || status=1
     return "${status}"
 }
 
-function OnSignal () {
-    typeset -i status="${1:?}"
-    RecordError interrupted "received signal; exiting with status ${status}"
-    exit "${status}"
-}
 trap Cleanup EXIT
-trap 'OnSignal 130' INT
-trap 'OnSignal 143' TERM
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 function FindNTFS () {
     typeset output='' device='' fsType=''
@@ -145,10 +118,7 @@ attachedVmis="$(jq -r --arg pvc "${guestPVC}" '
     : 'Cannot parse VMI list — PVC attachment state uncertain.'
     false
 }
-if [ -n "${attachedVmis}" ]; then
-    RecordError extraction 'source PVC is attached to a VMI (direct or DataVolume); cannot safely mount'
-    exit 1
-fi
+[ -z "${attachedVmis}" ]
 
 helperPod="guestfs-ntfs-$(date -u +%s)-$$"
 typeset guestfsImage="${BSOD_DET__GUESTFS__NTFS_IMAGE:-quay.io/konveyor/oadp-vmfr-access:latest}"
@@ -182,27 +152,18 @@ jq -n --arg name "${helperPod}" --arg ns "${ns}" --arg image "${guestfsImage}" -
         {name:"guestfs-tmp",emptyDir:{}}, {name:"guestfs-home",emptyDir:{}}
       ]
     }
-  }' | oc apply -f - 1>> "${extractLog}"
+  }' | oc apply -f -
 
-oc --request-timeout=185s wait pod "${helperPod}" -n "${ns}" --for=jsonpath='{.status.phase}'=Running --timeout=180s 1>> "${extractLog}" 2>&1 || {
-    RecordError extraction-pod "guestfs-ntfs pod '${helperPod}' startup timed out"
-    exit 1
-}
+oc --request-timeout=185s wait pod "${helperPod}" -n "${ns}" --for=jsonpath='{.status.phase}'=Running --timeout=180s
 oc exec -n "${ns}" "${helperPod}" -c "${container}" -- \
-    guestfish --ro -a /dev/vda run : list-filesystems 1>> "${extractLog}" 2>&1 || {
-    RecordError extraction-pod 'guestfish not available or block device not accessible'
-    exit 1
-}
+    guestfish --ro -a /dev/vda run : list-filesystems
 
 typeset -a evtxArr=(
     '/Windows/System32/winevt/Logs/System.evtx'
     '/Windows/System32/winevt/Logs/Application.evtx'
 )
 typeset ntfsPart='' ntfsOutput=''
-ntfsOutput="$(FindNTFS)" || {
-    RecordError extraction 'NTFS discovery failed or found no NTFS partitions'
-    exit 1
-}
+ntfsOutput="$(FindNTFS)"
 # One QEMU session per partition avoids repeated startup OOMs. Copy each result
 # independently: a missing Application.evtx must not discard a valid System.evtx.
 while IFS= read -r ntfsPart; do
@@ -217,7 +178,7 @@ while IFS= read -r ntfsPart; do
     done
     batchArr+=(: umount-all)
     oc exec -n "${ns}" "${helperPod}" -c "${container}" -- \
-        guestfish "${batchArr[@]}" 1>> "${extractLog}" 2>&1 || true
+        guestfish "${batchArr[@]}" || true
 
     typeset -i index=0
     for filePath in "${evtxArr[@]}"; do
@@ -225,7 +186,7 @@ while IFS= read -r ntfsPart; do
         index+=1
         typeset dest="${outDir}/guestFS_${partId}${filePath}"
         mkdir -p "${dest%/*}"
-        if oc cp "${ns}/${helperPod}:${podTemp}" "${dest}" -c "${container}" 2>> "${extractLog}" && [ -s "${dest}" ]; then
+        if oc cp "${ns}/${helperPod}:${podTemp}" "${dest}" -c "${container}" && [ -s "${dest}" ]; then
             chmod 0600 "${dest}"
             hasLogs=1
         else
@@ -243,10 +204,7 @@ if [ ! -s "${outDir}/parse-dump-header.json" ]; then
         1> "${outDir}/parse-dump-header.json"
     chmod 0600 "${outDir}/parse-dump-header.json"
 fi
-if ! jq -e '.ok == true' "${outDir}/parse-dump-header.json" 1> /dev/null; then
-    RecordError dump-parse 'dump parser failed or reported semantic failure'
-    exit 1
-fi
+jq -e '.ok == true' "${outDir}/parse-dump-header.json" 1> /dev/null
 jq -n '{"ok":true,"note":"extract-evtx.py is a developer tool — run offline against guestFS_<partition>/Windows/System32/winevt/Logs/*.evtx","events":[]}' \
     1> "${outDir}/events.json"
 chmod 0600 "${outDir}/events.json"
@@ -263,7 +221,7 @@ chmod 0600 "${outDir}/events.json"
 typeset -i cleanupStatus=0 summaryStatus=0
 Cleanup || cleanupStatus=$?
 timeout --signal=TERM --kill-after=5 60 python3 "${scrDir}/reliability.py" write-summary \
-    --out "${outDir}" --stage-errors "${stageErrors}" --mode rhov-snapshot-recovery \
+    --out "${outDir}" --stage-errors "${outDir}/stage-errors.jsonl" --mode rhov-snapshot-recovery \
     --vm "${vm}" --namespace "${ns}" --run-id "${runId}" --filename extraction-summary.json 1> /dev/null || summaryStatus=$?
 ((cleanupStatus == 0 && summaryStatus == 0)) || exit 1
 exit 0
