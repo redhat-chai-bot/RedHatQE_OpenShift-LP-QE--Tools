@@ -31,15 +31,30 @@ for tool in oc jq python3 sha256sum timeout; do
     }
 done
 
-typeset runId='' ns='' vm='' guestPVC='' field=''
-typeset -A fieldArr=([runId]=runId [outDir]=outputDir [ns]=namespace [vm]=vm [guestPVC]=guestPvc)
-for field in "${!fieldArr[@]}"; do
-    typeset -n fieldRef="${field}"
-    fieldRef="$(jq -er --arg key "${fieldArr[${field}]}" \
-        '.[$key] | select((type == "string") and (length > 0))' "${metadataFile}")" ||
-        { : "Metadata lacks a non-empty string: ${fieldArr[${!fieldRef}]}"; false; exit 1; }
+typeset k=''
+typeset -A fldChk=(
+    [runId]=.runId
+    [outDir]=.outputDir
+    [ns]=.namespace
+    [vm]=.vm
+    [guestPVC]=.guestPvc
+)
+for k in "${!fldChk[@]}"; do
+    eval "typeset ${k}=''"
+    typeset -n varRef="${k}"
+    varRef="$(
+        jq -er \
+            "
+                ${fldChk[${k}]}"' |
+                select((type == "string") and (length > 0))
+            ' \
+            "${metadataFile}"
+    )" || {
+        : "Missing \`${fldChk[${k}]}\` in metadata."
+        false
+    }
 done
-unset -n fieldRef
+unset -n varRef
 mkdir -p "${outDir}" || { : "Cannot create output directory: ${outDir}"; false; exit 1; }
 
 # Watcher-owned captures may exist, but extraction must not overwrite stale data.

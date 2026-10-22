@@ -277,7 +277,7 @@ class RecoveryTests(unittest.TestCase):
                 if ': ' not in message:
                     self.assertTrue(message.endswith('.'))
         self.assertIn(('"', 'Required tool missing: ${tool}'), messages)
-        self.assertIn(('"', 'Metadata lacks a non-empty string: ${fieldArr[${!fieldRef}]}'), messages)
+        self.assertIn(('"', r'Missing \`${fldChk[${k}]}\` in metadata.'), messages)
 
     def test_relative_host_path_resolves_helpers(self):
         result = self.RunRecovery(script=f'./{recovery.name}', cwd=hostDir)
@@ -388,7 +388,7 @@ class RecoveryTests(unittest.TestCase):
                 result = case.RunRecovery()
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn('Cannot create output directory:' if scenario == 'file' else
-                              'Metadata lacks a non-empty string:', result.stderr)
+                              'Missing `.outputDir` in metadata.', result.stderr)
                 self.assertFalse(case.Calls())
                 self.assertEqual({path.name: path.read_bytes() for path in case.out.iterdir()}, before)
 
@@ -549,7 +549,7 @@ source "$1" "${@:2}"
         result = self.RunRecovery(script=alias)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(f'typeset scrName={alias.name}', result.stderr)
-        self.assertIn('Metadata lacks a non-empty string: guestPvc', result.stderr)
+        self.assertIn('Missing `.guestPvc` in metadata.', result.stderr)
         self.assertFalse(self.Calls())
 
     def test_metadata_guard_rejects_missing_or_unreadable_inputs(self):
@@ -674,21 +674,25 @@ source "$1" "${@:2}"
                     before = {path.name: path.read_bytes() for path in case.out.iterdir()}
                     result = case.RunRecovery()
                     self.assertEqual(result.returncode, 1, result.stderr)
-                    self.assertIn(f'Metadata lacks a non-empty string: {field}', result.stderr)
+                    self.assertIn(f'Missing `.{field}` in metadata.', result.stderr)
+                    self.assertNotIn('command not found', result.stderr)
                     self.assertFalse(case.Calls())
                     self.assertEqual({path.name: path.read_bytes() for path in case.out.iterdir()}, before)
 
     def test_metadata_mapping_preserves_schema_and_treats_values_as_data(self):
         source = recovery.read_text()
-        self.assertIn('[guestPVC]=guestPvc', source)
-        self.assertIn('typeset -n fieldRef="${field}"', source)
+        self.assertIn('[guestPVC]=.guestPvc', source)
+        self.assertIn('typeset -n varRef="${k}"', source)
+        self.assertIn('eval "typeset ${k}=\'\'"', source)
         self.assertNotIn('${guestPvc}', source)
-        self.assertNotIn('eval ', source)
+        for obsolete in ('fieldArr', 'fieldRef', 'fldChkLst', '--arg kPath', '--arg key'):
+            self.assertNotIn(obsolete, source)
         self.assertIn('select((type == "string") and (length > 0))', source)
         sentinel = self.root / 'must-not-execute'
         self.metadata['vm'] = f'$(touch "{sentinel}")'
         self.metadata['guestPVC'] = 'ignored-schema-alias'
-        self.metadata['fieldRef'] = 'ignored-destination'
+        for name in ('k', 'fldChk', 'varRef'):
+            self.metadata[name] = f'$(touch "{sentinel}")'
         result = self.RunRecovery()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(sentinel.exists())
@@ -697,6 +701,26 @@ source "$1" "${@:2}"
         summary = json.loads((self.out / 'extraction-summary.json').read_text())
         self.assertEqual(summary['vm'], self.metadata['vm'])
         self.AssertDeleted()
+
+    def test_metadata_loop_preserves_all_five_literal_values(self):
+        source = recovery.read_text()
+        loop = source[source.index("typeset k=''"):source.index('mkdir -p "${outDir}"')]
+        mappings = {'runId': 'runId', 'outDir': 'outputDir', 'ns': 'namespace',
+                    'vm': 'vm', 'guestPVC': 'guestPvc'}
+        self.assertEqual(dict(re.findall(r'^    \[(\w+)\]=\.(\w+)$', loop, re.M)), mappings)
+        self.assertEqual(re.findall(r'^    eval (.*)$', loop, re.M), ['"typeset ${k}=\'\'"'])
+        sentinel = self.root / 'must-not-execute'
+        values = [f'{key} \' " `touch {sentinel}` $(touch {sentinel}) \\ literal\nnext'
+                  for key in mappings]
+        self.meta.write_text(json.dumps(dict(zip(mappings.values(), values))))
+        command = ('set -euxo pipefail; shopt -s inherit_errexit\nmetadataFile="${1}"\n'
+                   + loop + '\nprintf \'%s\\0\' "${runId}" "${outDir}" "${ns}" "${vm}" "${guestPVC}"\n')
+        result = subprocess.run(['bash', '-c', command, 'literal-metadata', str(self.meta)],
+                                env=self.env, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stdout.decode().split('\0'), values + [''])
+        self.assertFalse(sentinel.exists())
+        self.assertFalse(self.Calls())
 
     def test_signal_cleans_once(self):
         result = self.RunRecovery('signal')
