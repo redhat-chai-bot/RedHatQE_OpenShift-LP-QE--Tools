@@ -67,11 +67,15 @@ elif args[0] == 'exec':
             sys.exit(20)
         if 'list-filesystems' in command:
             probe = root / 'probe-done'
-            if scenario == 'discovery-error' and probe.exists():
+            if scenario in ('discovery-error', 'discovery-partial-error') and probe.exists():
+                if scenario == 'discovery-partial-error':
+                    print('/dev/sda3: ntfs')
                 print('mock discovery failure', file=sys.stderr)
                 sys.exit(26)
             probe.touch()
-            if scenario != 'no-ntfs':
+            if scenario == 'no-ntfs':
+                print('/dev/sda1: vfat\n/dev/sda2: ext4')
+            elif scenario != 'empty-filesystems':
                 print('/dev/sda1: vfat\n/dev/sda2: ntfs\n/dev/sda3: ntfs\n/dev/sda4: ntfs')
         else:
             part = command[command.index('mount-ro') + 1]
@@ -239,7 +243,7 @@ class RecoveryTests(unittest.TestCase):
     def test_all_die_messages_have_consistent_grammar(self):
         source = recovery.read_text()
         messages = re.findall(r'\bDie ([\'"])(.*?)\1', source)
-        self.assertEqual(len(messages), 10)
+        self.assertEqual(len(messages), 6)
         self.assertEqual(len(re.findall(r'\bDie\b', source)), len(messages) + 1)
         for quote, message in messages:
             with self.subTest(message=message):
@@ -247,7 +251,7 @@ class RecoveryTests(unittest.TestCase):
                 if ': ' not in message:
                     self.assertTrue(message.endswith('.'))
         self.assertIn(('"', 'Required tool missing: ${tool}'), messages)
-        self.assertIn(("'", 'Metadata lacks a non-empty guest PVC.'), messages)
+        self.assertIn(('"', 'Metadata lacks a non-empty string: ${fieldArr[${!fieldRef}]}'), messages)
 
     def test_relative_host_path_resolves_helpers(self):
         result = self.RunRecovery(script=f'./{recovery.name}', cwd=hostDir)
@@ -481,6 +485,37 @@ source "$1" "${@:2}"
                 if scenario != 'cleanup-error':
                     self.assertFalse(list(case.out.glob('**/*.evtx')))
 
+    def test_discovery_failure_or_empty_result_stops_and_cleans(self):
+        for scenario in ('discovery-error', 'discovery-partial-error', 'no-ntfs', 'empty-filesystems'):
+            with self.subTest(scenario=scenario):
+                case = RecoveryTests('test_success_contract')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                result = case.RunRecovery(scenario)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                case.AssertDeleted()
+                self.assertFalse(any(call[0] == 'cp' for call in case.Calls()))
+                self.assertFalse((case.out / 'parse-dump-header.json').exists())
+                self.assertFalse((case.out / 'extraction-summary.json').exists())
+                errors = [json.loads(line) for line in (case.out / 'stage-errors.jsonl').read_text().splitlines()]
+                self.assertEqual(errors[0]['stage'], 'extraction')
+                self.assertIn('NTFS discovery failed or found no NTFS partitions', errors[0]['error'])
+                if scenario.startswith('discovery-'):
+                    self.assertIn('mock discovery failure', (case.out / 'extraction.log').read_text())
+
+    def test_find_ntfs_status_in_conditional_context(self):
+        helper = re.search(r'^function FindNTFS \(\) \{\n.*?^\}', recovery.read_text(), re.MULTILINE | re.DOTALL).group()
+        for scenario in ('', 'discovery-partial-error', 'no-ntfs', 'empty-filesystems'):
+            with self.subTest(scenario=scenario):
+                (self.root / 'probe-done').touch()
+                command = ('set -euxo pipefail; shopt -s inherit_errexit\n'
+                           'typeset ns=fixture-ns pod=fixture-pod container=libguestfs extractLog="${1}"\n'
+                           + helper + '\ntypeset -i status=0\nFindNTFS || status=$?\nexit "${status}"\n')
+                result = subprocess.run(['bash', '-c', command, 'discovery-fixture', str(self.root / 'discovery.log')],
+                                        env=dict(self.env, SCENARIO=scenario), text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0 if not scenario else 1, result.stderr)
+                self.assertEqual(result.stdout, '/dev/sda2\n/dev/sda3\n/dev/sda4\n' if not scenario else '')
+
     def test_failed_apply_stops_before_extraction(self):
         result = self.RunRecovery('apply-error')
         self.assertNotEqual(result.returncode, 0, result.stderr)
@@ -513,9 +548,8 @@ source "$1" "${@:2}"
         self.AssertDeleted()
 
     def test_malformed_required_fields_fail_before_mutation(self):
-        for field, label in (('runId', 'run ID'), ('namespace', 'namespace'),
-                             ('vm', 'VM name'), ('guestPvc', 'guest PVC')):
-            for value in ('missing', None, '', 42, [], {}):
+        for field in ('runId', 'outputDir', 'namespace', 'vm', 'guestPvc'):
+            for value in ('missing', None, '', 42, [], {}, False, True):
                 with self.subTest(field=field, value=value):
                     case = RecoveryTests('test_success_contract')
                     case.setUp()
@@ -527,9 +561,29 @@ source "$1" "${@:2}"
                     before = {path.name: path.read_bytes() for path in case.out.iterdir()}
                     result = case.RunRecovery()
                     self.assertEqual(result.returncode, 1, result.stderr)
-                    self.assertIn(f'Metadata lacks a non-empty {label}.', result.stderr)
+                    self.assertIn(f'Metadata lacks a non-empty string: {field}', result.stderr)
                     self.assertFalse(case.Calls())
                     self.assertEqual({path.name: path.read_bytes() for path in case.out.iterdir()}, before)
+
+    def test_metadata_mapping_preserves_schema_and_treats_values_as_data(self):
+        source = recovery.read_text()
+        self.assertIn('[guestPVC]=guestPvc', source)
+        self.assertIn('typeset -n fieldRef="${field}"', source)
+        self.assertNotIn('${guestPvc}', source)
+        self.assertNotIn('eval ', source)
+        self.assertIn('select((type == "string") and (length > 0))', source)
+        sentinel = self.root / 'must-not-execute'
+        self.metadata['vm'] = f'$(touch "{sentinel}")'
+        self.metadata['guestPVC'] = 'ignored-schema-alias'
+        self.metadata['fieldRef'] = 'ignored-destination'
+        result = self.RunRecovery()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(sentinel.exists())
+        pod = json.loads((self.root / 'pod.json').read_text())
+        self.assertEqual(pod['spec']['volumes'][0]['persistentVolumeClaim']['claimName'], 'rootdisk')
+        summary = json.loads((self.out / 'extraction-summary.json').read_text())
+        self.assertEqual(summary['vm'], self.metadata['vm'])
+        self.AssertDeleted()
 
     def test_signal_cleans_once(self):
         result = self.RunRecovery('signal')

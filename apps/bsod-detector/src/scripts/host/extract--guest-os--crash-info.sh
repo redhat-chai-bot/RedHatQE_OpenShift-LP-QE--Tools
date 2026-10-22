@@ -32,20 +32,21 @@ for tool in oc jq python3 sha256sum timeout; do
     command -v "${tool}" 1> /dev/null || Die "Required tool missing: ${tool}"
 done
 
-typeset runId=''
-runId="$(jq -er '.runId | select(type == "string" and length > 0)' "${metadataFile}")" || Die 'Metadata lacks a non-empty run ID.'
-outDir="$(jq -er '.outputDir | select(type == "string" and length > 0)' "${metadataFile}")" || Die 'Metadata lacks a non-empty output directory.'
+typeset runId='' ns='' vm='' guestPVC='' field=''
+typeset -A fieldArr=([runId]=runId [outDir]=outputDir [ns]=namespace [vm]=vm [guestPVC]=guestPvc)
+for field in "${!fieldArr[@]}"; do
+    typeset -n fieldRef="${field}"
+    fieldRef="$(jq -er --arg key "${fieldArr[${field}]}" \
+        '.[$key] | select((type == "string") and (length > 0))' "${metadataFile}")" ||
+        Die "Metadata lacks a non-empty string: ${fieldArr[${!fieldRef}]}"
+done
+unset -n fieldRef
 [ -d "${outDir}" ] || Die "Output path is not a directory: ${outDir}"
 
 # Watcher-owned captures may exist, but extraction must not overwrite stale data.
 typeset stale=''
 stale="$(find -H "${outDir}" -mindepth 1 \( -name MEMORY.DMP -o -name Minidump -o -name 'guestFS_*' -o -name events.json -o -name extraction-summary.json -o -name checksums.sha256 \) -print -quit)"
 [ -z "${stale}" ] || Die "Pre-existing extraction artifact rejected: ${stale}"
-
-typeset ns='' vm='' guestPvc=''
-ns="$(jq -er '.namespace | select(type == "string" and length > 0)' "${metadataFile}")" || Die 'Metadata lacks a non-empty namespace.'
-vm="$(jq -er '.vm | select(type == "string" and length > 0)' "${metadataFile}")" || Die 'Metadata lacks a non-empty VM name.'
-guestPvc="$(jq -er '.guestPvc | select(type == "string" and length > 0)' "${metadataFile}")" || Die 'Metadata lacks a non-empty guest PVC.'
 
 typeset stageErrors="${outDir}/stage-errors.jsonl"
 touch "${stageErrors}"
@@ -95,8 +96,10 @@ trap 'OnSignal 143' TERM
 
 function FindNTFS () {
     typeset output='' device='' fsType=''
-    output="$(oc exec -n "${ns}" "${pod}" -c "${container}" -- \
-        guestfish --ro -a /dev/vda run : list-filesystems 2>> "${extractLog}")" || return 1
+    output="$(
+        oc exec -n "${ns}" "${pod}" -c "${container}" -- \
+            guestfish --ro -a /dev/vda run : list-filesystems 2>> "${extractLog}"
+    )" || return 1
     typeset -a partArr=()
     while IFS=': ' read -r device fsType; do
         if [ -n "${device}" ] && [ "${fsType}" = ntfs ]; then
@@ -111,9 +114,9 @@ function FindNTFS () {
 # Uncertain attachment state must block extraction, including DataVolume references.
 typeset vmiJson='' attachedVmis=''
 vmiJson="$(oc get vmi -n "${ns}" -o json)" || Die "Cannot list VMIs in namespace ${ns} — API error prevents safe PVC attachment verification."
-attachedVmis="$(jq -r --arg pvc "${guestPvc}" '
+attachedVmis="$(jq -r --arg pvc "${guestPVC}" '
   .items[] | select(
-    .status.phase == "Running" and
+    (.status.phase == "Running") and
     (.spec.volumes // [] | map(.persistentVolumeClaim.claimName // "", .dataVolume.name // "") | any(. == $pvc))
   ) | .metadata.name' 0<<<"${vmiJson}")" || Die 'Cannot parse VMI list — PVC attachment state uncertain.'
 if [ -n "${attachedVmis}" ]; then
@@ -125,7 +128,7 @@ typeset suffix=''
 suffix="$(date -u +%s)-$$"
 pod="guestfs-ntfs-${suffix}"
 typeset guestfsImage="${BSOD_DET__GUESTFS__NTFS_IMAGE:-quay.io/konveyor/oadp-vmfr-access:latest}"
-jq -n --arg name "${pod}" --arg ns "${ns}" --arg image "${guestfsImage}" --arg pvc "${guestPvc}" '
+jq -n --arg name "${pod}" --arg ns "${ns}" --arg image "${guestfsImage}" --arg pvc "${guestPVC}" '
   {
     apiVersion:"v1", kind:"Pod",
     metadata:{name:$name,namespace:$ns,labels:{app:"bsod-guestfs-extraction"}},
@@ -171,10 +174,14 @@ typeset -a ntfsArr=() evtxArr=(
     '/Windows/System32/winevt/Logs/System.evtx'
     '/Windows/System32/winevt/Logs/Application.evtx'
 )
-typeset ntfsPart=''
+typeset ntfsPart='' ntfsOutput=''
+ntfsOutput="$(FindNTFS)" || {
+    RecordError extraction 'NTFS discovery failed or found no NTFS partitions'
+    exit 1
+}
 while IFS= read -r ntfsPart; do
     ntfsArr+=("${ntfsPart}")
-done 0< <(FindNTFS)
+done 0<<< "${ntfsOutput}"
 
 # One QEMU session per partition avoids repeated startup OOMs. Copy each result
 # independently: a missing Application.evtx must not discard a valid System.evtx.
