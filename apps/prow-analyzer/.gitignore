@@ -1,6 +1,7 @@
-# Go binaries
-prow-analyzer--cli
-prow-analyzer--bot
+# Go binaries (built to the module root; anchored so the rules do NOT also match
+# the identically named cmd/ source directories)
+/prow-analyzer--cli
+/prow-analyzer--bot
 *.test
 
 # Coverage

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/RedHatQE/OpenShift-LP-QE--Tools/apps/prow-analyzer/pkg/audit"
@@ -61,29 +62,43 @@ type Analyzer struct {
 	sessionMtx  sync.Mutex
 	initMtx     sync.Mutex
 	initialized bool
+	// Distinct JSON-RPC IDs identify concurrent requests sharing this MCP session.
+	// Response delivery is tied to the HTTP round-trip, not ID validation.
+	nextID      atomic.Int64
 	insecureTLS bool
+	debug       bool
+	timeout     time.Duration
 	jsonMarshal func(v interface{}) ([]byte, error)
 	newRequest  func(ctx context.Context, method, url string, body io.Reader) (*http.Request, error)
 }
 
-// defaultMCPTimeout is the HTTP client timeout for ship-help MCP requests. It
-// caps the ENTIRE request, including reading the streamed SSE response body, so
-// it must exceed the longest analysis. Upgrade-interop jobs can take >10 min, so
-// the default is 20 min. Override with MCP_TIMEOUT_SECONDS (see MCPTimeout).
-const defaultMCPTimeout = 1200 * time.Second
+// DefaultMCPTimeout bounds HTTP requests, including reading streamed SSE bodies.
+// Allow enough time for analysis generation. MCPTimeout and WithTimeout provide
+// environment and per-instance overrides.
+const DefaultMCPTimeout = 1200 * time.Second
 
 // MCPTimeout returns the ship-help MCP HTTP client timeout. It reads
 // MCP_TIMEOUT_SECONDS (a positive integer number of seconds) and falls back to
-// defaultMCPTimeout when the var is unset, empty, or invalid. It is exported so
-// callers can size behavior (e.g. the handler's dedup window) to outlast the
-// longest an analysis may run.
+// DefaultMCPTimeout when the var is unset, empty, or invalid. This bounds each
+// HTTP request, not total analysis duration across requests and retries.
 func MCPTimeout() time.Duration {
 	if v := os.Getenv("MCP_TIMEOUT_SECONDS"); v != "" {
 		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
 			return time.Duration(secs) * time.Second
 		}
 	}
-	return defaultMCPTimeout
+	return DefaultMCPTimeout
+}
+
+// Timeout returns the effective HTTP client timeout this Analyzer uses for
+// MCP/Prow requests: the value supplied via WithTimeout when positive, otherwise
+// the MCPTimeout default. Consumers sizing request-timeout-related windows
+// should use this accessor to honor per-instance overrides, not MCPTimeout.
+func (a *Analyzer) Timeout() time.Duration {
+	if a.timeout > 0 {
+		return a.timeout
+	}
+	return MCPTimeout()
 }
 
 // AnalyzerOption configures optional Analyzer behavior. Existing callers that
@@ -105,6 +120,25 @@ func WithInsecureSkipVerify(insecure bool) AnalyzerOption {
 	return func(a *Analyzer) { a.insecureTLS = insecure }
 }
 
+// WithDebug overrides MCP_DEBUG for SSE line/byte-count logging. Payloads are
+// omitted from these logs because they may contain sensitive analysis content.
+func WithDebug(debug bool) AnalyzerOption {
+	return func(a *Analyzer) { a.debug = debug }
+}
+
+// WithTimeout overrides the HTTP client timeout for MCP/Prow requests. It lets
+// callers (e.g. the bot's --mcp-timeout flag) drive the timeout explicitly,
+// overriding the MCP_TIMEOUT_SECONDS env var default read by MCPTimeout. A
+// non-positive duration is ignored, leaving the MCPTimeout default in place. It
+// has no effect when WithHTTPClient supplies a client.
+func WithTimeout(d time.Duration) AnalyzerOption {
+	return func(a *Analyzer) {
+		if d > 0 {
+			a.timeout = d
+		}
+	}
+}
+
 // NewAnalyzer creates a new Analyzer instance
 func NewAnalyzer(mcpURL, token, promptTemplate string, opts ...AnalyzerOption) *Analyzer {
 	a := &Analyzer{
@@ -114,13 +148,18 @@ func NewAnalyzer(mcpURL, token, promptTemplate string, opts ...AnalyzerOption) *
 		jsonMarshal: json.Marshal,
 		newRequest:  http.NewRequestWithContext,
 		insecureTLS: os.Getenv("TLS_INSECURE_SKIP_VERIFY") == "true",
+		debug:       os.Getenv("MCP_DEBUG") == "true",
 	}
 	for _, opt := range opts {
 		opt(a)
 	}
 	if a.client == nil {
+		timeout := a.timeout
+		if timeout <= 0 {
+			timeout = MCPTimeout()
+		}
 		httpClient := &http.Client{
-			Timeout: MCPTimeout(),
+			Timeout: timeout,
 		}
 		if a.insecureTLS {
 			httpClient.Transport = &http.Transport{
@@ -174,7 +213,7 @@ type AnalysisResult struct {
 // AnalysisTimings captures where wall-clock time is spent within a single
 // analysis, so slow requests can be attributed to the right subsystem.
 type AnalysisTimings struct {
-	SessionInit time.Duration // MCP "initialize" round-trip(s); 0 when the session was already established
+	SessionInit time.Duration // session check/establishment, including lock waiting and retry setup
 	Marshal     time.Duration // JSON marshalling of the tools/call request
 	MCPRequest  time.Duration // MCP tools/call HTTP round-trip up to response headers (time-to-first-byte)
 	SSERead     time.Duration // reading the SSE response body (includes model generation/streaming time)
@@ -215,7 +254,7 @@ func (a *Analyzer) AnalyzeFailure(ctx context.Context, jobURL string) (*Analysis
 	return result, err
 }
 
-// attachSessionInit records session-establishment time on the result, if any.
+// attachSessionInit records session-check/establishment time on the result, if any.
 func attachSessionInit(result *AnalysisResult, sessionInit time.Duration) {
 	if result != nil {
 		result.Timings.SessionInit = sessionInit
@@ -264,13 +303,12 @@ func isSessionNotFound(err error) bool {
 }
 
 func (a *Analyzer) doAnalysis(ctx context.Context, jobURL string, startTime time.Time) (*AnalysisResult, error) {
-	// Build prompt using the configured template
 	prompt := strings.ReplaceAll(a.template, "{job_url}", jobURL)
 
-	// Call ship-help MCP tools/call method
+	// Allocate a distinct ID for each request sharing the MCP session.
 	reqBody := MCPRequest{
 		JSONRPC: "2.0",
-		ID:      1,
+		ID:      int(a.nextID.Add(1)),
 		Method:  "tools/call",
 		Params: map[string]interface{}{
 			"name": "ask_persona",
@@ -318,21 +356,24 @@ func (a *Analyzer) doAnalysis(ctx context.Context, jobURL string, startTime time
 	defer resp.Body.Close()
 	mcpRequestDur := time.Since(reqStart)
 
-	// Check HTTP status code before reading body
 	if resp.StatusCode != http.StatusOK {
+		// Keep backend body content out of returned errors and operational logs.
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		// Re-emit only the fixed control-flow marker so stale-session retry survives
+		// payload elision without copying backend text into the error.
+		if bytes.Contains(body, []byte("Session not found")) {
+			return nil, fmt.Errorf("HTTP %d: Session not found", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("HTTP %d (%d-byte body elided)", resp.StatusCode, len(body))
 	}
 
-	// Read SSE stream line by line, skipping pings and comments
 	sseStart := time.Now()
-	sseData, err := readSSEData(resp.Body)
+	sseData, err := readSSEData(resp.Body, a.debug)
 	if err != nil {
 		return nil, fmt.Errorf("read SSE stream: %w", err)
 	}
 	sseReadDur := time.Since(sseStart)
 
-	// Parse MCP response
 	parseStart := time.Now()
 	var mcpResp MCPResponse
 	if err := json.Unmarshal([]byte(sseData), &mcpResp); err != nil {
@@ -340,12 +381,15 @@ func (a *Analyzer) doAnalysis(ctx context.Context, jobURL string, startTime time
 	}
 	parseDur := time.Since(parseStart)
 
-	// Check for errors
+	// Omit backend message content from returned errors; retain only the code
+	// and the fixed session-recovery marker needed by the retry path.
 	if mcpResp.Error != nil {
-		return nil, fmt.Errorf("MCP error %d: %s", mcpResp.Error.Code, mcpResp.Error.Message)
+		if strings.Contains(mcpResp.Error.Message, "Session not found") {
+			return nil, fmt.Errorf("MCP error %d: Session not found", mcpResp.Error.Code)
+		}
+		return nil, fmt.Errorf("MCP error %d (message elided)", mcpResp.Error.Code)
 	}
 
-	// Extract analysis text
 	if len(mcpResp.Result.Content) == 0 {
 		return nil, fmt.Errorf("no content in response")
 	}
@@ -489,10 +533,8 @@ func personaFromURL(u string) string {
 	return rest
 }
 
-// FormatSlackResponse formats the analysis for Slack using Block Kit
-// Returns a simple text message since we're posting in a thread
+// FormatSlackResponse formats the analysis as text for a Slack thread reply.
 func FormatSlackResponse(result *AnalysisResult) string {
-	// Guard against nil result to prevent panic
 	if result == nil {
 		return WithDisclaimer("❌ Error: Unable to format analysis (nil result)")
 	}
@@ -509,10 +551,10 @@ func FormatSlackResponse(result *AnalysisResult) string {
 
 // initializeSession initializes an MCP session and stores the session ID
 func (a *Analyzer) initializeSession(ctx context.Context) error {
-	// Create initialize request with required MCP protocol params
+	// Session recovery uses the same request-ID allocator as tools/call.
 	reqBody := MCPRequest{
 		JSONRPC: "2.0",
-		ID:      0,
+		ID:      int(a.nextID.Add(1)),
 		Method:  "initialize",
 		Params: map[string]interface{}{
 			"protocolVersion": "2024-11-05",
@@ -557,15 +599,14 @@ func (a *Analyzer) initializeSession(ctx context.Context) error {
 		return fmt.Errorf("read response: %w", err)
 	}
 
-	// Check HTTP status code first
+	// Report initialization failures as metadata, not backend body content.
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("init request failed (HTTP %d): %s", resp.StatusCode, string(body))
+		return fmt.Errorf("init request failed (HTTP %d, %d-byte body elided)", resp.StatusCode, len(body))
 	}
 
-	// Extract session ID from response header
 	sessionID := resp.Header.Get("Mcp-Session-Id")
 	if sessionID == "" {
-		return fmt.Errorf("no session ID in response (HTTP %d): %s", resp.StatusCode, string(body))
+		return fmt.Errorf("no session ID in response (HTTP %d, %d-byte body elided)", resp.StatusCode, len(body))
 	}
 
 	a.sessionMtx.Lock()
@@ -574,32 +615,40 @@ func (a *Analyzer) initializeSession(ctx context.Context) error {
 	return nil
 }
 
-// readSSEData reads an SSE stream line by line, skipping comment/ping lines,
-// and returns the first "data:" payload containing JSON.
-func readSSEData(r io.Reader) (string, error) {
+// readSSEData reads an SSE stream line by line, skipping comment/ping and empty
+// lines, and returns the first nonempty "data:" payload.
+//
+// Debug logging records only line/byte counts, not potentially sensitive SSE
+// payloads; without debug opt-in, these stream logs are suppressed.
+func readSSEData(r io.Reader, debug bool) (string, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	lineCount := 0
 	for scanner.Scan() {
 		line := scanner.Text()
 		lineCount++
-		// Skip empty lines
 		if line == "" {
 			continue
 		}
-		// Log SSE comments/pings for debugging
+		// SSE comment/ping line — metadata only, never content.
 		if strings.HasPrefix(line, ":") {
-			fmt.Printf("PROW-ANALYZER SSE: ping received (line %d)\n", lineCount)
+			if debug {
+				fmt.Printf("PROW-ANALYZER SSE: ping received (line %d)\n", lineCount)
+			}
 			continue
 		}
 		if data, found := strings.CutPrefix(line, "data:"); found {
 			data = strings.TrimSpace(data)
-			fmt.Printf("PROW-ANALYZER SSE: data line received (line %d, %d bytes, starts=%q)\n", lineCount, len(data), data[:min(len(data), 40)])
+			// Metadata only (line + byte counts); never the payload content.
+			if debug {
+				fmt.Printf("PROW-ANALYZER SSE: data line received (line %d, %d bytes)\n", lineCount, len(data))
+			}
 			if len(data) > 0 {
 				return data, nil
 			}
-		} else {
-			fmt.Printf("PROW-ANALYZER SSE: other line received (line %d): %s\n", lineCount, line)
+		} else if debug {
+			// Non-data line — metadata only; its text may carry stream content.
+			fmt.Printf("PROW-ANALYZER SSE: other line received (line %d, %d bytes)\n", lineCount, len(line))
 		}
 	}
 	if err := scanner.Err(); err != nil {

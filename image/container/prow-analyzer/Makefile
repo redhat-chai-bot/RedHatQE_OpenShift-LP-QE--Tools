@@ -1,44 +1,57 @@
 .PHONY: build push clean help
 
-IMAGE_REGISTRY ?= quay.io
-IMAGE_NAMESPACE ?= chaclark
-IMAGE_NAME ?= prow-analyzer-bot
-IMAGE_TAG ?= latest
-IMAGE_FULL = $(IMAGE_REGISTRY)/$(IMAGE_NAMESPACE)/$(IMAGE_NAME):$(IMAGE_TAG)
+SHELL := /bin/bash
+
+IMAGE_REGISTRY  ?= images.paas.redhat.com
+IMAGE_NAMESPACE ?= ieng/app
+IMAGE_REPO      ?= prow-analyzer
+IMAGE_TAG       ?= latest
+IMAGE_NAME       = $(IMAGE_REGISTRY)/$(IMAGE_NAMESPACE)/$(IMAGE_REPO):$(IMAGE_TAG)
+IMAGE_LATEST     = $(IMAGE_REGISTRY)/$(IMAGE_NAMESPACE)/$(IMAGE_REPO):latest
 
 # Application source directory (relative to repo root)
 APP_DIR = apps/prow-analyzer
 
-# Build container image
+# Build the application image with both requested and latest tags.
 build:
-	@echo "Building container image: $(IMAGE_FULL)"
-	podman build $(BUILDFLAGS) -t $(IMAGE_FULL) -f Dockerfile ../../../$(APP_DIR)
+	{ set -euxo pipefail; shopt -s inherit_errexit;\
+	    : 'Building container image: $(IMAGE_NAME) (also tagged $(IMAGE_LATEST))';\
+	    podman build $(BUILDFLAGS) -t '$(IMAGE_NAME)' -t '$(IMAGE_LATEST)' -f Dockerfile '../../../$(APP_DIR)';\
+	}
 
-# Push container image to registry
+# Push container image to registry. Push both the requested tag and :latest so a
+# tagged build (e.g. IMAGE_TAG=v1.0.0) also advances :latest registry-side.
 push: build
-	@echo "Pushing container image: $(IMAGE_FULL)"
-	podman push $(IMAGE_FULL)
+	{ set -euxo pipefail; shopt -s inherit_errexit;\
+	    : 'Pushing container images: $(IMAGE_NAME) and $(IMAGE_LATEST)';\
+	    podman push '$(IMAGE_NAME)';\
+	    podman push '$(IMAGE_LATEST)';\
+	}
 
-# Clean local image
+# Clean local images
 clean:
-	@echo "Removing local image: $(IMAGE_FULL)"
-	podman rmi $(IMAGE_FULL) || true
+	{ set -euxo pipefail; shopt -s inherit_errexit;\
+	    : 'Removing local images: $(IMAGE_NAME) and $(IMAGE_LATEST)';\
+	    podman rmi '$(IMAGE_NAME)' '$(IMAGE_LATEST)' || true;\
+	}
 
 # Help
 help:
-	@echo "Prow Analyzer Container Build"
-	@echo ""
-	@echo "Available targets:"
-	@echo "  build  - Build container image (default: $(IMAGE_FULL))"
-	@echo "  push   - Build and push container image to registry"
-	@echo "  clean  - Remove local container image"
-	@echo ""
-	@echo "Variables:"
-	@echo "  IMAGE_REGISTRY  - Container registry (default: $(IMAGE_REGISTRY))"
-	@echo "  IMAGE_NAMESPACE - Registry namespace (default: $(IMAGE_NAMESPACE))"
-	@echo "  IMAGE_NAME      - Image name (default: $(IMAGE_NAME))"
-	@echo "  IMAGE_TAG       - Image tag (default: $(IMAGE_TAG))"
-	@echo ""
-	@echo "Example:"
-	@echo "  make build IMAGE_TAG=v1.0.0"
-	@echo "  make push IMAGE_REGISTRY=quay.io IMAGE_NAMESPACE=myorg IMAGE_TAG=v1.0.0"
+	@printf '%s\n' \
+		'Prow Analyzer Container Build' \
+		'' \
+		'Available targets:' \
+		'  build  - Build container image (default: $(IMAGE_NAME), also tagged $(IMAGE_LATEST))' \
+		'  push   - Build and push container image to registry' \
+		'  clean  - Remove local container image' \
+		'' \
+		'Variables:' \
+		'  IMAGE_REGISTRY  - Container registry (default: $(IMAGE_REGISTRY))' \
+		'  IMAGE_NAMESPACE - Registry namespace (default: $(IMAGE_NAMESPACE))' \
+		'  IMAGE_REPO      - Image repository name (default: $(IMAGE_REPO))' \
+		'  IMAGE_TAG       - Image tag (default: $(IMAGE_TAG))' \
+		'  IMAGE_NAME      - Full image reference composed from the vars above (default: $(IMAGE_NAME))' \
+		'' \
+		'Example:' \
+		'  make build IMAGE_TAG=v1.0.0' \
+		'  make push IMAGE_REGISTRY=quay.io IMAGE_NAMESPACE=myorg IMAGE_TAG=v1.0.0'

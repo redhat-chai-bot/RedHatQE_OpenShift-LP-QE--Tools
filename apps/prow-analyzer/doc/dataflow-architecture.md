@@ -2,14 +2,14 @@
 
 > System components, data flows, and the code/data repositories involved in the
 > Prow Analyzer AI system. Diagrams use Mermaid (renders on GitHub). For deeper
-> component detail see [architecture.md](architecture.md); for the full
+> component detail see [reference.md](reference.md); for the full
 > capability list see [capabilities-inventory.md](capabilities-inventory.md).
 
 ## 1. Component & Data-Flow Diagram
 
 ```mermaid
 flowchart TB
-    subgraph User["👤 User (internal Red Hat engineer)"]
+    subgraph User["👤 User (an engineer)"]
         U1["Posts a Prow CI URL in Slack"]
         U2["(alt) Runs prow-analyzer--cli"]
     end
@@ -18,15 +18,15 @@ flowchart TB
         SW["Monitored channels"]
     end
 
-    subgraph OCP["OpenShift cluster — ns: mpex-prod--runtime-int"]
+    subgraph OCP["OpenShift cluster — ns: <your-namespace>"]
         subgraph BOT["Deployment: prow-analyzer-bot (single replica, non-root)"]
             H["Socket-mode client + handler<br/>• filter chain (URL/bot/channel)<br/>• semaphore: max 5 concurrent"]
             A["analyzer (MCP client)<br/>• session init/recover<br/>• HAP guardrails*<br/>• compliance notices"]
         end
-        SEC["Secret / env vars<br/>SHIP_HELP_MCP_TOKEN<br/>SLACK_BOT_TOKEN / SLACK_APP_TOKEN"]
+        SEC["Secret / env vars<br/>PROW_AN__MCP__TOKEN__SHIP_HELP<br/>PROW_AN__SLACK__BOT_TOKEN / PROW_AN__SLACK__APP_TOKEN"]
     end
 
-    subgraph SH["ship-help MCP (AI helpdesk) — persona: ship_public"]
+    subgraph SH["ship-help MCP (AI helpdesk) — persona: <persona>"]
         MCP["ask_persona tool<br/>(LLM + retrieval)"]
     end
 
@@ -36,7 +36,7 @@ flowchart TB
         G["GitHub repos/PRs"]
         L["Build logs & artifacts"]
         T["Test results/history"]
-        F["Firewatch triage"]
+        F["known-issue triage"]
         SD["Slack discussions"]
         DOC["Internal docs"]
         HP["Historical patterns"]
@@ -70,7 +70,7 @@ sequenceDiagram
     actor User
     participant Slack
     participant Bot as prow-analyzer-bot
-    participant MCP as ship-help MCP (ship_public)
+    participant MCP as ship-help MCP (<persona>)
     participant Data as Data sources
 
     User->>Slack: Post message with Prow URL
@@ -91,8 +91,8 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    subgraph Internal["Red Hat internal network"]
-        subgraph Cluster["OpenShift (mpex-prod--runtime-int)"]
+    subgraph Internal["internal network"]
+        subgraph Cluster["OpenShift (<your-namespace>)"]
             Bot["prow-analyzer-bot<br/>(outbound-only; no ingress)"]
         end
         SHb["ship-help MCP"]
@@ -108,16 +108,16 @@ flowchart LR
 
 ## 4. Code & Data Repositories / Stores
 
-| Kind | Name / location | Role | Sensitive? |
-|---|---|---|---|
-| **Source code repo** | `github.com/RedHatQE/OpenShift-LP-QE--Tools` (module path); working copy also pushes to the `oharan2/OpenShift-LP-QE--Tools` remote | All agent code under `apps/prow-analyzer/` | No |
-| **Container image repo** | `quay.io/chaclark/prow-analyzer-bot` (deployed tag: `debug-timing-2`) | Built runtime image (both bot + CLI binaries) | No (but do not bake secrets) |
-| **Deployment manifests** | `apps/prow-analyzer/deploy/openshift/`, `deploy/slack/` | K8s resources + Slack app manifest | No |
-| **Runtime config store** | Deployment **env vars** in ns `mpex-prod--runtime-int` (no ConfigMap present in prod) | `SHIP_HELP_MCP_URL`, `MONITORED_CHANNELS`, `PROMPT_TEMPLATE` | No |
-| **Secrets store** | K8s Secret / env in ns `mpex-prod--runtime-int` | `SHIP_HELP_MCP_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` | **Yes** |
-| **Ephemeral state** | In-memory only (MCP session ID, semaphore) | No database; nothing persisted by the bot | No |
-| **Logs** | Pod stdout (`oc logs`) | Timing + error + (proposed) HAP-redaction counts | Low; avoid logging payloads |
-| **Backend data stores** | Inside **ship-help** (Jira, GitHub, logs, Firewatch, etc.) | Read by ship-help, **not** by the bot | Governed by ship-help |
+| Kind                     | Name / location                                                                                                        | Role                                                                                                                                                                                              | Sensitive?                   |
+|--------------------------|------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------|
+| **Source code repo**     | `github.com/RedHatQE/OpenShift-LP-QE--Tools` (module path)                                                             | All agent code under `apps/prow-analyzer/`                                                                                                                                                        | No                           |
+| **Container image repo** | `images.paas.redhat.com/ieng/app/prow-analyzer` (deployed tag: `<tag>`)                                                | Built runtime image (both bot + CLI binaries)                                                                                                                                                     | No (but do not bake secrets) |
+| **Deployment manifests** | `apps/prow-analyzer/deploy/openshift/`, `deploy/slack/`                                                                | K8s resources + Slack app manifest                                                                                                                                                                | No                           |
+| **Runtime config store** | ConfigMap `prow-analyzer-config` in ns `<your-namespace>`, surfaced to the container as env vars via `configMapKeyRef` | `PROW_AN__MCP__URL__SHIP_HELP` (`mcp-url`), `PROW_AN__MONITORED_CHANNELS` (`monitored-channels`), `PROW_AN__PROMPT__TEMPLATE` (`prompt-template`); `PROW_AN__MONITOR__ALL` is a literal env value | No                           |
+| **Secrets store**        | K8s Secret / env in ns `<your-namespace>`                                                                              | `PROW_AN__MCP__TOKEN__SHIP_HELP`, `PROW_AN__SLACK__BOT_TOKEN`, `PROW_AN__SLACK__APP_TOKEN`                                                                                                        | **Yes**                      |
+| **Ephemeral state**      | In-memory only (MCP session ID, semaphore)                                                                             | No database; nothing persisted by the bot                                                                                                                                                         | No                           |
+| **Logs**                 | Pod stdout (`oc logs`)                                                                                                 | Timing + error + (proposed) HAP-redaction counts                                                                                                                                                  | Low; avoid logging payloads  |
+| **Backend data stores**  | Inside **ship-help** (Jira, GitHub, logs, an internal triage system, etc.)                                             | Read by ship-help, **not** by the bot                                                                                                                                                             | Governed by ship-help        |
 
 **Key data-handling facts**
 - The bot is **stateless**: it holds only an in-memory MCP session ID and a
@@ -130,15 +130,18 @@ flowchart LR
 
 ## 5. Status & accuracy notes
 
-- **Persona:** production runs the **`ship_public`** persona (verified from the
-  live deployment env), which differs from the `ocp_ai_helpdesk` default in the
-  committed manifest.
-- **Config source:** production sets values as **direct env vars** on the
-  deployment; there is **no `prow-analyzer-config` ConfigMap** in
-  `mpex-prod--runtime-int` (verified).
+- **Persona:** the ship-help persona used at runtime is selected via the
+  `PROW_AN__MCP__URL__SHIP_HELP` (`/personas/<persona>/mcp`) and may differ from the
+  `<persona>` default in the committed manifest — set it for your environment.
+- **Config source:** the committed manifest ships a `prow-analyzer-config`
+  ConfigMap and surfaces its keys to the container as env vars via
+  `configMapKeyRef` (tokens come from the `prow-analyzer-secrets` Secret via
+  `secretKeyRef`; that Secret is created out-of-band, not shipped in the manifest,
+  so `oc apply` can't overwrite real tokens with placeholders). `PROW_AN__MONITOR__ALL` is
+  set as a literal env value on the Deployment.
 - **HAP guardrails** shown with an asterisk are **not yet in the deployed
   image** — they were in progress at the time of writing. Treat that node as
   "planned" until a rebuilt image is deployed.
 - **Backend internals** (ship-help's model, retrieval, and its own data-store
   access controls) are **out of scope of this repo** and cannot be verified here;
-  confirm with the ship-help team (`#ship-users`).
+  confirm with the ship-help team (the ship-help support channel).

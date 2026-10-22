@@ -76,7 +76,11 @@ libs/bash/common/EnsureReqs.sh
                 ((select(has("testsuite")) | .testsuite) // .) |
                 (([] + .)[] | (
                     select(strenv(LP_IO__ET_PPP__NEW_TS_NAME) != "") |
-                    (."+@name" // "") as $oldName |
+                    (
+                        (."+@name" // "") |
+                        sub("^\\s+", "") |
+                        sub("\\s+$", "")
+                    ) as $oldName |
                     ."+@name" = (
                         strenv(LP_IO__ET_PPP__NEW_TS_NAME) |
                         sub("(^|[^%])((%%)*)%s", "${1}${2}\($oldName)") |

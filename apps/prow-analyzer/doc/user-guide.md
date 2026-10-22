@@ -9,7 +9,7 @@
 
 This guide is for everyone who interacts with the Prow Analyzer bot in Slack or
 runs the CLI. For deep implementation detail, see
-[`architecture.md`](architecture.md); for deployment, see
+[`reference.md`](reference.md); for deployment, see
 [`deployment.md`](deployment.md).
 
 ## Table of Contents
@@ -82,13 +82,13 @@ the maintainers.
 
 #### CLI (advanced users)
 
-You need a ship-help MCP token (request one in **`#ship-users`** on Slack).
+You need a ship-help MCP token (request one in **the ship-help support channel** on Slack).
 
 ```bash
 cd apps/prow-analyzer
 go build ./cmd/prow-analyzer--cli
 
-export SHIP_HELP_MCP_URL="https://ship-help-mcp-continuous-release-tooling--ship-help-bot.apps.gpc.ocp-hub.prod.psi.redhat.com/personas/ocp_ai_helpdesk/mcp"
+export SHIP_HELP_MCP_URL="https://<ship-help-mcp-host>/personas/<persona>/mcp"
 export SHIP_HELP_MCP_TOKEN="<your-token>"
 
 ./prow-analyzer--cli analyze "https://prow.ci.openshift.org/view/gs/<path-to-job>"
@@ -126,20 +126,20 @@ Prow Analyzer has exactly **one** outbound capability of its own: it calls the
 ship-help MCP `ask_persona` tool over JSON-RPC/SSE. All richer data access
 happens **inside ship-help**, not in this agent.
 
-| Layer | Item | Notes |
-|---|---|---|
-| Agent tool | ship-help MCP `ask_persona` | The only tool this agent calls. Sends a prompt containing the Prow URL. |
-| Agent input | Prow URL extraction (regex) | Recognizes the three URL patterns listed above. |
-| Agent output | Slack message (`chat:write`) / stdout | Posts an in-thread reply, or prints to terminal. |
-| Slack read | `channels:history` | Reads messages in channels it is a member of, to detect Prow URLs. |
-| Data sources (via ship-help) | Jira issues | Active, historical, and related issues. |
-| Data sources (via ship-help) | GitHub repositories and PRs | |
-| Data sources (via ship-help) | Build logs and artifacts | |
-| Data sources (via ship-help) | Test results and history | |
-| Data sources (via ship-help) | Firewatch automated triage | |
-| Data sources (via ship-help) | Slack team discussions | |
-| Data sources (via ship-help) | Internal documentation | |
-| Data sources (via ship-help) | Historical failure patterns | |
+| Layer                        | Item                                  | Notes                                                                   |
+|------------------------------|---------------------------------------|-------------------------------------------------------------------------|
+| Agent tool                   | ship-help MCP `ask_persona`           | The only tool this agent calls. Sends a prompt containing the Prow URL. |
+| Agent input                  | Prow URL extraction (regex)           | Recognizes the three URL patterns listed above.                         |
+| Agent output                 | Slack message (`chat:write`) / stdout | Posts an in-thread reply, or prints to terminal.                        |
+| Slack read                   | `channels:history`                    | Reads messages in channels it is a member of, to detect Prow URLs.      |
+| Data sources (via ship-help) | Jira issues                           | Active, historical, and related issues.                                 |
+| Data sources (via ship-help) | GitHub repositories and PRs           |                                                                         |
+| Data sources (via ship-help) | Build logs and artifacts              |                                                                         |
+| Data sources (via ship-help) | Test results and history              |                                                                         |
+| Data sources (via ship-help) | Automated known-issue triage          |                                                                         |
+| Data sources (via ship-help) | Slack team discussions                |                                                                         |
+| Data sources (via ship-help) | Internal documentation                |                                                                         |
+| Data sources (via ship-help) | Historical failure patterns           |                                                                         |
 
 > The agent does **not** have its own direct connection to Jira, GitHub, or CI.
 > It cannot browse the web, run arbitrary tools, or execute code. Its knowledge
@@ -218,7 +218,7 @@ happens **inside ship-help**, not in this agent.
 - **Infra/flake failures** (node not ready, image pull, quota) -- may be
   misattributed to test code, or vice versa.
 - **Brand-new failure signatures** with no history -- weaker pattern analysis.
-- **Very large logs / long-running analyses** -- can approach the 600s timeout
+- **Very large logs / long-running analyses** -- can approach the 1,200s (20-min) timeout
   and fail; retry once before escalating.
 - **Multiple URLs in one message** -- only the first recognized URL is analyzed.
 - **Bursty channels** -- expect "queue full" during spikes; retry shortly.
@@ -236,7 +236,7 @@ rely on, act on, or forward any output:
    Do not accept the stated cause on faith.
 2. **Open every cited Jira issue** and verify it exists, is relevant, and is in
    the stated state. Discard any that do not check out.
-3. **Sanity-check pattern/frequency claims** using Firewatch or Sippy rather
+3. **Sanity-check pattern/frequency claims** using Sippy rather
    than trusting the number in the reply.
 4. **Validate recommendations** with your own judgment before applying them --
    especially anything that changes timeouts, retries, or test logic.
@@ -288,7 +288,7 @@ availability -- there is no data mutation to reverse.
 - Do not paste secrets (tokens, kubeconfigs, passwords) into monitored channels;
   the bot forwards message context to ship-help.
 - Use only sanctioned internal channels; treat all inputs and outputs as
-  **Red Hat internal**.
+  **internal / confidential**.
 - If you believe sensitive data was submitted, delete the message and notify the
   point of contact below.
 
@@ -321,9 +321,9 @@ What actually gates access:
   your channel membership.
 - **CLI:** whether your token works determines your access; if `initialize
   session` fails with `HTTP 401/403`, your token is invalid or lacks
-  permissions. Request or renew a token in **`#ship-users`**.
+  permissions. Request or renew a token in **the ship-help support channel**.
 - **Backend data scope:** because access is via a shared service account, ask the
-  ship-help team (`#ship-users`) what that account is authorized to read if you
+  ship-help team (the ship-help support channel) what that account is authorized to read if you
   need to confirm data boundaries.
 
 > Since RBAC is **not** per-user here, be deliberate about channel membership and
@@ -333,21 +333,21 @@ What actually gates access:
 
 ## Troubleshooting
 
-| Symptom | Likely cause | What to do |
-|---|---|---|
-| Bot doesn't reply at all | Bot not in the channel, or URL not recognized | Confirm the bot is a member (`/invite @Prow Analyzer`); confirm the URL is one of the three supported patterns. |
-| Bot doesn't reply to your reply | The message was from a bot, or had no Prow URL | Post the URL as a human message; messages from bots (including the analyzer's own replies) are ignored. |
-| `Analysis failed. Please retry shortly...` | Backend/network/session error | Retry once. If it persists, escalate (the real error is in the pod logs). |
-| `Analysis queue is currently full.` | 5 concurrent analyses already running | Wait a moment and retry. |
-| CLI: `init request failed (HTTP 401)` | Invalid/expired MCP token | Get a new token from `#ship-users`. |
-| CLI: `init request failed (HTTP 403)` | Token lacks permissions | Contact ship-help admins via `#ship-users`. |
-| CLI: `send init request: <network error>` | MCP URL unreachable | Check VPN/network/DNS and `SHIP_HELP_MCP_URL`. |
-| `context deadline exceeded` | Analysis exceeded the 600s timeout | Retry; if persistent, ship-help may be overloaded. |
-| Analysis is thin or vague | Logs expired, or novel failure with no history | Check the Prow artifacts still exist; add human context and retry. |
+| Symptom                                    | Likely cause                                   | What to do                                                                                                      |
+|--------------------------------------------|------------------------------------------------|-----------------------------------------------------------------------------------------------------------------|
+| Bot doesn't reply at all                   | Bot not in the channel, or URL not recognized  | Confirm the bot is a member (`/invite @Prow Analyzer`); confirm the URL is one of the three supported patterns. |
+| Bot doesn't reply to your reply            | The message was from a bot, or had no Prow URL | Post the URL as a human message; messages from bots (including the analyzer's own replies) are ignored.         |
+| `Analysis failed. Please retry shortly...` | Backend/network/session error                  | Retry once. If it persists, escalate (the real error is in the pod logs).                                       |
+| `Analysis queue is currently full.`        | 5 concurrent analyses already running          | Wait a moment and retry.                                                                                        |
+| CLI: `init request failed (HTTP 401)`      | Invalid/expired MCP token                      | Get a new token from the ship-help support channel.                                                             |
+| CLI: `init request failed (HTTP 403)`      | Token lacks permissions                        | Contact ship-help admins via the ship-help support channel.                                                     |
+| CLI: `send init request: <network error>`  | MCP URL unreachable                            | Check VPN/network/DNS and `SHIP_HELP_MCP_URL`.                                                                  |
+| `context deadline exceeded`                | Analysis exceeded the 1,200s timeout           | Retry; if persistent, ship-help may be overloaded.                                                              |
+| Analysis is thin or vague                  | Logs expired, or novel failure with no history | Check the Prow artifacts still exist; add human context and retry.                                              |
 
 Maintainers: the user-visible message is intentionally generic; the real error
 is logged with the `PROW-ANALYZER ERROR` / `PROW-ANALYZER` prefix. See the
-[Troubleshooting section of `architecture.md`](architecture.md#troubleshooting)
+[Troubleshooting section of `reference.md`](reference.md#troubleshooting)
 for the full error reference and log-diagnosis commands.
 
 ---
@@ -366,7 +366,7 @@ behavior, or performance problems:
 - **Slack:** post in the QE team channel used for tooling (ask a maintainer for
   the current channel if unsure).
 - **Backend/model issues** (ship-help itself returning bad data): raise in
-  **`#ship-users`**.
+  **the ship-help support channel**.
 
 <!-- MAINTAINERS: replace the above with a dedicated feedback form/board link and
      the canonical Slack feedback channel once established. -->
@@ -377,7 +377,7 @@ behavior, or performance problems:
 
 - **Maintaining team:** `@RedHatQE/openshift-lp-qe-staff` (repository CODEOWNERS)
   -- reach them via a GitHub issue or by @-mentioning the team on a PR/issue.
-- **Ship-help MCP backend / tokens:** `#ship-users` on Slack.
+- **Ship-help MCP backend / tokens:** the ship-help support channel on Slack.
 - **Team alias email:** _TODO -- add the team's distribution-list email here._
   <!-- MAINTAINERS: no team alias email exists in the repo; fill in the real
        alias (e.g. openshift-lp-qe@redhat.com) before publishing this guide. -->
