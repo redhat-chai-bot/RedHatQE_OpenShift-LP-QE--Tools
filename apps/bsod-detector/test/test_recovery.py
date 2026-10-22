@@ -57,6 +57,10 @@ elif args[0] == 'apply':
         (root / 'helper-pod').unlink()
 elif args[0] == 'wait':
     if '--for=delete' in args:
+        if scenario == 'transient-wait' and not (root / 'cleanup-attempted').exists():
+            (root / 'cleanup-attempted').touch()
+            print('mock transient deletion wait failure', file=sys.stderr)
+            sys.exit(28)
         if scenario in ('cleanup-wait-error', 'cleanup-wait-timeout'):
             print('mock deletion wait failed: ' + scenario, file=sys.stderr)
             sys.exit(28)
@@ -116,6 +120,10 @@ elif args[0] == 'cp':
         sys.exit(24)
     dest.write_bytes(b'' if scenario == 'empty-copy' else src.read_bytes())
 elif args[0] == 'delete':
+    if scenario == 'transient-delete' and not (root / 'cleanup-attempted').exists():
+        (root / 'cleanup-attempted').touch()
+        print('mock transient deletion failure', file=sys.stderr)
+        sys.exit(25)
     if scenario == 'cleanup-error':
         print('mock delete failure', file=sys.stderr)
         sys.exit(25)
@@ -481,7 +489,8 @@ class RecoveryTests(unittest.TestCase):
                 self.addCleanup(case.doCleanups)
                 result = case.RunRecovery(scenario)
                 self.assertEqual(result.returncode, 25 if scenario == 'cleanup-error' else 28, result.stderr)
-                case.AssertDeleted(waitCount=1 if scenario == 'cleanup-error' else 2)
+                case.AssertDeleted(count=2, waitCount=0 if scenario == 'cleanup-error' else 2)
+                self.assertFalse((case.out / 'extraction-summary.json').exists())
                 self.assertFalse((case.out / 'stage-errors.jsonl').exists())
                 self.assertFalse((case.out / 'extraction.log').exists())
                 self.assertIn('mock delete failure' if scenario == 'cleanup-error' else
@@ -524,28 +533,42 @@ class RecoveryTests(unittest.TestCase):
         self.AssertDeleted()
 
     def test_watcher_reports_transient_cleanup_failure(self):
-        mock = self.bin / 'oc'
-        mock.write_text(mock.read_text().replace("elif args[0] == 'delete':",
-                        "elif args[0] == 'delete':\n"
-                        "    marker = root / 'delete-attempted'\n"
-                        "    if not marker.exists():\n"
-                        "        marker.touch()\n"
-                        "        print('mock transient deletion failure', file=sys.stderr)\n"
-                        "        sys.exit(25)"))
         watcher = (hostDir / 'watch-crash.sh').read_text()
         runTimed = re.search(r'^function RunTimed \(\) \{.*\}$', watcher, re.MULTILINE).group()
         recover = re.search(r'^function Recover \(\) \{\n.*?^\}', watcher, re.MULTILINE | re.DOTALL).group()
-        self.meta.write_text(json.dumps(self.metadata))
         command = ('set -euxo pipefail; shopt -s inherit_errexit\n'
                    'typeset scriptDir="${1}" metadataFile="${2}" pipelineLog="${3}"\n'
                    + runTimed + '\n' + recover + '\nRecover\n')
-        result = subprocess.run(['bash', '-c', command, 'watcher-fixture', str(hostDir),
-                                 str(self.meta), str(self.root / 'pipeline.log')],
-                                cwd=self.root, env=self.env, text=True, capture_output=True, timeout=10)
-        log = (self.root / 'pipeline.log').read_text()
-        self.assertIn('mock transient deletion failure', log)
-        self.AssertDeleted()
-        self.assertNotEqual(result.returncode, 0, log)
+        for scenario, expected in (('transient-delete', 25), ('transient-wait', 28)):
+            with self.subTest(scenario=scenario):
+                case = RecoveryTests('test_success_contract')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                case.meta.write_text(json.dumps(case.metadata))
+                result = subprocess.run(['bash', '-c', command, 'watcher-fixture', str(hostDir),
+                                         str(case.meta), str(case.root / 'pipeline.log')],
+                                        cwd=case.root, env=dict(case.env, SCENARIO=scenario),
+                                        text=True, capture_output=True, timeout=10)
+                log = (case.root / 'pipeline.log').read_text()
+                self.assertIn('mock transient deletion', log)
+                case.AssertDeleted(count=2, waitCount=1 if scenario == 'transient-delete' else 2)
+                self.assertFalse((case.root / 'helper-pod').exists())
+                self.assertFalse((case.out / 'extraction-summary.json').exists())
+                self.assertNotEqual(result.returncode, 0, log)
+                self.assertEqual(result.returncode, expected, log)
+
+    def test_executable_reports_transient_cleanup_failure(self):
+        for scenario, expected in (('transient-delete', 25), ('transient-wait', 28)):
+            with self.subTest(scenario=scenario):
+                case = RecoveryTests('test_success_contract')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                result = case.RunRecovery(scenario)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertIn('mock transient deletion', result.stderr)
+                case.AssertDeleted(count=2, waitCount=1 if scenario == 'transient-delete' else 2)
+                self.assertFalse((case.root / 'helper-pod').exists())
+                self.assertFalse((case.out / 'extraction-summary.json').exists())
 
     def test_relative_repository_path_resolves_helpers(self):
         repoRoot = Path(__file__).resolve().parents[3]
@@ -634,7 +657,8 @@ source "$1" "${@:2}"
                 result = case.RunRecovery(scenario)
                 expected = {'wait-error': 19, 'no-guestfish': 20, 'exec-error': 27, 'cleanup-error': 25}.get(scenario, 1)
                 self.assertEqual(result.returncode, expected, result.stderr)
-                case.AssertDeleted(waitCount=1 if scenario == 'cleanup-error' else None)
+                case.AssertDeleted(count=2 if scenario == 'cleanup-error' else None,
+                                   waitCount=0 if scenario == 'cleanup-error' else None)
                 if scenario != 'cleanup-error':
                     self.assertFalse(list(case.out.glob('**/*.evtx')))
 

@@ -214,10 +214,8 @@ chmod 0600 "${outDir}/events.json"
     chmod 0600 checksums.sha256
     exit 0
 )
-typeset -i cleanupStatus=0 summaryStatus=0
-Cleanup || cleanupStatus=$?
+Cleanup
 timeout --signal=TERM --kill-after=5 60 python3 "${scrDir}/reliability.py" write-summary \
     --out "${outDir}" --stage-errors "${outDir}/stage-errors.jsonl" --mode rhov-snapshot-recovery \
-    --vm "${vm}" --namespace "${ns}" --run-id "${runId}" --filename extraction-summary.json 1> /dev/null || summaryStatus=$?
-((cleanupStatus == 0 && summaryStatus == 0)) || exit 1
+    --vm "${vm}" --namespace "${ns}" --run-id "${runId}" --filename extraction-summary.json 1> /dev/null || exit 1
 exit 0
