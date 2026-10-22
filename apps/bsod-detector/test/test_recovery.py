@@ -2,6 +2,8 @@
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -17,6 +19,8 @@ import json, os, signal, sys, time
 from pathlib import Path
 root = Path(os.environ['MOCK_ROOT'])
 args = sys.argv[1:]
+with (root / 'oc-argv.jsonl').open('a') as calls:
+    calls.write(json.dumps(args) + '\n')
 if args[0].startswith('--request-timeout='):
     args.pop(0)
 with (root / 'calls.jsonl').open('a') as calls:
@@ -55,8 +59,9 @@ elif args[0] == 'wait':
 elif args[0] == 'exec':
     command = args[args.index('--') + 1:]
     if command[0] == 'guestfish':
-        if scenario == 'exec-timeout':
-            time.sleep(5)
+        if scenario == 'exec-error':
+            print('mock guestfish exec failure', file=sys.stderr)
+            sys.exit(27)
         if scenario == 'no-guestfish':
             print('mock guestfish unavailable', file=sys.stderr)
             sys.exit(20)
@@ -145,7 +150,7 @@ class RecoveryTests(unittest.TestCase):
         memory[120:] = b'CORE'
         (self.out / 'vm-memory.elf').write_bytes(memory)
         self.env = dict(os.environ, PATH=f'{self.bin}:{os.environ["PATH"]}',
-                        MOCK_ROOT=str(self.root), BSOD_DET__COMMAND__TIMEOUT='0.3',
+                        MOCK_ROOT=str(self.root),
                         BSOD_DET__GUESTFS__NTFS_IMAGE='registry.test/guestfs:fixture')
 
     def RunRecovery(self, scenario='', *args, script=recovery, cwd=None):
@@ -198,6 +203,51 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(list(self.out.glob('guestFS_sda3/**/*.evtx'))), 1)
         self.AssertDeleted()
+
+    def test_direct_oc_preserves_only_scoped_deadlines(self):
+        realTimeout = shutil.which('timeout', path=os.environ['PATH'])
+        self.assertIsNotNone(realTimeout)
+        timeoutMock = self.bin / 'timeout'
+        timeoutMock.write_text(f'#!{sys.executable}\nimport json, os, sys\n'
+                              'from pathlib import Path\n'
+                              'with (Path(os.environ["MOCK_ROOT"]) / "timeouts.jsonl").open("a") as calls:\n'
+                              '    calls.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                              f'os.execv({realTimeout!r}, [{realTimeout!r}, *sys.argv[1:]])\n')
+        timeoutMock.chmod(0o755)
+        self.env['BSOD_DET__COMMAND__TIMEOUT'] = 'not-a-timeout'
+        result = self.RunRecovery()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rawCalls = [json.loads(line) for line in (self.root / 'oc-argv.jsonl').read_text().splitlines()]
+        requests = [call for call in rawCalls if call[0].startswith('--request-timeout=')]
+        self.assertEqual(len(requests), 2)
+        wait, delete = requests
+        self.assertEqual(wait[:2], ['--request-timeout=185s', 'wait'])
+        self.assertIn('--timeout=180s', wait)
+        self.assertEqual(delete[:2], ['--request-timeout=65s', 'delete'])
+        self.assertIn('--timeout=60s', delete)
+        self.assertTrue(all(call[0] in ('get', 'apply', 'exec', 'cp') for call in rawCalls if call not in requests))
+        deadlines = [json.loads(line) for line in (self.root / 'timeouts.jsonl').read_text().splitlines()]
+        self.assertEqual(len(deadlines), 2)
+        self.assertEqual(deadlines[0][:5], ['--signal=TERM', '--kill-after=5', '70', 'oc', '--request-timeout=65s'])
+        self.assertEqual(deadlines[1][:4], ['--signal=TERM', '--kill-after=5', '60', 'python3'])
+        source = recovery.read_text()
+        self.assertNotRegex(source, r'\bOc\b')
+        self.assertNotIn('cmdTimeout', source)
+        self.assertNotIn('BSOD_DET__COMMAND__TIMEOUT', source)
+        self.AssertDeleted()
+
+    def test_all_die_messages_have_consistent_grammar(self):
+        source = recovery.read_text()
+        messages = re.findall(r'\bDie ([\'"])(.*?)\1', source)
+        self.assertEqual(len(messages), 11)
+        self.assertEqual(len(re.findall(r'\bDie\b', source)), len(messages) + 1)
+        for quote, message in messages:
+            with self.subTest(message=message):
+                self.assertTrue(message[0].isupper())
+                if ': ' not in message:
+                    self.assertTrue(message.endswith('.'))
+        self.assertIn(('"', 'Required tool missing: ${tool}'), messages)
+        self.assertIn(("'", 'Metadata lacks stable evidence storage ID.'), messages)
 
     def test_relative_host_path_resolves_helpers(self):
         result = self.RunRecovery(script=f'./{recovery.name}', cwd=hostDir)
@@ -280,7 +330,7 @@ source "$1" "${@:2}"
         self.assertIn('dump-parse', (self.out / 'stage-errors.jsonl').read_text())
 
     def test_failure_stages(self):
-        for scenario in ('wait-error', 'no-guestfish', 'discovery-error', 'exec-timeout', 'copy-error',
+        for scenario in ('wait-error', 'no-guestfish', 'discovery-error', 'exec-error', 'copy-error',
                          'empty-copy', 'no-ntfs', 'cleanup-error'):
             with self.subTest(scenario=scenario):
                 case = RecoveryTests('test_success_contract')
@@ -322,6 +372,11 @@ source "$1" "${@:2}"
                 result = case.RunRecovery(scenario)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
                 self.assertFalse(any(call[0] == 'apply' for call in case.Calls()))
+                if scenario == 'api-error':
+                    self.assertIn('Cannot list VMIs in namespace fixture-ns — API error prevents safe PVC attachment verification.', result.stderr)
+                    self.assertIn('mock API unavailable', result.stderr)
+                if scenario == 'bad-json':
+                    self.assertIn('Cannot parse VMI list — PVC attachment state uncertain.', result.stderr)
 
     def test_native_mount_contract(self):
         self.marker.unlink()

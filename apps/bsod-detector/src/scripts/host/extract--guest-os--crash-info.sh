@@ -6,7 +6,6 @@ umask 077
 typeset scrDir="${BASH_SOURCE[0]%/*}"
 typeset scrName="${BASH_SOURCE[0]##*/}"
 typeset metadataFile='' outDir=''
-typeset cmdTimeout="${BSOD_DET__COMMAND__TIMEOUT:-30}"
 
 while (($#)); do
     case "${1}" in
@@ -29,52 +28,41 @@ function Die () {
     exit 1
 }
 
-function Oc () {
-    # Exec streams need a process deadline; API requests have their own timeout.
-    if [ "${1}" = exec ]; then
-        timeout --signal=TERM --kill-after=5 "${cmdTimeout}" \
-            oc --request-timeout="${cmdTimeout}s" "$@" || return $?
-    else
-        oc --request-timeout="${cmdTimeout}s" "$@" || return $?
-    fi
-    return 0
-}
-
 typeset tool=''
 for tool in oc jq python3 sha256sum findmnt timeout realpath; do
-    command -v "${tool}" 1> /dev/null || Die "required tool missing: ${tool}"
+    command -v "${tool}" 1> /dev/null || Die "Required tool missing: ${tool}"
 done
 
 typeset runId='' expectedOut=''
 runId="$(jq -er .runId "${metadataFile}")"
 expectedOut="$(jq -er .outputDir "${metadataFile}")"
 outDir="$(realpath -e "${outDir}")"
-{ [ "${outDir}" = "${expectedOut}" ] && [ "${outDir##*/}" = "${runId}" ]; } || Die 'output path/run ID does not match preflight metadata'
-[ ! -L "${outDir}" ] || Die 'output path must not be a symlink'
+{ [ "${outDir}" = "${expectedOut}" ] && [ "${outDir##*/}" = "${runId}" ]; } || Die 'Output path/run ID does not match preflight metadata.'
+[ ! -L "${outDir}" ] || Die 'Output path must not be a symlink.'
 
 typeset mountTarget='' storageId=''
 mountTarget="$(jq -er .evidenceMount.target "${metadataFile}")"
 case "$(jq -r .evidenceMount.kind "${metadataFile}")" in
     (pvc|network|csi) ;;
-    (*) Die 'metadata does not prove persistent evidence volume kind';;
+    (*) Die 'Metadata does not prove persistent evidence volume kind.';;
 esac
-[ -n "$(jq -r .evidenceMount.id "${metadataFile}")" ] || Die 'metadata lacks stable evidence storage ID'
+[ -n "$(jq -r .evidenceMount.id "${metadataFile}")" ] || Die 'Metadata lacks stable evidence storage ID.'
 storageId="$(jq -er .evidenceMount.id "${metadataFile}")"
 typeset marker="${mountTarget}/.bsod-storage-identity"
 
 # An identity marker permits the preflight test/dev storage contract.
 if [ ! -f "${marker}" ] || [ -L "${marker}" ] || [ "$(0< "${marker}")" != "${storageId}" ]; then
     typeset mountJson='' actualMount='' expectedMount=''
-    mountJson="$(timeout --signal=TERM --kill-after=5 10 findmnt -J -M "${mountTarget}" -o TARGET,SOURCE,FSTYPE,MAJ:MIN)" || Die 'validated evidence mount is no longer mounted'
+    mountJson="$(timeout --signal=TERM --kill-after=5 10 findmnt -J -M "${mountTarget}" -o TARGET,SOURCE,FSTYPE,MAJ:MIN)" || Die 'Validated evidence mount is no longer mounted.'
     actualMount="$(jq -c '.filesystems[0] | {target:.target,source:.source,fsType:.fstype,device:.["maj:min"]}' 0<<<"${mountJson}")"
     expectedMount="$(jq -c '.evidenceMount | {target,source,fsType,device}' "${metadataFile}")"
-    [ "${actualMount}" = "${expectedMount}" ] || Die "evidence mount identity changed: expected ${expectedMount}, got ${actualMount}"
+    [ "${actualMount}" = "${expectedMount}" ] || Die "Evidence mount identity changed: expected ${expectedMount}, got ${actualMount}"
 fi
 
 # Watcher-owned captures may exist, but extraction must not overwrite stale data.
 typeset stale=''
 stale="$(find "${outDir}" -mindepth 1 \( -name MEMORY.DMP -o -name Minidump -o -name 'guestFS_*' -o -name events.json -o -name extraction-summary.json -o -name checksums.sha256 \) -print -quit)"
-[ -z "${stale}" ] || Die "pre-existing extraction artifact rejected: ${stale}"
+[ -z "${stale}" ] || Die "Pre-existing extraction artifact rejected: ${stale}"
 
 typeset ns='' vm='' guestPvc='' image=''
 ns="$(jq -er .namespace "${metadataFile}")"
@@ -86,7 +74,7 @@ for field in snapshotClass storageClass storageSize volumeMode armedEpoch; do
     jq -er ".${field}" "${metadataFile}" 1> /dev/null
 done
 jq -c .preCrashInventory "${metadataFile}" 1> /dev/null
-{ [[ "${image}" =~ @sha256:[0-9a-fA-F]{64}$ ]] && [ "$(jq -r .recoveryImageContract "${metadataFile}")" = bash+guestfish-v1 ]; } || Die 'extraction image contract was not proven by preflight'
+{ [[ "${image}" =~ @sha256:[0-9a-fA-F]{64}$ ]] && [ "$(jq -r .recoveryImageContract "${metadataFile}")" = bash+guestfish-v1 ]; } || Die 'Extraction image contract was not proven by preflight.'
 
 typeset stageErrors="${outDir}/stage-errors.jsonl"
 touch "${stageErrors}"
@@ -112,7 +100,7 @@ function Cleanup () {
     isClean=1
     typeset -i status=0
     if ((hasPod)); then
-        if Oc get pod "${pod}" -n "${ns}" 1> /dev/null; then
+        if oc get pod "${pod}" -n "${ns}" 1> /dev/null; then
             # Allow the 60s deletion wait to finish before the transport/process deadlines.
             timeout --signal=TERM --kill-after=5 70 oc --request-timeout=65s \
                 delete pod "${pod}" -n "${ns}" --wait=true --timeout=60s 1>> "${extractLog}" 2>&1 || {
@@ -136,7 +124,7 @@ trap 'OnSignal 143' TERM
 
 function FindNTFS () {
     typeset output='' device='' fsType=''
-    output="$(Oc exec -n "${ns}" "${pod}" -c "${container}" -- \
+    output="$(oc exec -n "${ns}" "${pod}" -c "${container}" -- \
         guestfish --ro -a /dev/vda run : list-filesystems 2>> "${extractLog}")" || return 1
     typeset -a partArr=()
     while IFS=': ' read -r device fsType; do
@@ -151,12 +139,12 @@ function FindNTFS () {
 
 # Uncertain attachment state must block extraction, including DataVolume references.
 typeset vmiJson='' attachedVmis=''
-vmiJson="$(Oc get vmi -n "${ns}" -o json)" || Die "cannot list VMIs in namespace ${ns} — API error prevents safe PVC attachment verification"
+vmiJson="$(oc get vmi -n "${ns}" -o json)" || Die "Cannot list VMIs in namespace ${ns} — API error prevents safe PVC attachment verification."
 attachedVmis="$(jq -r --arg pvc "${guestPvc}" '
   .items[] | select(
     .status.phase == "Running" and
     (.spec.volumes // [] | map(.persistentVolumeClaim.claimName // "", .dataVolume.name // "") | any(. == $pvc))
-  ) | .metadata.name' 0<<<"${vmiJson}")" || Die 'cannot parse VMI list — PVC attachment state uncertain'
+  ) | .metadata.name' 0<<<"${vmiJson}")" || Die 'Cannot parse VMI list — PVC attachment state uncertain.'
 if [ -n "${attachedVmis}" ]; then
     RecordError extraction 'source PVC is attached to a VMI (direct or DataVolume); cannot safely mount'
     exit 1
@@ -195,14 +183,14 @@ jq -n --arg name "${pod}" --arg ns "${ns}" --arg image "${guestfsImage}" --arg p
         {name:"guestfs-tmp",emptyDir:{}}, {name:"guestfs-home",emptyDir:{}}
       ]
     }
-  }' | Oc apply -f - 1>> "${extractLog}"
+  }' | oc apply -f - 1>> "${extractLog}"
 
 hasPod=1
 oc --request-timeout=185s wait pod "${pod}" -n "${ns}" --for=jsonpath='{.status.phase}'=Running --timeout=180s 1>> "${extractLog}" 2>&1 || {
     RecordError extraction-pod "guestfs-ntfs pod '${pod}' startup timed out"
     exit 1
 }
-Oc exec -n "${ns}" "${pod}" -c "${container}" -- \
+oc exec -n "${ns}" "${pod}" -c "${container}" -- \
     guestfish --ro -a /dev/vda run : list-filesystems 1>> "${extractLog}" 2>&1 || {
     RecordError extraction-pod 'guestfish not available or block device not accessible'
     exit 1
@@ -230,7 +218,7 @@ for ntfsPart in "${ntfsArr[@]}"; do
         tempArr+=("${podTemp}")
     done
     batchArr+=(: umount-all)
-    Oc exec -n "${ns}" "${pod}" -c "${container}" -- \
+    oc exec -n "${ns}" "${pod}" -c "${container}" -- \
         guestfish "${batchArr[@]}" 1>> "${extractLog}" 2>&1 || true
 
     typeset -i index=0
@@ -245,7 +233,7 @@ for ntfsPart in "${ntfsArr[@]}"; do
         else
             rm -f "${dest}" || true
         fi
-        Oc exec -n "${ns}" "${pod}" -c "${container}" -- rm -f "${podTemp}" || true
+        oc exec -n "${ns}" "${pod}" -c "${container}" -- rm -f "${podTemp}" || true
     done
     if ((hasLogs)); then
         break

@@ -236,7 +236,7 @@ write_elf_memory_fixture() {
   export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
   mkdir "$EVIDENCE_ROOT"; make_recovery_mocks; write_recovery_metadata
   printf stale > "$EVIDENCE_ROOT/fixture-recovery-001/MEMORY.DMP"; run_recovery
-  [ "$status" -ne 0 ]; [[ "$output" == *'pre-existing extraction artifact rejected'* ]]
+  [ "$status" -ne 0 ]; [[ "$output" == *'Pre-existing extraction artifact rejected'* ]]
   rm -rf "$EVIDENCE_ROOT/fixture-recovery-001"; write_recovery_metadata; rm "$EVIDENCE_ROOT/.bsod-storage-identity"; MOUNT_SOURCE=other:/mount; run_recovery
   [ "$status" -ne 0 ]; [[ "$output" == *'mount identity changed'* ]]
   unset MOUNT_SOURCE; rm -rf "$EVIDENCE_ROOT/fixture-recovery-001"; write_recovery_metadata; MISSING_GUESTFISH=1; run_recovery
