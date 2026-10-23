@@ -115,11 +115,14 @@ helperPod="guest-fs--ntfs--$(date -u +'%s')-$$"
         --arg image "${BSOD_DET__GUEST_FS__CTR_IMG}" \
         --arg pvc "${guestPVC}" \
         '
-            del(.metadata.annotations) |
-            .metadata.name = $name |
-            .metadata.namespace = $ns |
-            .spec.containers[0].image = $image |
-            .spec.volumes[0].persistentVolumeClaim.claimName = $pvc
+            .metadata|=(
+                .name=$name |
+                .namespace=$ns
+            ) |
+            .spec|=(
+                .containers[0].image=$image |
+                .volumes[0].persistentVolumeClaim.claimName=$pvc
+            )
         '
 } 0<<'ocEOF' | oc apply -f -
 apiVersion: v1

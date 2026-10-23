@@ -273,18 +273,53 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(pod['metadata']['namespace'], values['ns'])
                 self.assertEqual(pod['spec']['containers'][0]['image'], values['BSOD_DET__GUEST_FS__CTR_IMG'])
                 self.assertEqual(pod['spec']['volumes'][0]['persistentVolumeClaim']['claimName'], values['guestPVC'])
-                self.assertNotIn('annotations', pod['metadata'])
+                annotation = json.loads(pod['metadata']['annotations']['kubectl.kubernetes.io/last-applied-configuration'])
+                self.assertEqual(annotation['metadata']['name'], 'guest-fs--ntfs')
+                self.assertEqual(annotation['spec']['containers'][0]['image'], '')
                 self.assertNotIn('creationTimestamp', pod['metadata'])
                 self.assertNotIn('status', pod)
                 self.assertFalse((self.root / 'injected').exists())
         for broken in (renderer.replace('apiVersion: v1', 'apiVersion: ['),
-                       renderer.replace('del(.metadata.annotations)', 'del(')):
+                       renderer.replace('.metadata|=(', '.metadata|=(]')):
             result = subprocess.run(['bash', '-euc', 'set -o pipefail\n' + broken],
                                     cwd=self.root, env=dict(self.env, **values, PATH=os.environ['PATH']),
                                     text=True, capture_output=True, timeout=10)
             self.assertNotEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, '')
             self.assertTrue(result.stderr)
+
+    def test_grouped_marshalling_preserves_generated_and_custom_annotations(self):
+        source = recovery.read_text()
+        start = source.index('{\n    oc create -f - --dry-run=client')
+        end = source.index('\nocEOF\n', start) + len('\nocEOF\n')
+        renderer = source[start:end].replace('| oc apply -f -', '| cat')
+        template = renderer.split("} 0<<'ocEOF' | cat\n", 1)[1].rsplit('ocEOF\n', 1)[0]
+        self.assertNotIn('annotations:', template)
+        sentinel = 'literal "quote" $(touch injected) `touch injected`'
+        annotatedTemplate = template.replace('metadata:\n', 'metadata:\n  annotations:\n    test.example/sentinel: ' + json.dumps(sentinel) + '\n', 1)
+        annotatedRenderer = renderer.replace(template, annotatedTemplate)
+        generated = subprocess.run([self.env['REAL_OC'], 'create', '-f', '-', '--dry-run=client',
+                                    '-o', 'json', '--save-config'], input=annotatedTemplate,
+                                   text=True, capture_output=True, timeout=10)
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        expected = json.loads(generated.stdout)
+        originalAnnotations = expected['metadata']['annotations'].copy()
+        self.assertEqual(originalAnnotations['test.example/sentinel'], sentinel)
+        self.assertIn('kubectl.kubernetes.io/last-applied-configuration', originalAnnotations)
+        values = {'helperPod': 'guest-fs--ntfs--123-456', 'ns': 'fixture-ns',
+                  'BSOD_DET__GUEST_FS__CTR_IMG': 'registry.test/guestfs:fixture', 'guestPVC': 'rootdisk'}
+        result = subprocess.run(['bash', '-euc', 'set -o pipefail\n' + annotatedRenderer],
+                                cwd=self.root, env=dict(self.env, **values, PATH=os.environ['PATH']),
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        actual = json.loads(result.stdout)
+        expected['metadata']['name'] = values['helperPod']
+        expected['metadata']['namespace'] = values['ns']
+        expected['spec']['containers'][0]['image'] = values['BSOD_DET__GUEST_FS__CTR_IMG']
+        expected['spec']['volumes'][0]['persistentVolumeClaim']['claimName'] = values['guestPVC']
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual['metadata']['annotations'], originalAnnotations)
+        self.assertFalse((self.root / 'injected').exists())
 
     def test_image_environment_is_marshaled_literally_in_executable(self):
         image = 'registry.test/guestfs:"quote"\n$(touch injected) `touch injected` \\ end'
@@ -358,9 +393,15 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn("image: ''", template)
         self.assertNotIn(self.env['BSOD_DET__GUEST_FS__CTR_IMG'], template)
         pod = json.loads((self.root / 'pod.json').read_text())
-        self.assertNotIn('annotations', pod['metadata'])
-        generated = subprocess.run([self.env['REAL_OC'], 'create', '-f', str(fixture),
-                                    '--dry-run=client', '-o', 'json', '--save-config'],
+        self.assertNotIn('annotations:', fixture.read_text())
+        self.assertNotIn('annotations:', template)
+        parsed = subprocess.run([self.env['REAL_OC'], 'create', '-f', '-',
+                                 '--dry-run=client', '-o', 'json'], input=template,
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        self.assertNotIn('annotations', json.loads(parsed.stdout)['metadata'])
+        generated = subprocess.run([self.env['REAL_OC'], 'create', '-f', '-',
+                                    '--dry-run=client', '-o', 'json', '--save-config'], input=template,
                                    text=True, capture_output=True, timeout=10)
         self.assertEqual(generated.returncode, 0, generated.stderr)
         expected = json.loads(generated.stdout)
@@ -368,8 +409,11 @@ class RecoveryTests(unittest.TestCase):
             'requests': {'memory': '512Mi', 'cpu': '500m', 'devices.kubevirt.io/kvm': '1'},
             'limits': {'memory': '2Gi', 'cpu': '2000m', 'devices.kubevirt.io/kvm': '1'},
         }
-        expected['spec']['containers'][0]['resources'] = resourceBudget
-        del expected['metadata']['annotations']
+        self.assertEqual(pod['metadata']['annotations'], expected['metadata']['annotations'])
+        annotation = json.loads(expected['metadata']['annotations']['kubectl.kubernetes.io/last-applied-configuration'])
+        self.assertEqual(annotation['metadata']['name'], 'guest-fs--ntfs')
+        self.assertEqual(annotation['spec']['containers'][0]['image'], '')
+        self.assertEqual(expected['spec']['containers'][0]['resources'], resourceBudget)
         expected['metadata']['name'] = pod['metadata']['name']
         expected['metadata']['namespace'] = self.metadata['namespace']
         expected['spec']['containers'][0]['image'] = self.env['BSOD_DET__GUEST_FS__CTR_IMG']
