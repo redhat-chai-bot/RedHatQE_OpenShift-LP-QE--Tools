@@ -115,7 +115,8 @@ helperPod="guest-fs--ntfs--$(date -u +'%s')-$$"
     jq -c \
         --arg name "${helperPod}" \
         --arg ns "${ns}" \
-        --arg image "${BSOD_DET__GUEST_FS__CTR_IMG:-quay.io/konveyor/oadp-vmfr-access:latest}" \
+        --arg ctrName "${helperPodCtr}" \
+        --arg ctrImg "${BSOD_DET__GUEST_FS__CTR_IMG:-quay.io/konveyor/oadp-vmfr-access:latest}" \
         --arg pvc "${guestPVC}" \
         '
             .metadata|=(
@@ -123,7 +124,10 @@ helperPod="guest-fs--ntfs--$(date -u +'%s')-$$"
                 .namespace=$ns
             ) |
             .spec|=(
-                .containers[0].image=$image |
+                .containers[0]|=(
+                    .name=$ctrName |
+                    .image=$ctrImg
+                ) |
                 .volumes[0].persistentVolumeClaim.claimName=$pvc
             )
         '
@@ -138,7 +142,7 @@ metadata:
 spec:
   automountServiceAccountToken: false
   containers:
-    - name: libguestfs
+    - name: ''
       image: ''
       imagePullPolicy: Always
       command:

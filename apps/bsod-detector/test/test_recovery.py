@@ -249,11 +249,12 @@ class RecoveryTests(unittest.TestCase):
         renderer = source[start:end].replace('| oc apply -f -', '| cat')
         self.assertIn("0<<'ocEOF'", renderer)
         self.assertNotIn('yq', renderer)
-        self.assertIn('--arg image "${BSOD_DET__GUEST_FS__CTR_IMG:-quay.io/konveyor/oadp-vmfr-access:latest}"', renderer)
+        self.assertIn('--arg ctrName "${helperPodCtr}"', renderer)
+        self.assertIn('--arg ctrImg "${BSOD_DET__GUEST_FS__CTR_IMG:-quay.io/konveyor/oadp-vmfr-access:latest}"', renderer)
         self.assertNotIn('guestfsImage', source)
         self.assertNotIn('BSOD_DET__GUESTFS__NTFS_IMAGE', source)
         self.assertIn('helperPod="guest-fs--ntfs--$(date -u +\'%s\')-$$"', source)
-        values = {'helperPod': 'guest-fs--ntfs--123-456', 'ns': 'fixture-ns',
+        values = {'helperPod': 'guest-fs--ntfs--123-456', 'ns': 'fixture-ns', 'helperPodCtr': 'fixture-guestfs',
                   'BSOD_DET__GUEST_FS__CTR_IMG': 'registry.test/guestfs:fixture', 'guestPVC': 'rootdisk'}
         for unusual in (False, True):
             with self.subTest(unusual=unusual):
@@ -269,10 +270,12 @@ class RecoveryTests(unittest.TestCase):
                 pod = json.loads(results[0].stdout)
                 self.assertEqual(pod['metadata']['name'], values['helperPod'])
                 self.assertEqual(pod['metadata']['namespace'], values['ns'])
+                self.assertEqual(pod['spec']['containers'][0]['name'], values['helperPodCtr'])
                 self.assertEqual(pod['spec']['containers'][0]['image'], values['BSOD_DET__GUEST_FS__CTR_IMG'])
                 self.assertEqual(pod['spec']['volumes'][0]['persistentVolumeClaim']['claimName'], values['guestPVC'])
                 annotation = json.loads(pod['metadata']['annotations']['kubectl.kubernetes.io/last-applied-configuration'])
                 self.assertEqual(annotation['metadata']['name'], 'guest-fs--ntfs')
+                self.assertEqual(annotation['spec']['containers'][0]['name'], '')
                 self.assertEqual(annotation['spec']['containers'][0]['image'], '')
                 self.assertNotIn('creationTimestamp', pod['metadata'])
                 self.assertNotIn('status', pod)
@@ -304,7 +307,7 @@ class RecoveryTests(unittest.TestCase):
         originalAnnotations = expected['metadata']['annotations'].copy()
         self.assertEqual(originalAnnotations['test.example/sentinel'], sentinel)
         self.assertIn('kubectl.kubernetes.io/last-applied-configuration', originalAnnotations)
-        values = {'helperPod': 'guest-fs--ntfs--123-456', 'ns': 'fixture-ns',
+        values = {'helperPod': 'guest-fs--ntfs--123-456', 'ns': 'fixture-ns', 'helperPodCtr': 'fixture-guestfs',
                   'BSOD_DET__GUEST_FS__CTR_IMG': 'registry.test/guestfs:fixture', 'guestPVC': 'rootdisk'}
         result = subprocess.run(['bash', '-euc', 'set -o pipefail\n' + annotatedRenderer],
                                 cwd=self.root, env=dict(self.env, **values, PATH=os.environ['PATH']),
@@ -313,11 +316,30 @@ class RecoveryTests(unittest.TestCase):
         actual = json.loads(result.stdout)
         expected['metadata']['name'] = values['helperPod']
         expected['metadata']['namespace'] = values['ns']
+        expected['spec']['containers'][0]['name'] = values['helperPodCtr']
         expected['spec']['containers'][0]['image'] = values['BSOD_DET__GUEST_FS__CTR_IMG']
         expected['spec']['volumes'][0]['persistentVolumeClaim']['claimName'] = values['guestPVC']
         self.assertEqual(actual, expected)
         self.assertEqual(actual['metadata']['annotations'], originalAnnotations)
         self.assertFalse((self.root / 'injected').exists())
+
+    def test_container_name_matches_executable_helper_calls(self):
+        source = recovery.read_text()
+        altered = source.replace("helperPodCtr='libguestfs'", "helperPodCtr='fixture-guestfs'")
+        self.assertNotEqual(source, altered)
+        script = self.root / recovery.name
+        script.write_text(altered)
+        script.chmod(0o755)
+        (self.root / 'reliability.py').symlink_to(hostDir / 'reliability.py')
+        result = self.RunRecovery(script=script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pod = json.loads((self.root / 'pod.json').read_text())
+        self.assertEqual(pod['spec']['containers'][0]['name'], 'fixture-guestfs')
+        calls = [call for call in self.Calls() if call[0] in ('exec', 'cp')]
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertEqual(call[call.index('-c') + 1], pod['spec']['containers'][0]['name'])
+        self.AssertDeleted()
 
     def test_image_environment_is_marshaled_literally_in_executable(self):
         image = 'registry.test/guestfs:"quote"\n$(touch injected) `touch injected` \\ end'
@@ -387,11 +409,13 @@ class RecoveryTests(unittest.TestCase):
         expectedTemplate = re.sub(r'^      resources:\n(?:        .*\n)+',
                                   ''.join('      ' + line for line in override.splitlines(True)),
                                   fixture.read_text(), count=1, flags=re.MULTILINE)
+        expectedTemplate = expectedTemplate.replace('    - name: libguestfs\n', "    - name: ''\n", 1)
         self.assertEqual(template, expectedTemplate)
         self.assertIn('name: guest-fs--ntfs', template)
         self.assertIn("namespace: ''", template)
         self.assertIn("claimName: ''", template)
         self.assertIn("image: ''", template)
+        self.assertIn("    - name: ''", template)
         self.assertNotIn(self.env['BSOD_DET__GUEST_FS__CTR_IMG'], template)
         pod = json.loads((self.root / 'pod.json').read_text())
         self.assertNotIn('annotations:', fixture.read_text())
@@ -413,10 +437,12 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(pod['metadata']['annotations'], expected['metadata']['annotations'])
         annotation = json.loads(expected['metadata']['annotations']['kubectl.kubernetes.io/last-applied-configuration'])
         self.assertEqual(annotation['metadata']['name'], 'guest-fs--ntfs')
+        self.assertEqual(annotation['spec']['containers'][0]['name'], '')
         self.assertEqual(annotation['spec']['containers'][0]['image'], '')
         self.assertEqual(expected['spec']['containers'][0]['resources'], resourceBudget)
         expected['metadata']['name'] = pod['metadata']['name']
         expected['metadata']['namespace'] = self.metadata['namespace']
+        expected['spec']['containers'][0]['name'] = 'libguestfs'
         expected['spec']['containers'][0]['image'] = self.env['BSOD_DET__GUEST_FS__CTR_IMG']
         expected['spec']['volumes'][0]['persistentVolumeClaim']['claimName'] = self.metadata['guestPvc']
         self.assertEqual(pod, expected)
