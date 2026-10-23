@@ -11,14 +11,14 @@ while (($#)); do
     case "${1}" in
         (--metadata)    metadataFile="${2:?}"; shift 2;;
         (-h|--help)
-            echo "usage: ${scrName} --metadata PRE_STOP_METADATA.json"
+            echo "usage: ${scrName} --metadata METADATA.json"
             exit 0
             ;;
         (*) echo "${scrName%.sh}: unknown argument: ${1}" 1>&2; exit 2;;
     esac
 done
 [ -r "${metadataFile}" ] || {
-    echo "${scrName%.sh}: --metadata is required and must be readable" 1>&2
+    echo "${scrName%.sh}: \`--metadata\` is required and must be readable" 1>&2
     exit 2
 }
 
@@ -210,9 +210,9 @@ typeset -a srcArr=(
     '/Windows/System32/winevt/Logs/Application.evtx'
 )
 typeset ntfsPart=''
-# ntfsPart: /dev/sda<N>
-# Copy file independently.
 while IFS= read -r ntfsPart; do
+    # ntfsPart: /dev/sda<N>
+    # Copy file independently.
     typeset podTmp="/tmp/bsod--guest-files--$(date -u +'%s')"
     typeset src='' dst=''
 

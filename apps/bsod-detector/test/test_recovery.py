@@ -1062,7 +1062,7 @@ source "$1" "${@:2}"
         for args, expected, message in (
                 (('--help',), 0, f'usage: {alias.name} '),
                 (('--unknown',), 2, f'{alias.stem}: unknown argument:'),
-                (('--metadata', str(self.root / 'missing.json')), 2, f'{alias.stem}: --metadata is required and must be readable')):
+                (('--metadata', str(self.root / 'missing.json')), 2, f'{alias.stem}: `--metadata` is required and must be readable')):
             with self.subTest(args=args):
                 result = self.RunRecovery('', *args, script=alias)
                 self.assertEqual(result.returncode, expected, result.stderr)
@@ -1075,13 +1075,21 @@ source "$1" "${@:2}"
         self.assertFalse(self.Calls())
 
     def test_metadata_guard_rejects_missing_or_unreadable_inputs(self):
+        unreadable = self.root / 'unreadable.json'
+        unreadable.write_text('{}')
+        unreadable.chmod(0o000)
         for args in ((),
-                     ('--metadata', str(self.root / 'missing.json'))):
+                     ('--metadata', str(self.root / 'missing.json')),
+                     ('--metadata', str(unreadable))):
             with self.subTest(args=args):
+                if args == ('--metadata', str(unreadable)) and os.access(unreadable, os.R_OK):
+                    self.skipTest('effective user can read mode-000 files')
                 result = (self.RunRecovery('', *args) if args else
                           subprocess.run([str(recovery)], env=self.env, text=True, capture_output=True, timeout=10))
                 self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertIn('--metadata is required and must be readable', result.stderr)
+                self.assertEqual([line for line in result.stderr.splitlines() if not line.startswith('+')],
+                                 [f'{recovery.stem}: `--metadata` is required and must be readable'])
+                self.assertEqual(result.stdout, '')
         self.assertFalse(self.Calls())
 
     def test_preserves_watcher_parser(self):
@@ -1289,7 +1297,8 @@ source "$1" "${@:2}"
                 result = self.RunRecovery('', *args)
                 self.assertEqual(result.returncode, expected)
                 if args == ('--help',):
-                    self.assertIn('usage: extract--guest-os--crash-info.sh ', result.stdout)
+                    self.assertEqual(result.stdout, 'usage: extract--guest-os--crash-info.sh --metadata METADATA.json\n')
+                    self.assertNotIn('PRE_STOP_METADATA.json', result.stdout)
         self.assertFalse(self.Calls())
 
 
