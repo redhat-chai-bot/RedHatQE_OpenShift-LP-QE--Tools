@@ -139,6 +139,27 @@ make_recovery_mocks() {
   REAL_OC="$(command -v oc)"
   export REAL_OC
   make_python_and_findmnt_mocks
+  export MOCK_ROOT="$BATS_TMPDIR/helper-mock"
+  "$REAL_PYTHON" -B - "$REPO_ROOT/test/test_recovery.py" "$MOCK_ROOT" <<'EOF'
+import importlib.util
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location('recovery_fixture', sys.argv[1])
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+root = Path(sys.argv[2])
+(root / 'helper-bin').mkdir(parents=True)
+(root / 'helper-fs').mkdir()
+data = bytearray(4096)
+data[:8] = b'ElfFile\x00'
+(root / 'fixture.evtx').write_bytes(data)
+(root / 'oc.py').write_text(fixture.mockOC)
+for name, body in (('mkdir', fixture.helperMkdir), ('guestfish', fixture.helperGuestfish)):
+    path = root / 'helper-bin' / name
+    path.write_text(f'#!{sys.executable}\n' + body)
+    path.chmod(0o755)
+EOF
   cat > "$BATS_TMPDIR/mockbin/oc" <<'EOF'
 #!/usr/bin/env bash
 [[ "${1:-}" == --request-timeout=* ]] && shift
@@ -164,6 +185,9 @@ case "$1" in
     esac ;;
   exec)
     all="$*"
+    if [[ "$all" == *'set-program virt-sh'* || "$all" == *'bash -o pipefail -O inherit_errexit -euxc'* || "$all" == *'test -d '* || "$all" == *'tar zc '* ]]; then
+      exec "$REAL_PYTHON" -B "$MOCK_ROOT/oc.py" "$@"
+    fi
     if [[ "$all" == *'guestfish --ro -a /dev/vda run : list-filesystems'* ]]; then [[ "${MISSING_GUESTFISH:-0}" == 0 ]] || exit 1; printf '/dev/sda3: ntfs\n'; exit 0; fi
     if [[ "$all" == *guestfish* && "$all" == *'download /Windows/'* ]]; then exit 0; fi
     if [[ "$all" == *'/bin/bash -ceu'* ]]; then [[ "${MISSING_GUESTFISH:-0}" == 0 ]]; exit; fi
