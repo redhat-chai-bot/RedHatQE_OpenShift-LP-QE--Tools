@@ -10,6 +10,7 @@ import sys
 import tempfile
 import tarfile
 import unittest
+import zlib
 
 
 hostDir = Path(__file__).resolve().parents[1] / 'src/scripts/host'
@@ -688,11 +689,11 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(summaryCall[summaryCall.index('--out') + 1], providedOut)
                 case.AssertDeleted()
 
-    def test_directory_alias_stale_outputs_rejected_before_writes(self):
+    def test_directory_alias_existing_outputs_reach_extraction(self):
         for staleName in ('MEMORY.DMP', 'Minidump', 'guestFS_sda3', 'events.json',
                           'extraction-summary.json', 'checksums.sha256'):
             with self.subTest(staleName=staleName):
-                case = RecoveryTests('test_success_contract')
+                case = ArchiveRecoveryTests('test_archive_contains_only_requested_files_and_validator_remains_deferred')
                 case.setUp()
                 self.addCleanup(case.doCleanups)
                 alias = case.root / 'directory alias'
@@ -700,17 +701,26 @@ class RecoveryTests(unittest.TestCase):
                 case.metadata['outputDir'] = str(alias)
                 stale = case.out / staleName
                 stale.mkdir() if staleName in ('Minidump', 'guestFS_sda3') else stale.write_text('preserve-stale')
-                before = sorted(path.name for path in case.out.iterdir())
+                if stale.is_dir():
+                    (stale / 'watcher-note.txt').write_text('preserve-watcher')
                 result = case.RunRecovery()
                 self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn('Pre-existing extraction artifact rejected:', result.stderr)
-                self.assertFalse(case.Calls())
-                self.assertEqual(sorted(path.name for path in case.out.iterdir()), before)
-                if stale.is_file():
+                self.assertNotIn('Pre-existing extraction artifact rejected:', result.stderr)
+                self.assertTrue(any(call[0] == 'apply' for call in case.Calls()))
+                self.assertEqual(len(case.ArchiveContents()), 2)
+                case.AssertDeleted()
+                self.assertTrue(stale.exists())
+                if staleName == 'MEMORY.DMP':
                     self.assertEqual(stale.read_text(), 'preserve-stale')
+                elif stale.is_dir():
+                    self.assertEqual((stale / 'watcher-note.txt').read_text(), 'preserve-watcher')
+                else:
+                    self.assertNotEqual(stale.read_text(), 'preserve-stale')
+                summary = json.loads((case.out / 'extraction-summary.json').read_text())
+                self.assertFalse(summary['ok'])
                 self.assertFalse((case.out / 'extraction.log').exists())
 
-    def test_stale_scan_does_not_follow_descendant_directory_alias(self):
+    def test_api_failure_preserves_descendant_directory_alias(self):
         external = self.root / 'external'
         external.mkdir()
         (external / 'events.json').write_text('external-stale')
@@ -1169,13 +1179,11 @@ source "$1" "${@:2}"
         self.assertFalse((self.root / 'helper-pod').exists())
 
     def test_unsafe_inputs_never_apply(self):
-        for scenario in ('api-error', 'bad-json', 'vm-status-Running', 'vm-status-Starting', 'stale'):
+        for scenario in ('api-error', 'bad-json', 'vm-status-Running', 'vm-status-Starting'):
             with self.subTest(scenario=scenario):
                 case = RecoveryTests('test_success_contract')
                 case.setUp()
                 self.addCleanup(case.doCleanups)
-                if scenario == 'stale':
-                    (case.out / 'events.json').write_text('stale')
                 result = case.RunRecovery(scenario)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
                 self.assertFalse(any(call[0] == 'apply' for call in case.Calls()))
@@ -1341,6 +1349,33 @@ class ArchiveRecoveryTests(unittest.TestCase):
         expected = {f'Windows/System32/winevt/Logs/{name}.evtx': (self.root / 'fixture.evtx').read_bytes()
                     for name in ('System', 'Application')}
         self.assertEqual(content, expected)
+
+    def test_existing_archive_is_replaced_not_appended(self):
+        archive = self.out / 'guest-fs--crash-info.tgz'
+        original = b'preexisting archive sentinel' * 4096
+        archive.write_bytes(original)
+        archive.chmod(0o600)
+        result = self.RunRecovery()
+        self.AssertDeferredValidator(result)
+        self.assertEqual(len(self.ArchiveContents()), 2)
+        replacement = archive.read_bytes()
+        self.assertNotEqual(replacement, original)
+        payload = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        payload.decompress(replacement)
+        self.assertTrue(payload.eof)
+        self.assertEqual(payload.unused_data, b'')
+
+    def test_existing_watcher_files_are_not_deleted_or_modified(self):
+        parser = self.out / 'parse-dump-header.json'
+        parser.write_text('{"ok":true,"totalDumps":0,"dumps":[],"watcher":"preserve"}\n')
+        note = self.out / 'watcher.log'
+        note.write_text('preserve watcher log\n')
+        watched = [self.out / 'vm-memory.elf', parser, note]
+        before = {path: path.read_bytes() for path in watched}
+        result = self.RunRecovery()
+        self.AssertDeferredValidator(result)
+        self.assertEqual(len(self.ArchiveContents()), 2)
+        self.assertEqual({path: path.read_bytes() for path in watched}, before)
 
     def test_helper_filesystem_mkdir_test_and_timestamp_path(self):
         result = self.RunRecovery()

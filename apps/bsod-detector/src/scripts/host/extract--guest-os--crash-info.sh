@@ -55,11 +55,6 @@ for k in "${!fldChk[@]}"; do
 done
 mkdir -p "${outDir}" || { : "Cannot create output directory: ${outDir}"; false; }
 
-# Watcher-owned captures may exist, but extraction must not overwrite stale data.
-typeset stale=''
-stale="$(find -H "${outDir}" -mindepth 1 \( -name MEMORY.DMP -o -name Minidump -o -name 'guestFS_*' -o -name events.json -o -name extraction-summary.json -o -name checksums.sha256 \) -print -quit)"
-[ -z "${stale}" ] || { : "Pre-existing extraction artifact rejected: ${stale}"; false; }
-
 typeset helperPod='' helperPodCtr='libguestfs'
 
 function Cleanup () {

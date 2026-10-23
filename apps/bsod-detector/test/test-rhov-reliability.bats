@@ -264,11 +264,21 @@ write_elf_memory_fixture() {
   ! grep -Eq '(^| )delete (pvc|volumesnapshot)( |/)' "$OC_LOG"
 }
 
-@test "recovery rejects stale output and unavailable guestfish without requiring storage metadata" {
+@test "recovery reaches archive creation with existing output" {
   export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
   mkdir "$EVIDENCE_ROOT"; make_recovery_mocks; write_recovery_metadata
   printf stale > "$EVIDENCE_ROOT/fixture-recovery-001/MEMORY.DMP"; run_recovery
-  [ "$status" -ne 0 ]; [[ "$output" == *'Pre-existing extraction artifact rejected'* ]]
+  [ "$status" -ne 0 ]; [[ "$output" != *'Pre-existing extraction artifact rejected'* ]]
+  grep -q '^apply -f -' "$OC_LOG"
+  [ -s "$EVIDENCE_ROOT/fixture-recovery-001/guest-fs--crash-info.tgz" ]
+  [ "$(<"$EVIDENCE_ROOT/fixture-recovery-001/MEMORY.DMP")" = stale ]
+  tar tzf "$EVIDENCE_ROOT/fixture-recovery-001/guest-fs--crash-info.tgz" | grep -q 'Windows/System32/winevt/Logs/System.evtx'
+  grep -q '^-n fixture-ns delete pod/' "$OC_LOG"
+}
+
+@test "recovery handles unavailable guestfish without requiring storage metadata" {
+  export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
+  mkdir "$EVIDENCE_ROOT"; make_recovery_mocks; write_recovery_metadata
   rm -rf "$EVIDENCE_ROOT/fixture-recovery-001"; write_recovery_metadata; rm "$EVIDENCE_ROOT/.bsod-storage-identity"
   jq 'del(.evidenceMount)' "$BATS_TMPDIR/metadata.json" > "$BATS_TMPDIR/metadata.tmp"
   mv "$BATS_TMPDIR/metadata.tmp" "$BATS_TMPDIR/metadata.json"
