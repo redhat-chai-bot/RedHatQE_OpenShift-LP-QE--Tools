@@ -420,7 +420,9 @@ class RecoveryTests(unittest.TestCase):
         wait, = requests
         self.assertEqual(wait[:2], ['--request-timeout=185s', 'wait'])
         self.assertIn('--timeout=180s', wait)
-        self.assertTrue(all(call[0] in ('get', 'apply', 'exec', 'cp', '-n') for call in rawCalls if call not in requests))
+        self.assertTrue(all(call[0] in ('get', 'create', 'apply', 'exec', 'cp', '-n') for call in rawCalls if call not in requests))
+        creates = [call for call in rawCalls if call[0] == 'create']
+        self.assertEqual(creates, [['create', '-f', '-', '--dry-run=client', '-o', 'json', '--save-config']])
         discovery, = [call for call in rawCalls if call[:3] == ['-n', 'fixture-ns', 'exec']]
         self.assertEqual(discovery[:3], ['-n', 'fixture-ns', 'exec'])
         self.assertEqual(discovery[discovery.index('--') + 1:],
@@ -441,7 +443,7 @@ class RecoveryTests(unittest.TestCase):
     def test_direct_failure_breadcrumbs_replace_die(self):
         source = recovery.read_text()
         self.assertNotRegex(source, r'\bDie\b')
-        messages = re.findall(r': ([\'"])(.*?)\1', source)
+        messages = re.findall(r'(?:^|\{)[ \t]*: ([\'"])(.*?)\1', source, re.MULTILINE)
         self.assertEqual(len(messages), 4)
         for quote, message in messages:
             with self.subTest(message=message):
