@@ -53,7 +53,6 @@ for k in "${!fldChk[@]}"; do
         false
     }
 done
-unset -n varRef
 mkdir -p "${outDir}" || { : "Cannot create output directory: ${outDir}"; false; }
 
 # Watcher-owned captures may exist, but extraction must not overwrite stale data.
@@ -193,9 +192,9 @@ spec:
       emptyDir: {}
 ocEOF
 
-oc --request-timeout=185s wait pod "${helperPod}" -n "${ns}" --for=jsonpath='{.status.phase}'=Running --timeout=180s
-oc exec -n "${ns}" "${helperPod}" -c "${container}" -- \
-    guestfish --ro -a /dev/vda run : list-filesystems
+oc -n "${ns}" wait "pod/${helperPod}" \
+    --for=condition=Ready \
+    --timeout=180s 1> /dev/null
 
 typeset -a evtxArr=(
     '/Windows/System32/winevt/Logs/System.evtx'

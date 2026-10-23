@@ -122,13 +122,11 @@ elif args[0] == 'exec':
             print('mock guestfish unavailable', file=sys.stderr)
             sys.exit(20)
         if 'list-filesystems' in command:
-            probe = root / 'probe-done'
-            if scenario in ('discovery-error', 'discovery-partial-error') and probe.exists():
+            if scenario in ('discovery-error', 'discovery-partial-error'):
                 if scenario == 'discovery-partial-error':
                     print('/dev/sda3: ntfs')
                 print('mock discovery failure', file=sys.stderr)
                 sys.exit(26)
-            probe.touch()
             if scenario == 'no-ntfs':
                 print('/dev/sda1: vfat\n/dev/sda2: ext4')
             elif scenario != 'empty-filesystems':
@@ -492,29 +490,42 @@ class RecoveryTests(unittest.TestCase):
         result = self.RunRecovery()
         self.assertEqual(result.returncode, 0, result.stderr)
         rawCalls = [json.loads(line) for line in (self.root / 'oc-argv.jsonl').read_text().splitlines()]
-        requests = [call for call in rawCalls if call[0].startswith('--request-timeout=')]
-        self.assertEqual(len(requests), 1)
-        wait, = requests
-        self.assertEqual(wait[:2], ['--request-timeout=185s', 'wait'])
-        self.assertIn('--timeout=180s', wait)
-        self.assertTrue(all(call[0] in ('get', 'create', 'apply', 'exec', 'cp', '-n') for call in rawCalls if call not in requests))
+        self.assertFalse(any(arg.startswith('--request-timeout') for call in rawCalls for arg in call))
+        wait, = [call for call in rawCalls if '--for=condition=Ready' in call]
+        self.assertEqual(wait, ['-n', 'fixture-ns', 'wait',
+                                'pod/' + json.loads((self.root / 'pod.json').read_text())['metadata']['name'],
+                                '--for=condition=Ready', '--timeout=180s'])
+        self.assertTrue(all(call[0] in ('get', 'create', 'apply', 'exec', 'cp', '-n') for call in rawCalls))
         creates = [call for call in rawCalls if call[0] == 'create']
         self.assertEqual(creates, [['create', '-f', '-', '--dry-run=client', '-o', 'json', '--save-config']])
         discovery, = [call for call in rawCalls if call[:3] == ['-n', 'fixture-ns', 'exec']]
         self.assertEqual(discovery[:3], ['-n', 'fixture-ns', 'exec'])
         self.assertEqual(discovery[discovery.index('--') + 1:],
                          ['guestfish', '--ro', '-a', '/dev/vda', 'run', ':', 'list-filesystems'])
+        discoveries = [call for call in rawCalls if 'list-filesystems' in call]
+        self.assertEqual(discoveries, [discovery])
+        self.assertLess(rawCalls.index(wait), rawCalls.index(discovery))
         deadlines = [json.loads(line) for line in (self.root / 'timeouts.jsonl').read_text().splitlines()]
         self.assertEqual(len(deadlines), 1)
         self.assertEqual(deadlines[0][:4], ['--signal=TERM', '--kill-after=5', '60', 'python3'])
-        cleanup = [call for call in rawCalls if call[:3] in
-                   (['-n', 'fixture-ns', 'delete'], ['-n', 'fixture-ns', 'wait'])]
+        cleanup = [call for call in rawCalls if call[:3] == ['-n', 'fixture-ns', 'delete'] or
+                   (call[:3] == ['-n', 'fixture-ns', 'wait'] and '--for=delete' in call)]
         self.assertEqual(len(cleanup), 4)
         self.AssertDeleted()
         source = recovery.read_text()
         self.assertNotRegex(source, r'\bOc\b')
         self.assertNotIn('cmdTimeout', source)
         self.assertNotIn('BSOD_DET__COMMAND__TIMEOUT', source)
+        self.assertNotIn('--request-timeout', source)
+        self.assertNotIn('unset -n varRef', source)
+        self.AssertDeleted()
+
+    def test_ready_wait_failure_prevents_helper_execution(self):
+        result = self.RunRecovery('wait-error')
+        self.assertEqual(result.returncode, 19, result.stderr)
+        self.assertIn('mock startup timeout', result.stderr)
+        self.assertFalse(any(call[0] in ('exec', 'cp') for call in self.Calls()))
+        self.assertFalse((self.out / 'extraction-summary.json').exists())
         self.AssertDeleted()
 
     def test_direct_failure_breadcrumbs_replace_die(self):
@@ -945,7 +956,7 @@ source "$1" "${@:2}"
                 case.setUp()
                 self.addCleanup(case.doCleanups)
                 result = case.RunRecovery(scenario)
-                expected = {'wait-error': 19, 'no-guestfish': 20, 'exec-error': 27, 'cleanup-error': 25}.get(scenario, 1)
+                expected = {'wait-error': 19, 'cleanup-error': 25}.get(scenario, 1)
                 self.assertEqual(result.returncode, expected, result.stderr)
                 case.AssertDeleted(count=2 if scenario == 'cleanup-error' else None,
                                    waitCount=0 if scenario == 'cleanup-error' else None)

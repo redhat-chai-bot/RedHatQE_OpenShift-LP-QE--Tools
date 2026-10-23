@@ -232,7 +232,9 @@ write_elf_memory_fixture() {
   [ "$(jq -r .ok "$summary")" = true ]
   [ "$(jq -r '.missingRequiredArtifactTypes|length' "$summary")" -eq 0 ]
   [ ! -e "$EVIDENCE_ROOT/fixture-recovery-001/bsod-screenshot.png" ]
-  grep -q '^-n fixture-ns exec .*guestfish --ro -a /dev/vda run : list-filesystems' "$OC_LOG"
+  [ "$(grep -c '^-n fixture-ns exec .*guestfish --ro -a /dev/vda run : list-filesystems' "$OC_LOG")" -eq 1 ]
+  grep -q '^-n fixture-ns wait pod/guest-fs--ntfs--.* --for=condition=Ready --timeout=180s$' "$OC_LOG"
+  ! grep -q -- --request-timeout "$OC_LOG"
   [ "$(grep -c '^-n fixture-ns delete pod/guest-fs--ntfs--.* --ignore-not-found$' "$OC_LOG")" -eq 2 ]
   [ "$(grep -c '^-n fixture-ns wait pod/guest-fs--ntfs--.* --for=delete --timeout=60s$' "$OC_LOG")" -eq 2 ]
   ! grep -Eq '(^| )delete (pvc|volumesnapshot)( |/)' "$OC_LOG"
