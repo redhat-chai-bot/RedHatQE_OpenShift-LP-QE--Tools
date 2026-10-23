@@ -835,5 +835,5 @@ All variables use `BSOD_DET__` prefix (Red Hat Chaos Team convention):
 | `BSOD_DET__COMMAND__TIMEOUT` | No | `30` | Command timeout (seconds) |
 | `BSOD_DET__READY__TIMEOUT` | No | `300` | Watcher readiness timeout |
 | `BSOD_DET__PREFLIGHT__TIMEOUT` | No | `300` | Positive-integer validation only; trigger currently uses a fixed 1800s preflight timeout |
-| `BSOD_DET__GUEST_FS__CTR_IMG` | Yes (extraction) | — | guestfs helper image; export before watcher/recover execution, no default or legacy fallback |
+| `BSOD_DET__GUEST_FS__CTR_IMG` | No | `quay.io/konveyor/oadp-vmfr-access:latest` | guestfs helper image; unset or empty uses the default, with no legacy environment fallback |
 | `BSOD_RECOVERY_IMAGE` | No | — | Digest-pinned recovery image |

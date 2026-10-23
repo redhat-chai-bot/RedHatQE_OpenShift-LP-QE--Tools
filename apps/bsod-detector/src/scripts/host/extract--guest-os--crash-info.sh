@@ -111,7 +111,7 @@ helperPod="guest-fs--ntfs--$(date -u +'%s')-$$"
     jq -c \
         --arg name "${helperPod}" \
         --arg ns "${ns}" \
-        --arg image "${BSOD_DET__GUEST_FS__CTR_IMG}" \
+        --arg image "${BSOD_DET__GUEST_FS__CTR_IMG:-quay.io/konveyor/oadp-vmfr-access:latest}" \
         --arg pvc "${guestPVC}" \
         '
             .metadata|=(

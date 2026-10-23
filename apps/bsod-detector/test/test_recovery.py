@@ -249,7 +249,7 @@ class RecoveryTests(unittest.TestCase):
         renderer = source[start:end].replace('| oc apply -f -', '| cat')
         self.assertIn("0<<'ocEOF'", renderer)
         self.assertNotIn('yq', renderer)
-        self.assertIn('--arg image "${BSOD_DET__GUEST_FS__CTR_IMG}"', renderer)
+        self.assertIn('--arg image "${BSOD_DET__GUEST_FS__CTR_IMG:-quay.io/konveyor/oadp-vmfr-access:latest}"', renderer)
         self.assertNotIn('guestfsImage', source)
         self.assertNotIn('BSOD_DET__GUESTFS__NTFS_IMAGE', source)
         self.assertIn('helperPod="guest-fs--ntfs--$(date -u +\'%s\')-$$"', source)
@@ -331,22 +331,25 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse((self.root / 'injected').exists())
         self.AssertDeleted()
 
-    def test_unset_image_environment_has_no_default_or_legacy_fallback(self):
-        for legacy in (False, True):
-            with self.subTest(legacy=legacy):
+    def test_unset_or_empty_image_environment_defaults_without_legacy_override(self):
+        for value, legacy in ((None, False), ('', False), (None, True), ('', True)):
+            with self.subTest(value=value, legacy=legacy):
                 case = RecoveryTests('test_success_contract')
                 case.setUp()
                 self.addCleanup(case.doCleanups)
                 del case.env['BSOD_DET__GUEST_FS__CTR_IMG']
+                if value is not None:
+                    case.env['BSOD_DET__GUEST_FS__CTR_IMG'] = value
                 case.env.pop('BSOD_DET__GUESTFS__NTFS_IMAGE', None)
                 if legacy:
                     case.env['BSOD_DET__GUESTFS__NTFS_IMAGE'] = 'registry.test/legacy:ignored'
                 result = case.RunRecovery()
-                self.assertNotEqual(result.returncode, 0, result.stderr)
-                self.assertIn('BSOD_DET__GUEST_FS__CTR_IMG: unbound variable', result.stderr)
-                self.assertFalse((case.root / 'pod.json').exists())
-                self.assertFalse(any(call[0] in ('exec', 'cp') for call in case.Calls()))
-                self.assertFalse((case.out / 'extraction-summary.json').exists())
+                self.assertEqual(result.returncode, 0, result.stderr)
+                pod = json.loads((case.root / 'pod.json').read_text())
+                self.assertEqual(pod['spec']['containers'][0]['image'],
+                                 'quay.io/konveyor/oadp-vmfr-access:latest')
+                self.assertTrue(any(call[0] == 'exec' for call in case.Calls()))
+                self.assertTrue((case.out / 'extraction-summary.json').exists())
                 case.AssertDeleted()
 
     def test_pod_generator_and_marshaler_fail_before_resource_apply(self):
@@ -818,6 +821,8 @@ class RecoveryTests(unittest.TestCase):
         self.AssertDeleted()
 
     def test_watcher_recovery_uses_metadata_only(self):
+        self.env.pop('BSOD_DET__GUEST_FS__CTR_IMG', None)
+        self.env['BSOD_DET__GUESTFS__NTFS_IMAGE'] = 'registry.test/legacy:ignored'
         watcher = (hostDir / 'watch-crash.sh').read_text()
         runTimed = re.search(r'^function RunTimed \(\) \{.*\}$', watcher, re.MULTILINE).group()
         recover = re.search(r'^function Recover \(\) \{\n.*?^\}', watcher, re.MULTILINE | re.DOTALL).group()
@@ -831,6 +836,9 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + (self.root / 'pipeline.log').read_text())
         self.assertTrue(json.loads((self.out / 'extraction-summary.json').read_text())['ok'])
         self.assertNotIn('--out', recover)
+        pod = json.loads((self.root / 'pod.json').read_text())
+        self.assertEqual(pod['spec']['containers'][0]['image'],
+                         'quay.io/konveyor/oadp-vmfr-access:latest')
         self.AssertDeleted()
 
     def test_watcher_reports_transient_cleanup_failure(self):
@@ -885,6 +893,8 @@ class RecoveryTests(unittest.TestCase):
         self.AssertDeleted()
 
     def test_container_recover_dispatch(self):
+        self.env['BSOD_DET__GUEST_FS__CTR_IMG'] = ''
+        self.env['BSOD_DET__GUESTFS__NTFS_IMAGE'] = 'registry.test/legacy:ignored'
         entrypoint = Path(__file__).resolve().parents[3] / 'image/container/bsod-detector/entrypoint.sh'
         self.meta.write_text(json.dumps(self.metadata))
         command = '''set -euxo pipefail; shopt -s inherit_errexit
@@ -902,6 +912,9 @@ source "$1" "${@:2}"
                                 text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads((self.out / 'extraction-summary.json').read_text())['ok'])
+        pod = json.loads((self.root / 'pod.json').read_text())
+        self.assertEqual(pod['spec']['containers'][0]['image'],
+                         'quay.io/konveyor/oadp-vmfr-access:latest')
         self.AssertDeleted()
 
     def test_diagnostics_follow_invoked_name(self):
