@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
 
 
@@ -143,6 +144,22 @@ elif args[0] == 'exec':
                     (root / Path(dest).name).write_bytes((root / 'fixture.evtx').read_bytes())
     elif command[:2] == ['rm', '-f']:
         (root / Path(command[2]).name).unlink(missing_ok=True)
+    elif command[0] == 'bash':
+        helperEnv = dict(os.environ, PATH=str(root / 'helper-bin') + ':' + os.environ['PATH'])
+        sys.exit(subprocess.run(command, env=helperEnv).returncode)
+    elif command[:2] == ['test', '-d']:
+        if scenario == 'helper-test-error':
+            sys.exit(34)
+        destination = root / 'helper-fs' / command[2].lstrip('/')
+        sys.exit(0 if destination.is_dir() else 1)
+    elif command[0] == 'tar':
+        if scenario == 'tar-error':
+            sys.stdout.buffer.write(b'partial archive')
+            sys.exit(35)
+        translated = list(command)
+        index = translated.index('-C') + 1
+        translated[index] = str(root / 'helper-fs' / translated[index].lstrip('/'))
+        sys.exit(subprocess.run(translated).returncode)
     else:
         sys.exit(92)
 elif args[0] == 'cp':
@@ -169,6 +186,41 @@ else:
 '''
 
 
+helperMkdir = r'''
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ['MOCK_ROOT'])
+with (root / 'helper-argv.jsonl').open('a') as calls:
+    calls.write(json.dumps(['mkdir', *sys.argv[1:]]) + '\n')
+if os.environ.get('SCENARIO') == 'mkdir-error':
+    sys.exit(30)
+assert sys.argv[1] == '-p'
+for destination in sys.argv[2:]:
+    (root / 'helper-fs' / destination.lstrip('/')).mkdir(parents=True, exist_ok=True)
+'''
+
+
+helperGuestfish = r'''
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ['MOCK_ROOT'])
+args = sys.argv[1:]
+with (root / 'helper-argv.jsonl').open('a') as calls:
+    calls.write(json.dumps(['guestfish', *args]) + '\n')
+assert args[:2] == ['-ra', '/dev/vda']
+assert args[args.index('mount-ro') + 1] == '/dev/sda3'
+index = args.index('copy-out')
+source, destination = args[index + 1:index + 3]
+assert source in ('/Windows/System32/winevt/Logs/System.evtx', '/Windows/System32/winevt/Logs/Application.evtx')
+target = root / 'helper-fs' / destination.lstrip('/')
+assert target.is_dir(), 'copy-out destination must exist in helper filesystem'
+scenario = os.environ.get('SCENARIO', '')
+if scenario == 'copy-error' or (scenario == 'system-missing' and source.endswith('System.evtx')) or (scenario == 'partial-batch' and source.endswith('Application.evtx')):
+    sys.exit(22)
+(target / Path(source).name).write_bytes((root / 'fixture.evtx').read_bytes())
+'''
+
+
 class RecoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='recovery test ')
@@ -181,6 +233,13 @@ class RecoveryTests(unittest.TestCase):
         mock = self.bin / 'oc'
         mock.write_text(f'#!{sys.executable}\n' + mockOC)
         mock.chmod(0o755)
+        helperBin = self.root / 'helper-bin'
+        helperBin.mkdir()
+        (self.root / 'helper-fs').mkdir()
+        for name, body in (('mkdir', helperMkdir), ('guestfish', helperGuestfish)):
+            tool = helperBin / name
+            tool.write_text(f'#!{sys.executable}\n' + body)
+            tool.chmod(0o755)
         mountMock = self.bin / 'findmnt'
         mountMock.write_text(f'#!{sys.executable}\nimport json, os\n'
                             'print(json.dumps({"filesystems": [{"target": os.environ["MOCK_ROOT"], '
@@ -1232,6 +1291,180 @@ source "$1" "${@:2}"
                 if args == ('--help',):
                     self.assertIn('usage: extract--guest-os--crash-info.sh ', result.stdout)
         self.assertFalse(self.Calls())
+
+
+class ArchiveRecoveryTests(unittest.TestCase):
+    setUp = RecoveryTests.setUp
+    RunRecovery = RecoveryTests.RunRecovery
+    Calls = RecoveryTests.Calls
+    AssertDeleted = RecoveryTests.AssertDeleted
+
+    def ArchiveContents(self):
+        archive = self.out / 'guest-fs--crash-info.tgz'
+        self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
+        with tarfile.open(archive, 'r:gz') as payload:
+            return {member.name.removeprefix('./'): payload.extractfile(member).read()
+                    for member in payload.getmembers() if member.isfile()}
+
+    def AssertDeferredValidator(self, result):
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertFalse(list(self.out.rglob('*.evtx')))
+        self.assertFalse(list(self.out.glob('guestFS_*')))
+        self.assertFalse(any(call[0] == 'cp' for call in self.Calls()))
+        pod = json.loads((self.root / 'pod.json').read_text())
+        for call in self.Calls():
+            if call[0] == 'exec':
+                self.assertEqual(call[3].removeprefix('pod/'), pod['metadata']['name'])
+                self.assertEqual(call[call.index('-c') + 1], pod['spec']['containers'][0]['name'])
+        summary = json.loads((self.out / 'extraction-summary.json').read_text())
+        self.assertFalse(summary['ok'])
+        self.assertEqual(summary['missingRequiredArtifactTypes'], ['evtx'])
+        self.assertEqual(summary['invalidArtifacts'], [])
+        check = subprocess.run(['sha256sum', '-c', 'checksums.sha256'], cwd=self.out,
+                               text=True, capture_output=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.AssertDeleted()
+
+    def test_archive_contains_only_requested_files_and_validator_remains_deferred(self):
+        result = self.RunRecovery()
+        self.AssertDeferredValidator(result)
+        content = self.ArchiveContents()
+        expected = {f'Windows/System32/winevt/Logs/{name}.evtx': (self.root / 'fixture.evtx').read_bytes()
+                    for name in ('System', 'Application')}
+        self.assertEqual(content, expected)
+
+    def test_helper_filesystem_mkdir_test_and_timestamp_path(self):
+        result = self.RunRecovery()
+        self.AssertDeferredValidator(result)
+        calls = self.Calls()
+        tests = [call for call in calls if call[0] == 'exec' and call[call.index('--') + 1:][:2] == ['test', '-d']]
+        self.assertEqual(len(tests), 1)
+        destination = tests[0][-1]
+        self.assertRegex(destination, r'^/tmp/bsod--guest-files--[0-9]+/$')
+        self.assertFalse(Path(destination).exists())
+        self.assertTrue((self.root / 'helper-fs' / destination.lstrip('/')).is_dir())
+        helperCalls = [json.loads(line) for line in (self.root / 'helper-argv.jsonl').read_text().splitlines()]
+        directories = [call[2] for call in helperCalls if call[0] == 'mkdir']
+        self.assertEqual(directories, [destination + '/Windows/System32/winevt/Logs'] * 2)
+        self.assertNotIn('.bin', destination)
+        copies = [call[call.index('--') + 1:] for call in calls if call[0] == 'exec' and 'bash' in call]
+        self.assertEqual(len(copies), 2)
+        for command in copies:
+            self.assertEqual(command[:6], ['bash', '-o', 'pipefail', '-O', 'inherit_errexit', '-euxc'])
+            self.assertIn('exec -a virt-sh guestfish', command[6])
+            self.assertEqual(command[-4], '')
+            self.assertEqual(command[-3], '/dev/sda3')
+            self.assertTrue(command[-2].endswith('.evtx'))
+            self.assertEqual(command[-1], directories[0])
+        self.assertEqual(len(self.ArchiveContents()), 2)
+
+    def test_guestfish_probe_and_each_copy_are_readonly(self):
+        result = self.RunRecovery()
+        self.AssertDeferredValidator(result)
+        commands = [call[call.index('--') + 1:] for call in self.Calls() if call[0] == 'exec']
+        discovery = [command for command in commands if 'list-filesystems' in command]
+        self.assertEqual(len(discovery), 1)
+        self.assertIn('--ro', discovery[0])
+        probes = [command for command in commands if 'set-program' in command]
+        self.assertEqual(len(probes), 2)
+        self.assertTrue(all(command[:5] == ['guestfish', '-ra', '/dev/vda', 'set-program', 'virt-sh'] for command in probes))
+        helperCalls = [json.loads(line) for line in (self.root / 'helper-argv.jsonl').read_text().splitlines()]
+        copies = [command for command in helperCalls if command[0] == 'guestfish']
+        self.assertEqual(len(copies), 2)
+        self.assertTrue(all(command[1:3] == ['-ra', '/dev/vda'] and 'mount-ro' in command and command[-1] == 'umount-all'
+                            for command in copies))
+        tar = [command for command in commands if command[0] == 'tar']
+        self.assertEqual(len(tar), 1)
+        self.assertEqual(tar[0][1:3], ['zc', '-C'])
+        self.assertEqual(tar[0][-1], './')
+
+    def test_each_missing_file_does_not_discard_the_other(self):
+        for scenario, expected in (('system-missing', 'Application.evtx'), ('partial-batch', 'System.evtx')):
+            with self.subTest(scenario=scenario):
+                case = ArchiveRecoveryTests('test_archive_contains_only_requested_files_and_validator_remains_deferred')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                result = case.RunRecovery(scenario)
+                case.AssertDeferredValidator(result)
+                self.assertEqual(list(case.ArchiveContents()), ['Windows/System32/winevt/Logs/' + expected])
+
+    def test_failed_copies_can_leave_an_empty_archive_not_success(self):
+        result = self.RunRecovery('copy-error')
+        self.AssertDeferredValidator(result)
+        self.assertEqual(self.ArchiveContents(), {})
+
+    def test_remote_mkdir_failure_does_not_create_runner_destination(self):
+        result = self.RunRecovery('mkdir-error')
+        self.AssertDeferredValidator(result)
+        self.assertFalse((self.out / 'guest-fs--crash-info.tgz').exists())
+        self.assertFalse(any('tar' in call for call in self.Calls()))
+        self.assertFalse(list((self.root / 'helper-fs').rglob('*.evtx')))
+
+    def test_helper_directory_test_failure_prevents_tar(self):
+        result = self.RunRecovery('helper-test-error')
+        self.AssertDeferredValidator(result)
+        self.assertFalse((self.out / 'guest-fs--crash-info.tgz').exists())
+        self.assertFalse(any('tar' in call for call in self.Calls()))
+
+    def test_tar_failure_keeps_status_partial_archive_and_cleans_helper(self):
+        result = self.RunRecovery('tar-error')
+        self.assertEqual(result.returncode, 35, result.stderr)
+        self.assertEqual((self.out / 'guest-fs--crash-info.tgz').read_bytes(), b'partial archive')
+        self.assertFalse((self.out / 'extraction-summary.json').exists())
+        self.AssertDeleted()
+
+    def test_native_wait_apply_and_cleanup_failures_remain_nonzero(self):
+        for scenario, expected in (('wait-error', 19), ('apply-error', 18), ('cleanup-error', 25), ('cleanup-wait-error', 28)):
+            with self.subTest(scenario=scenario):
+                case = ArchiveRecoveryTests('test_archive_contains_only_requested_files_and_validator_remains_deferred')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                result = case.RunRecovery(scenario)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertFalse((case.out / 'extraction-summary.json').exists())
+                self.assertTrue(any(call[0] == 'delete' for call in case.Calls()))
+                if scenario in ('wait-error', 'apply-error'):
+                    self.assertFalse(any(call[0] == 'exec' for call in case.Calls()))
+                    self.assertFalse((case.out / 'guest-fs--crash-info.tgz').exists())
+
+    def test_failed_discovery_still_cleans_without_copy_or_archive(self):
+        result = self.RunRecovery('discovery-error')
+        self.AssertDeferredValidator(result)
+        self.assertFalse((self.out / 'guest-fs--crash-info.tgz').exists())
+        self.assertFalse(any(call[0] == 'exec' and 'bash' in call for call in self.Calls()))
+
+    def test_actual_watcher_consumer_propagates_deferred_validator_failure(self):
+        watcher = (hostDir / 'watch-crash.sh').read_text()
+        runTimed = re.search(r'^function RunTimed \(\) \{.*\}$', watcher, re.MULTILINE).group()
+        recover = re.search(r'^function Recover \(\) \{\n.*?^\}', watcher, re.MULTILINE | re.DOTALL).group()
+        self.meta.write_text(json.dumps(self.metadata))
+        command = ('set -euxo pipefail; shopt -s inherit_errexit\n'
+                   'typeset scriptDir="${1}" metadataFile="${2}" pipelineLog="${3}"\n'
+                   + runTimed + '\n' + recover + '\nRecover\n')
+        result = subprocess.run(['bash', '-c', command, 'watcher-fixture', str(hostDir),
+                                 str(self.meta), str(self.root / 'pipeline.log')],
+                                cwd=self.root, env=self.env, text=True, capture_output=True, timeout=10)
+        self.AssertDeferredValidator(result)
+        self.assertEqual(len(self.ArchiveContents()), 2)
+
+    def test_actual_container_consumer_propagates_deferred_validator_failure(self):
+        entrypoint = Path(__file__).resolve().parents[3] / 'image/container/bsod-detector/entrypoint.sh'
+        self.meta.write_text(json.dumps(self.metadata))
+        command = '''set -euxo pipefail; shopt -s inherit_errexit
+function exec () {
+    [ "$1" = "/usr/local/bin/${MOCK_EXTRACTOR_NAME}" ] || return 99
+    shift
+    command "${MOCK_EXTRACTOR}" "$@"
+}
+source "$1" "${@:2}"
+'''
+        result = subprocess.run(['bash', '-c', command, 'container-fixture', str(entrypoint),
+                                 '--metadata', str(self.meta)], cwd=self.root,
+                                env=dict(self.env, MODE='recover', EVIDENCE_DIR=str(self.root),
+                                         MOCK_EXTRACTOR=str(recovery), MOCK_EXTRACTOR_NAME=recovery.name),
+                                text=True, capture_output=True, timeout=10)
+        self.AssertDeferredValidator(result)
+        self.assertEqual(len(self.ArchiveContents()), 2)
 
 
 if __name__ == '__main__':

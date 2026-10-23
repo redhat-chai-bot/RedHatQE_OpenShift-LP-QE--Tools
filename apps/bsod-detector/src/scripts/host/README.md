@@ -252,13 +252,11 @@ Cleanup takes a required nonempty pod-name argument, uses native `oc delete --ig
 - Create a `guest-fs--ntfs--<epoch>-<pid>` helper using `BSOD_DET__GUEST_FS__CTR_IMG` directly, defaulting unset or empty to `quay.io/konveyor/oadp-vmfr-access:latest` (no legacy environment fallback), with `force_kvm`: request/limit one `devices.kubevirt.io/kvm` device. The initial budget requests 512Mi memory and 500m CPU, with limits of 2Gi memory and 2000m CPU; adequacy has not been measured. The supplied Pod template has no node selector or fsGroup; it uses `/bin/bash -c` with `args: [exec tail -f /dev/null]`, the `vm-disk` read-only PVC and `guest-fs--tmp`/`guest-fs--home` emptyDirs. A quoted static YAML template passes through `oc create --dry-run=client -o json --save-config`, then `jq --arg` injects only pod name, namespace, container name, image and PVC. The container name and image are blank in the template; nested jq updates set the name from `helperPodCtr` (normally `libguestfs`) and image together. The client accepts blank container-name/image/PVC placeholders and fills the blank namespace from local context; marshalling overwrites it. The original YAML has no annotations. Client `--save-config` generates a last-applied annotation; grouped jq updates preserve it unchanged in the raw apply input, including its template placeholders. This is not a claim about server-side final annotations; no `yq` is required. Rendering the same inputs yields the same payload, not whole-script idempotence.
 - Recovery tests require the real `oc` client on `PATH` for offline YAML-to-JSON generation; API operations and apply remain mocked. Generation/marshalling failures stop subsequent helper execution under `pipefail`; apply is a concurrent pipeline stage, not a transactional producer-status gate.
 - Wait once for the helper's Ready condition with native `oc wait --timeout=180s`, discarding stdout; no extractor `--request-timeout` or added process deadline is used. A failed wait stops before helper execution and triggers cleanup. Cleanup retains its supplied 60-second deletion wait.
-- Discover filesystems once through `FindNTFS "${helperPod}" "${helperPodCtr}"`, whose required arguments select the pod/container independently of the caller's variables. The outer extraction loop reads the function directly through process substitution, without capturing/checking its status. Unavailable/failed/empty discovery can therefore reach placeholder parser/events/checksum artifacts and a failed extraction summary; final summary validation still exits 1 with no copies. This is a loss of the former fail-fast/no-artifact contract, not a repaired failure path. Partial valid discovery output followed by a producer failure can still return success and copy files; this known false-success limitation remains. The separate uncaptured guestfish probe stays removed.
-- Dynamically detect Windows system partition via `guestfish list-filesystems`:
-  - Tries each NTFS partition in order (sda3, sda4, etc.)
-  - First partition where `System.evtx` / `Application.evtx` are found = Windows `C:\`
-  - Non-Windows partitions (recovery, data) log `INFO` and are skipped
-- Download ALL target evtx files in **one guestfish session** (single QEMU startup, single mount)
-- Transfer from pod to host via `oc cp`; partial files from failed transfers are removed
+- Discover filesystems once through `FindNTFS "${helperPod}" "${helperPodCtr}"`, whose required arguments select the pod/container independently of the caller's variables. Its process-substitution status remains unchecked: failed/empty discovery can reach placeholder artifacts and a failed summary; partial valid producer output can still trigger extraction despite the producer failure.
+- Probe each NTFS partition with readonly `guestfish -ra /dev/vda ... mount-ro ... ls /Windows`; failed probes continue to the next partition. `set-program virt-sh` sets an informative name, not a different executable.
+- Copy System.evtx and Application.evtx independently with helper-side Bash `mkdir -p` and readonly guestfish `copy-out`; a failed file does not prevent attempting the other. Each copy starts a separate guestfish session. The required `exec -a` replaces Bash, so the supplied final `true` is not reached after a successful exec.
+- Test `/tmp/bsod--guest-files--<epoch>/` inside the helper, then stream helper `tar zc` to runner `guest-fs--crash-info.tgz` and stop scanning partitions. The temporary name has no PID suffix. Directory existence does not prove any file copied: both failed copies can leave an empty archive. Tar failure can leave partial archive bytes on the runner; no transactional cleanup is claimed.
+- Archive-only output intentionally has no loose EVTX files or implicit unpacking. Validator changes are deferred: the unchanged `rhov-snapshot-recovery` and watcher `natural-rhov` summaries require loose EVTX, so even a valid archive currently causes missing `evtx` and exit 1. Checksum inclusion does not validate archive members.
 - Generate `checksums.sha256` manifest (log files excluded — still being written at manifest time)
 - Write `extraction-summary.json` via `reliability.py write-summary`
 
@@ -268,10 +266,7 @@ Cleanup takes a required nonempty pod-name argument, uses native `oc delete --ig
 
 **Output structure**:
 ```
-guestFS_sda3/
-  Windows/System32/winevt/Logs/
-    System.evtx          (Windows System EventLog — 8MB typical)
-    Application.evtx     (Windows Application EventLog — 6MB typical)
+guest-fs--crash-info.tgz  (archive members: Windows/System32/winevt/Logs/*.evtx)
 parse-dump-header.json   (stub — on-disk dumps blocked on KVM)
 events.json              (stub — optional parser is archived, not in the active script tree)
 checksums.sha256         (manifest of evidence files)
@@ -605,10 +600,11 @@ evidence-summary.json         Final pipeline verdict
 2. **Check target VM status**: Require metadata target VM printableStatus Stopped. Preflight supplies the target-to-guest-PVC association; extraction checks neither VMI absence nor namespace-wide PVC consumers. Direct process substitution does not propagate the API producer's exit status; a partial valid Stopped response can pass even when that producer fails.
 3. **Create guestfs-ntfs pod** (lines 299–327): Deploy pod with block device attachment, verify guestfish ready
 4. **Discover NTFS partitions** (lines 340–344): Query guest disk for all NTFS partitions
-5. **Extract .evtx files** (lines 355–408):
-   - Batch guestfish download in single QEMU session per partition
-   - oc cp from pod to host
-   - Skip partitions that don't have Windows EventLog files
+5. **Archive guest files**:
+   - Readonly Windows-directory probe per NTFS partition
+   - Independent helper-side mkdir/copy-out sessions for each EVTX
+   - Helper-side directory test and tar stream to guest-fs--crash-info.tgz; no loose EVTX copies
+   - Existing validators still require loose EVTX and fail until separately adapted
 6. **Parse dump headers** (lines 453–465): Run parse-dump-header.sh on MEMORY.DMP or Minidump dir
 7. **Generate checksums manifest** (lines 530–540): SHA256 of all artifacts (excludes logs, temp files)
 8. **Generate extraction-summary.json** (lines 543–545): Validate artifacts via reliability.py
@@ -616,10 +612,7 @@ evidence-summary.json         Final pipeline verdict
 #### Output Structure
 
 ```
-guestFS_sda3/
-  Windows/System32/winevt/Logs/
-    System.evtx          (Windows System EventLog)
-    Application.evtx     (Windows Application EventLog)
+guest-fs--crash-info.tgz        (Windows/System32/winevt/Logs/*.evtx members)
 parse-dump-header.json        (Dump metadata, or stub if no on-disk dump)
 events.json                   (stub — archived parser is optional and not called by the active pipeline)
 checksums.sha256              (Manifest of all evidence files)

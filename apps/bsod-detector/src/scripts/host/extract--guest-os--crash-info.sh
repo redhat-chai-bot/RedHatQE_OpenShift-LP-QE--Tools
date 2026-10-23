@@ -204,44 +204,63 @@ oc -n "${ns}" wait "pod/${helperPod}" \
     --for=condition=Ready \
     --timeout=180s 1> /dev/null
 
-typeset -a evtxArr=(
+typeset -a srcArr=(
+#   '/DedicatedDump.sys'
     '/Windows/System32/winevt/Logs/System.evtx'
     '/Windows/System32/winevt/Logs/Application.evtx'
 )
 typeset ntfsPart=''
-# One QEMU session per partition avoids repeated startup OOMs. Copy each result
-# independently: a missing Application.evtx must not discard a valid System.evtx.
+# ntfsPart: /dev/sda<N>
+# Copy file independently.
 while IFS= read -r ntfsPart; do
-    typeset partId="${ntfsPart##*/}"
-    typeset -i hasLogs=0
-    typeset -a tempArr=() batchArr=(--ro -a /dev/vda run : mount-ro "${ntfsPart}" /)
-    typeset filePath='' podTemp=''
-    for filePath in "${evtxArr[@]}"; do
-        podTemp="/tmp/bsod-evtx-$$-${RANDOM}.bin"
-        batchArr+=(: download "${filePath}" "${podTemp}")
-        tempArr+=("${podTemp}")
-    done
-    batchArr+=(: umount-all)
-    oc exec -n "${ns}" "${helperPod}" -c "${helperPodCtr}" -- \
-        guestfish "${batchArr[@]}" || true
+    typeset podTmp="/tmp/bsod--guest-files--$(date -u +'%s')"
+    typeset src='' dst=''
 
-    typeset -i index=0
-    for filePath in "${evtxArr[@]}"; do
-        podTemp="${tempArr[${index}]}"
-        index+=1
-        typeset dest="${outDir}/guestFS_${partId}${filePath}"
-        mkdir -p "${dest%/*}"
-        if oc cp "${ns}/${helperPod}:${podTemp}" "${dest}" -c "${helperPodCtr}" && [ -s "${dest}" ]; then
-            chmod 0600 "${dest}"
-            hasLogs=1
-        else
-            rm -f "${dest}" || true
-        fi
-        oc exec -n "${ns}" "${helperPod}" -c "${helperPodCtr}" -- rm -f "${podTemp}" || true
+    {
+        oc -n "${ns}" exec "pod/${helperPod}" \
+            -c "${helperPodCtr}" \
+            -- \
+            guestfish \
+            -ra /dev/vda \
+            set-program virt-sh \
+            : run \
+            : mount-ro "${ntfsPart}" / \
+            : ls /Windows \
+            : umount-all ||
+        continue
+    }
+    for src in "${srcArr[@]}"; do
+        dst="${podTmp}/${src%/*}"
+        {
+            oc -n "${ns}" exec "pod/${helperPod}" \
+                -c "${helperPodCtr}" \
+                -- \
+                bash -o pipefail -O inherit_errexit -euxc '
+                    typeset ntfsPart="${1:?}"; (($#)) && shift
+                    typeset src="${1:?}"; (($#)) && shift
+                    typeset dst="${1:?}"; (($#)) && shift
+
+                    mkdir -p "${dst}"
+                    exec -a virt-sh guestfish \
+                        -ra /dev/vda \
+                        run \
+                        : mount-ro "${ntfsPart}" / \
+                        : copy-out "${src}" "${dst}" \
+                        : umount-all
+
+                    true
+                ' '' "${ntfsPart}" "${src}" "${dst}" ||
+            continue
+        }
     done
-    if ((hasLogs)); then
+    oc -n "${ns}" exec "pod/${helperPod}" -c "${helperPodCtr}" -- test -d "${podTmp}/" && {
+        oc -n "${ns}" exec "pod/${helperPod}" \
+            -c "${helperPodCtr}" \
+            -- \
+            tar zc -C "${podTmp}/" ./ \
+            1> "${outDir}/guest-fs--crash-info.tgz"
         break
-    fi
+    }
 done 0< <(FindNTFS "${helperPod}" "${helperPodCtr}")
 
 if [ ! -s "${outDir}/parse-dump-header.json" ]; then

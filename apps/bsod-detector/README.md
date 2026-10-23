@@ -659,7 +659,7 @@ This section documents what we tested for extracting forensic artifacts and why 
 
 ## Offline EventLog Extraction (guestfs-ntfs Pod)
 
-The `.evtx` files are extracted from the stopped VM's NTFS disk using a guestfish pod — **no SSH or Windows reboot required**.
+The `.evtx` files are extracted from the stopped VM's NTFS disk into `guest-fs--crash-info.tgz` using a guestfish pod — **no SSH or Windows reboot required**. No loose EVTX files are retained or automatically unpacked. Validator adaptation is deferred: current recovery/watcher summaries still require loose EVTX and return nonzero even when the archive contains both logs. Earlier loose-file sample outputs and offline parser globs below require separately unpacked files; the active extractor does not perform that step.
 
 ### How it works
 
@@ -669,15 +669,12 @@ Stop VM (virtctl stop)
 Create guest-fs--ntfs--<epoch>-<pid> helper (BSOD_DET__GUEST_FS__CTR_IMG, force_kvm backend)
 PVC attached as block device → /dev/vda inside pod
     ↓
-Single guestfish session per partition:
-  guestfish --ro -a /dev/vda run
-    : mount-ro /dev/sda3 /
-    : download /Windows/System32/winevt/Logs/System.evtx /tmp/sys.bin
-    : download /Windows/System32/winevt/Logs/Application.evtx /tmp/app.bin
-    : umount-all
+Readonly guestfish Windows probe per NTFS partition
+Independent file sessions: helper mkdir -p, guestfish -ra /dev/vda
+  run : mount-ro /dev/sda3 / : copy-out <source> <helper-directory> : umount-all
     ↓
-oc cp pod:/tmp/sys.bin → guestFS_sda3/Windows/System32/winevt/Logs/System.evtx
-oc cp pod:/tmp/app.bin → guestFS_sda3/Windows/System32/winevt/Logs/Application.evtx
+Helper test -d /tmp/bsod--guest-files--<epoch>/
+Helper tar zc -C <directory>/ ./ → guest-fs--crash-info.tgz on runner
     ↓
 Delete pod, cleanup
 ```
