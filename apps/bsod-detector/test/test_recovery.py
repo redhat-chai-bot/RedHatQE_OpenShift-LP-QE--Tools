@@ -1574,6 +1574,62 @@ source "$1" "${@:2}"
         self.AssertDeferredValidator(result)
         self.assertEqual(len(self.ArchiveContents()), 2)
 
+    def test_early_vm_failures_cleanup_generated_name_in_actual_consumers(self):
+        watcher = (hostDir / 'watch-crash.sh').read_text()
+        runTimed = re.search(r'^function RunTimed \(\) \{.*\}$', watcher, re.MULTILINE).group()
+        recover = re.search(r'^function Recover \(\) \{\n.*?^\}', watcher, re.MULTILINE | re.DOTALL).group()
+        entrypoint = Path(__file__).resolve().parents[3] / 'image/container/bsod-detector/entrypoint.sh'
+        for consumer in ('executable', 'watcher', 'container'):
+            for scenario in ('vm-status-Running', 'api-error'):
+                with self.subTest(consumer=consumer, scenario=scenario):
+                    case = RecoveryTests('test_success_contract')
+                    case.setUp()
+                    self.addCleanup(case.doCleanups)
+                    date = case.bin / 'date'
+                    date.write_text('#!/usr/bin/env bash\n'
+                                    'printf "%s\\n" "$*" >> "${MOCK_ROOT}/date-calls"\n'
+                                    'printf "1792796000\\n"\n')
+                    date.chmod(0o755)
+                    case.meta.write_text(json.dumps(case.metadata))
+                    env = dict(case.env, SCENARIO=scenario)
+                    if consumer == 'executable':
+                        command = [str(recovery), '--metadata', str(case.meta)]
+                    elif consumer == 'watcher':
+                        body = ('set -euxo pipefail; shopt -s inherit_errexit\n'
+                                'typeset scriptDir="${1}" metadataFile="${2}" pipelineLog="${3}"\n'
+                                + runTimed + '\n' + recover + '\nRecover\n')
+                        command = ['bash', '-c', body, 'watcher-fixture', str(hostDir),
+                                   str(case.meta), str(case.root / 'pipeline.log')]
+                    else:
+                        body = '''set -euxo pipefail; shopt -s inherit_errexit
+function exec () {
+    [ "$1" = "/usr/local/bin/${MOCK_EXTRACTOR_NAME}" ] || return 99
+    shift
+    command "${MOCK_EXTRACTOR}" "$@"
+}
+source "$1" "${@:2}"
+'''
+                        command = ['bash', '-c', body, 'container-fixture', str(entrypoint),
+                                   '--metadata', str(case.meta)]
+                        env.update(MODE='recover', EVIDENCE_DIR=str(case.root),
+                                   MOCK_EXTRACTOR=str(recovery), MOCK_EXTRACTOR_NAME=recovery.name)
+                    result = subprocess.run(command, cwd=case.root, env=env,
+                                            text=True, capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    diagnostics = result.stderr
+                    if consumer == 'watcher':
+                        diagnostics += (case.root / 'pipeline.log').read_text()
+                    self.assertNotIn('parameter null or not set', diagnostics)
+                    if scenario == 'api-error':
+                        self.assertIn('mock API unavailable', diagnostics)
+                    self.assertEqual((case.root / 'date-calls').read_text(), '-u +%s\n')
+                    self.assertEqual([call[0] for call in case.Calls()], ['get', 'delete', 'wait'])
+                    deletion = case.Calls()[1]
+                    self.assertRegex(deletion[3], r'^pod/guest-fs--ntfs--1792796000-[0-9]+$')
+                    case.AssertDeleted(count=1)
+                    self.assertFalse((case.root / 'helper-pod').exists())
+                    self.assertFalse((case.out / 'guest-fs--crash-info.tgz').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

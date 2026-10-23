@@ -53,23 +53,13 @@ for k in "${!fldChk[@]}"; do
         false
     }
 done
-mkdir -p "${outDir}" || { : "Cannot create output directory: ${outDir}"; false; }
-
-typeset helperPod='' helperPodCtr='libguestfs'
-
-function Cleanup () {
-    typeset podName="${1:?}"; (($#)) && shift
-    [ -z "${podName}" ] || {
-        oc -n "${ns}" delete "pod/${podName}" \
-            --ignore-not-found
-        oc -n "${ns}" wait "pod/${podName}" \
-            --for=delete \
-            --timeout=60s
-    }
-    true
+mkdir -p "${outDir}" || {
+    : "Cannot create output directory: ${outDir}"
+    false
 }
 
-trap 'Cleanup "${helperPod}"' EXIT
+typeset helperPod="guest-fs--ntfs--$(date -u +'%s')-$$"
+typeset helperPodCtr='libguestfs'
 
 function FindNTFS () {
     typeset podName="${1:?}"; (($#)) && shift
@@ -98,13 +88,25 @@ function FindNTFS () {
     true
 }
 
+function Cleanup () {
+    typeset podName="${1:?}"; (($#)) && shift
+    [ -z "${podName}" ] || {
+        oc -n "${ns}" delete "pod/${podName}" \
+            --ignore-not-found
+        oc -n "${ns}" wait "pod/${podName}" \
+            --for=delete \
+            --timeout=60s
+    }
+    true
+}
+trap 'Cleanup "${helperPod}"' EXIT
+
 jq -es '
     ((length == 1) and (.[0].status.printableStatus == "Stopped"))
 ' 0< <(
     oc -n "${ns}" get vm/"${vm}" -o json
 ) 1> /dev/null
 
-helperPod="guest-fs--ntfs--$(date -u +'%s')-$$"
 {
     oc create -f - --dry-run=client -o json --save-config |
     jq -c \
