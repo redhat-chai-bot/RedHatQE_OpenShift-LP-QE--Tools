@@ -313,14 +313,41 @@ class RecoveryTests(unittest.TestCase):
         creates = [call for call in self.Calls() if call[0] == 'create']
         self.assertEqual(creates, [['create', '-f', '-', '--dry-run=client', '-o', 'json', '--save-config']])
         template = (self.root / 'pod-template.yaml').read_text()
-        self.assertIn('name: guestfs-template', template)
-        self.assertIn('namespace: default', template)
-        self.assertIn('claimName: guest-disk-template', template)
-        self.assertIn('image: example.invalid/guestfs:template', template)
+        fixture = Path(__file__).parent / 'fixtures/guestfs-pod-template.yaml'
+        self.assertEqual(template, fixture.read_text())
+        self.assertIn('name: guest-fs--ntfs', template)
+        self.assertIn("namespace: ''", template)
+        self.assertIn("claimName: ''", template)
+        self.assertIn("image: ''", template)
         self.assertNotIn(self.env['BSOD_DET__GUESTFS__NTFS_IMAGE'], template)
         pod = json.loads((self.root / 'pod.json').read_text())
         self.assertNotIn('annotations', pod['metadata'])
-        self.assertEqual(pod['spec']['nodeSelector'], {'kubernetes.io/arch': 'amd64'})
+        generated = subprocess.run([self.env['REAL_OC'], 'create', '-f', str(fixture),
+                                    '--dry-run=client', '-o', 'json', '--save-config'],
+                                   text=True, capture_output=True, timeout=10)
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        expected = json.loads(generated.stdout)
+        del expected['metadata']['annotations']
+        expected['metadata']['name'] = pod['metadata']['name']
+        expected['metadata']['namespace'] = self.metadata['namespace']
+        expected['spec']['containers'][0]['image'] = self.env['BSOD_DET__GUESTFS__NTFS_IMAGE']
+        expected['spec']['volumes'][0]['persistentVolumeClaim']['claimName'] = self.metadata['guestPvc']
+        self.assertEqual(pod, expected)
+        self.assertEqual(pod['metadata']['labels'], {'app': 'bsod--guest-fs--extraction'})
+        spec = pod['spec']
+        self.assertNotIn('nodeSelector', spec)
+        self.assertNotIn('fsGroup', spec['securityContext'])
+        container = spec['containers'][0]
+        self.assertEqual(container['resources'], {
+            'requests': {'memory': '2Gi', 'devices.kubevirt.io/kvm': '1'},
+            'limits': {'memory': '4Gi', 'devices.kubevirt.io/kvm': '1'},
+        })
+        self.assertIn({'name': 'LIBGUESTFS_BACKEND_SETTINGS', 'value': 'force_kvm'}, container['env'])
+        self.assertEqual(container['volumeDevices'], [{'name': 'vm-disk', 'devicePath': '/dev/vda'}])
+        self.assertEqual(container['volumeMounts'], [
+            {'name': 'guest-fs--tmp', 'mountPath': '/tmp/guestfs'},
+            {'name': 'guest-fs--home', 'mountPath': '/home/guestfs'},
+        ])
 
     def test_partial_generator_failure_stops_after_apply_and_cleans(self):
         result = self.RunRecovery('generator-partial-error')
@@ -344,8 +371,8 @@ class RecoveryTests(unittest.TestCase):
         container = spec['containers'][0]
         self.assertEqual(container['image'], self.env['BSOD_DET__GUESTFS__NTFS_IMAGE'])
         self.assertFalse(container['securityContext']['allowPrivilegeEscalation'])
-        self.assertIn('inherit_errexit', container['command'][2])
-        self.assertIn('set -euxo pipefail', container['command'][2])
+        self.assertEqual(container['command'], ['/bin/bash', '-c'])
+        self.assertEqual(container['args'], ['exec tail -f /dev/null'])
         batches = [call for call in self.Calls() if 'mount-ro' in call]
         self.assertEqual(len(batches), 2)
         self.assertTrue(all('--ro' in call for call in batches))

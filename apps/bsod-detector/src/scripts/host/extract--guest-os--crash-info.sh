@@ -126,69 +126,67 @@ typeset guestfsImage="${BSOD_DET__GUESTFS__NTFS_IMAGE:-quay.io/konveyor/oadp-vmf
 apiVersion: v1
 kind: Pod
 metadata:
-    name: guestfs-template
-    namespace: default
-    labels:
-        app: bsod-guestfs-extraction
+  labels:
+    app: bsod--guest-fs--extraction
+  name: guest-fs--ntfs
+  namespace: ''
 spec:
-    restartPolicy: Never
-    automountServiceAccountToken: false
-    securityContext:
-        runAsNonRoot: true
-        fsGroup: 1000800000
-        seccompProfile:
-            type: RuntimeDefault
-    nodeSelector:
-        kubernetes.io/arch: amd64
-    containers:
-        - name: libguestfs
-          image: example.invalid/guestfs:template
-          imagePullPolicy: Always
-          command:
-              - /bin/bash
-              - -c
-              - set -euxo pipefail; shopt -s inherit_errexit; exec tail -f /dev/null
-          env:
-              - name: LIBGUESTFS_BACKEND
-                value: direct
-              - name: LIBGUESTFS_BACKEND_SETTINGS
-                value: force_tcg
-              - name: LIBGUESTFS_TMPDIR
-                value: /tmp/guestfs
-              - name: LIBGUESTFS_CACHEDIR
-                value: /tmp/guestfs
-              - name: HOME
-                value: /home/guestfs
-          securityContext:
-              allowPrivilegeEscalation: false
-              capabilities:
-                  drop:
-                      - ALL
-          resources:
-              requests:
-                  memory: 512Mi
-                  cpu: 500m
-              limits:
-                  memory: 2Gi
-                  cpu: 2000m
-          volumeDevices:
-              - name: guest-disk
-                devicePath: /dev/vda
-          volumeMounts:
-              - name: guestfs-tmp
-                mountPath: /tmp/guestfs
-              - name: guestfs-home
-                mountPath: /home/guestfs
-          workingDir: /tmp/guestfs
-    volumes:
-        - name: guest-disk
-          persistentVolumeClaim:
-              claimName: guest-disk-template
-              readOnly: true
-        - name: guestfs-tmp
-          emptyDir: {}
-        - name: guestfs-home
-          emptyDir: {}
+  automountServiceAccountToken: false
+  containers:
+    - name: libguestfs
+      image: ''
+      imagePullPolicy: Always
+      command:
+        - /bin/bash
+        - -c
+      args:
+        - exec tail -f /dev/null
+      workingDir: /tmp/guestfs
+      env:
+        - name: LIBGUESTFS_BACKEND
+          value: direct
+        - name: LIBGUESTFS_BACKEND_SETTINGS
+          value: force_kvm
+        - name: LIBGUESTFS_TMPDIR
+          value: /tmp/guestfs
+        - name: LIBGUESTFS_CACHEDIR
+          value: /tmp/guestfs
+        - name: HOME
+          value: /home/guestfs
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+      resources:
+        requests:
+          memory: 2Gi
+          devices.kubevirt.io/kvm: "1"
+        limits:
+          memory: 4Gi
+          devices.kubevirt.io/kvm: "1"
+      volumeDevices:
+        - name: vm-disk
+          devicePath: /dev/vda
+      volumeMounts:
+        - name: guest-fs--tmp
+          mountPath: /tmp/guestfs
+        - name: guest-fs--home
+          mountPath: /home/guestfs
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: vm-disk
+      persistentVolumeClaim:
+        claimName: ''
+        readOnly: true
+    - name: guest-fs--tmp
+      emptyDir: {}
+    - name: guest-fs--home
+      emptyDir: {}
 ocEOF
 
 oc --request-timeout=185s wait pod "${helperPod}" -n "${ns}" --for=jsonpath='{.status.phase}'=Running --timeout=180s

@@ -666,7 +666,7 @@ The `.evtx` files are extracted from the stopped VM's NTFS disk using a guestfis
 ```
 Stop VM (virtctl stop)
     ↓
-Create guestfs-ntfs pod (quay.io/konveyor/oadp-vmfr-access, force_tcg backend)
+Create gguest-fs--ntfs--<epoch>-<pid> helper (quay.io/konveyor/oadp-vmfr-access, force_kvm backend)
 PVC attached as block device → /dev/vda inside pod
     ↓
 Single guestfish session per partition:
@@ -702,14 +702,14 @@ The partition name (`sda3`) is detected dynamically every run — never hardcode
 
 ```yaml
 runAsNonRoot: true
-fsGroup: 1000800000
-seccompProfile: RuntimeDefault
+seccompProfile:
+  type: RuntimeDefault
 allowPrivilegeEscalation: false
 capabilities:
   drop: ["ALL"]
 ```
 
-`force_tcg` (software QEMU) requires no `/dev/kvm` device — works on any node.
+`force_kvm` requires a schedulable `devices.kubevirt.io/kvm` device (request and limit `"1"`). The supplied helper template requests 2Gi memory and limits it to 4Gi; it sets no CPU resources, node selector or fsGroup. Availability of KVM and admission of this Pod must be validated in the target environment; offline rendering tests do not prove runtime scheduling or guestfish success.
 
 ---
 
