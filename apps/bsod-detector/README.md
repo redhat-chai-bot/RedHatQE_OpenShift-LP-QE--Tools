@@ -666,7 +666,7 @@ The `.evtx` files are extracted from the stopped VM's NTFS disk using a guestfis
 ```
 Stop VM (virtctl stop)
     ↓
-Create gguest-fs--ntfs--<epoch>-<pid> helper (quay.io/konveyor/oadp-vmfr-access, force_kvm backend)
+Create guest-fs--ntfs--<epoch>-<pid> helper (BSOD_DET__GUEST_FS__CTR_IMG, force_kvm backend)
 PVC attached as block device → /dev/vda inside pod
     ↓
 Single guestfish session per partition:
@@ -835,5 +835,5 @@ All variables use `BSOD_DET__` prefix (Red Hat Chaos Team convention):
 | `BSOD_DET__COMMAND__TIMEOUT` | No | `30` | Command timeout (seconds) |
 | `BSOD_DET__READY__TIMEOUT` | No | `300` | Watcher readiness timeout |
 | `BSOD_DET__PREFLIGHT__TIMEOUT` | No | `300` | Positive-integer validation only; trigger currently uses a fixed 1800s preflight timeout |
-| `BSOD_DET__GUESTFS__NTFS_IMAGE` | No | `quay.io/konveyor/oadp-vmfr-access:latest` | guestfs pod image override |
+| `BSOD_DET__GUEST_FS__CTR_IMG` | Yes (extraction) | — | guestfs helper image; export before watcher/recover execution, no default or legacy fallback |
 | `BSOD_RECOVERY_IMAGE` | No | — | Digest-pinned recovery image |

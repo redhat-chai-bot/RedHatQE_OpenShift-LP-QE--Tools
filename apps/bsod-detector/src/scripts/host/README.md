@@ -232,6 +232,7 @@ Writes all collected VM/storage/config data needed by downstream scripts.
 **Purpose**: Offline NTFS artifact extraction from stopped VM disk.
 
 **Usage**: `extract--guest-os--crash-info.sh --metadata PRE_STOP_METADATA.json`.
+Export `BSOD_DET__GUEST_FS__CTR_IMG` before running the extractor, watcher or container; the extractor uses that value directly and an unset variable fails under strict mode. No image default or legacy fallback is supplied.
 Run it as an executable, as the watcher and container entrypoint do; it is not a sourceable shell library.
 The output directory comes only from metadata `.outputDir`; there is no extractor `--out` option.
 The extractor preserves the provided path spelling and accepts existing directory aliases and arbitrary directory names.
@@ -248,7 +249,7 @@ Cleanup uses the initialized helper name, native `oc delete --ignore-not-found` 
 **Responsibilities**:
 - Validate output path and preflight metadata integrity
 - Require the metadata target VM's printable status to be **Stopped**, using a direct process substitution; no VMI absence or namespace-wide PVC scan is performed. Empty/malformed responses and non-Stopped statuses block extraction, but valid Stopped JSON followed by an API failure can pass because the producer exit status is not propagated. This point-in-time status check is not an exclusive PVC lock.
-- Create a `gguest-fs--ntfs--<epoch>-<pid>` helper using `quay.io/konveyor/oadp-vmfr-access` with `force_kvm`: request/limit one `devices.kubevirt.io/kvm` device. The initial budget requests 512Mi memory and 500m CPU, with limits of 2Gi memory and 2000m CPU; adequacy has not been measured. The supplied Pod template has no node selector or fsGroup; it uses `/bin/bash -c` with `args: [exec tail -f /dev/null]`, the `vm-disk` read-only PVC and `guest-fs--tmp`/`guest-fs--home` emptyDirs. A quoted static YAML template passes through `oc create --dry-run=client -o json --save-config`, then `jq --arg` injects only name, namespace, image and PVC. The client accepts blank image/PVC placeholders and fills the blank namespace from local context; marshalling overwrites it. Remove the generated annotation before applying JSON so the final last-applied configuration describes the actual helper; no `yq` is required. Rendering the same inputs yields the same payload, not whole-script idempotence.
+- Create a `guest-fs--ntfs--<epoch>-<pid>` helper using the exported `BSOD_DET__GUEST_FS__CTR_IMG` directly (no default or legacy fallback) with `force_kvm`: request/limit one `devices.kubevirt.io/kvm` device. The initial budget requests 512Mi memory and 500m CPU, with limits of 2Gi memory and 2000m CPU; adequacy has not been measured. The supplied Pod template has no node selector or fsGroup; it uses `/bin/bash -c` with `args: [exec tail -f /dev/null]`, the `vm-disk` read-only PVC and `guest-fs--tmp`/`guest-fs--home` emptyDirs. A quoted static YAML template passes through `oc create --dry-run=client -o json --save-config`, then `jq --arg` injects only name, namespace, image and PVC. The client accepts blank image/PVC placeholders and fills the blank namespace from local context; marshalling overwrites it. Remove the generated annotation before applying JSON so the final last-applied configuration describes the actual helper; no `yq` is required. Rendering the same inputs yields the same payload, not whole-script idempotence.
 - Recovery tests require the real `oc` client on `PATH` for offline YAML-to-JSON generation; API operations and apply remain mocked. Generation/marshalling failures stop subsequent helper execution under `pipefail`; apply is a concurrent pipeline stage, not a transactional producer-status gate.
 - Dynamically detect Windows system partition via `guestfish list-filesystems`:
   - Tries each NTFS partition in order (sda3, sda4, etc.)
@@ -290,7 +291,7 @@ extraction-summary.json  (artifact inventory and validation)
 | `BSOD_DET__COMMAND__TIMEOUT` | Command timeout (default: 30s) |
 | `BSOD_DET__EXTRACT_EVTX__BIN` | Legacy override referenced only by the commented parser hook; the active pipeline does not use it |
 | `BSOD_DET__DATA__DIR` | Legacy override referenced only by the commented parser hook; active pipeline does not use it |
-| `BSOD_DET__GUESTFS__NTFS_IMAGE` | guestfs pod image override |
+| `BSOD_DET__GUEST_FS__CTR_IMG` | Exported guestfs helper image, consumed directly; no default or legacy fallback |
 
 ---
 

@@ -203,6 +203,7 @@ write_recovery_metadata() {
 
 run_recovery() {
   run env PATH="$BATS_TMPDIR/mockbin:$PATH" REAL_PYTHON="$REAL_PYTHON" EVIDENCE_ROOT="$EVIDENCE_ROOT" \
+    BSOD_DET__GUEST_FS__CTR_IMG='registry.test/guestfs:fixture' \
     OC_LOG="$OC_LOG" BSOD_EXTRACT_EVTX_BIN="$BATS_TMPDIR/mockbin/extract-evtx" \
     MISSING_GUESTFISH="${MISSING_GUESTFISH:-0}" DUMP_CODE="${DUMP_CODE:-10}" EVTX_FAIL="${EVTX_FAIL:-0}" MOUNT_SOURCE="${MOUNT_SOURCE:-}" \
     bash "$HOST_DIR/extract--guest-os--crash-info.sh" --metadata "$BATS_TMPDIR/metadata.json"
@@ -232,8 +233,8 @@ write_elf_memory_fixture() {
   [ "$(jq -r '.missingRequiredArtifactTypes|length' "$summary")" -eq 0 ]
   [ ! -e "$EVIDENCE_ROOT/fixture-recovery-001/bsod-screenshot.png" ]
   grep -q '^-n fixture-ns exec .*guestfish --ro -a /dev/vda run : list-filesystems' "$OC_LOG"
-  [ "$(grep -c '^-n fixture-ns delete pod/gguest-fs--ntfs--.* --ignore-not-found$' "$OC_LOG")" -eq 2 ]
-  [ "$(grep -c '^-n fixture-ns wait pod/gguest-fs--ntfs--.* --for=delete --timeout=60s$' "$OC_LOG")" -eq 2 ]
+  [ "$(grep -c '^-n fixture-ns delete pod/guest-fs--ntfs--.* --ignore-not-found$' "$OC_LOG")" -eq 2 ]
+  [ "$(grep -c '^-n fixture-ns wait pod/guest-fs--ntfs--.* --for=delete --timeout=60s$' "$OC_LOG")" -eq 2 ]
   ! grep -Eq '(^| )delete (pvc|volumesnapshot)( |/)' "$OC_LOG"
 }
 

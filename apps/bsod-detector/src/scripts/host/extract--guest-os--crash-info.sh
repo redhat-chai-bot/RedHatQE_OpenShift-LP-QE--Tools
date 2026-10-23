@@ -106,14 +106,13 @@ jq -es '
     oc -n "${ns}" get vm/"${vm}" -o json
 ) 1> /dev/null
 
-helperPod="gguest-fs--ntfs--$(date -u +'%s')-$$"
-typeset guestfsImage="${BSOD_DET__GUESTFS__NTFS_IMAGE:-quay.io/konveyor/oadp-vmfr-access:latest}"
+helperPod="guest-fs--ntfs--$(date -u +'%s')-$$"
 {
     oc create -f - --dry-run=client -o json --save-config |
     jq -c \
         --arg name "${helperPod}" \
         --arg ns "${ns}" \
-        --arg image "${guestfsImage}" \
+        --arg image "${BSOD_DET__GUEST_FS__CTR_IMG}" \
         --arg pvc "${guestPVC}" \
         '
             del(.metadata.annotations) |

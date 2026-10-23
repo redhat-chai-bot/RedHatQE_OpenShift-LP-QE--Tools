@@ -217,7 +217,7 @@ class RecoveryTests(unittest.TestCase):
         self.env = dict(os.environ, PATH=f'{self.bin}:{os.environ["PATH"]}',
                         MOCK_ROOT=str(self.root),
                         REAL_OC=shutil.which('oc'),
-                        BSOD_DET__GUESTFS__NTFS_IMAGE='registry.test/guestfs:fixture')
+                        BSOD_DET__GUEST_FS__CTR_IMG='registry.test/guestfs:fixture')
 
     def RunRecovery(self, scenario='', *args, script=recovery, cwd=None):
         self.meta.write_text(json.dumps(self.metadata))
@@ -235,7 +235,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(deletes), count)
         for call in deletes:
             self.assertEqual(call[1:3], ['-n', self.metadata['namespace']])
-            self.assertRegex(call[3], r'^pod/gguest-fs--ntfs--[0-9]+-[0-9]+$')
+            self.assertRegex(call[3], r'^pod/guest-fs--ntfs--[0-9]+-[0-9]+$')
             self.assertEqual(call[4:], ['--ignore-not-found'])
         waits = [call for call in self.Calls() if call[0] == 'wait' and '--for=delete' in call]
         self.assertEqual(len(waits), count if waitCount is None else waitCount)
@@ -251,9 +251,12 @@ class RecoveryTests(unittest.TestCase):
         renderer = source[start:end].replace('| oc apply -f -', '| cat')
         self.assertIn("0<<'ocEOF'", renderer)
         self.assertNotIn('yq', renderer)
-        self.assertIn('helperPod="gguest-fs--ntfs--$(date -u +\'%s\')-$$"', source)
-        values = {'helperPod': 'gguest-fs--ntfs--123-456', 'ns': 'fixture-ns',
-                  'guestfsImage': 'registry.test/guestfs:fixture', 'guestPVC': 'rootdisk'}
+        self.assertIn('--arg image "${BSOD_DET__GUEST_FS__CTR_IMG}"', renderer)
+        self.assertNotIn('guestfsImage', source)
+        self.assertNotIn('BSOD_DET__GUESTFS__NTFS_IMAGE', source)
+        self.assertIn('helperPod="guest-fs--ntfs--$(date -u +\'%s\')-$$"', source)
+        values = {'helperPod': 'guest-fs--ntfs--123-456', 'ns': 'fixture-ns',
+                  'BSOD_DET__GUEST_FS__CTR_IMG': 'registry.test/guestfs:fixture', 'guestPVC': 'rootdisk'}
         for unusual in (False, True):
             with self.subTest(unusual=unusual):
                 if unusual:
@@ -268,7 +271,7 @@ class RecoveryTests(unittest.TestCase):
                 pod = json.loads(results[0].stdout)
                 self.assertEqual(pod['metadata']['name'], values['helperPod'])
                 self.assertEqual(pod['metadata']['namespace'], values['ns'])
-                self.assertEqual(pod['spec']['containers'][0]['image'], values['guestfsImage'])
+                self.assertEqual(pod['spec']['containers'][0]['image'], values['BSOD_DET__GUEST_FS__CTR_IMG'])
                 self.assertEqual(pod['spec']['volumes'][0]['persistentVolumeClaim']['claimName'], values['guestPVC'])
                 self.assertNotIn('annotations', pod['metadata'])
                 self.assertNotIn('creationTimestamp', pod['metadata'])
@@ -282,6 +285,36 @@ class RecoveryTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, '')
             self.assertTrue(result.stderr)
+
+    def test_image_environment_is_marshaled_literally_in_executable(self):
+        image = 'registry.test/guestfs:"quote"\n$(touch injected) `touch injected` \\ end'
+        self.env['BSOD_DET__GUEST_FS__CTR_IMG'] = image
+        self.env['BSOD_DET__GUESTFS__NTFS_IMAGE'] = 'registry.test/legacy:ignored'
+        result = self.RunRecovery(cwd=self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pod = json.loads((self.root / 'pod.json').read_text())
+        self.assertEqual(pod['spec']['containers'][0]['image'], image)
+        self.assertRegex(pod['metadata']['name'], r'^guest-fs--ntfs--[0-9]+-[0-9]+$')
+        self.assertFalse((self.root / 'injected').exists())
+        self.AssertDeleted()
+
+    def test_unset_image_environment_has_no_default_or_legacy_fallback(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                case = RecoveryTests('test_success_contract')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                del case.env['BSOD_DET__GUEST_FS__CTR_IMG']
+                case.env.pop('BSOD_DET__GUESTFS__NTFS_IMAGE', None)
+                if legacy:
+                    case.env['BSOD_DET__GUESTFS__NTFS_IMAGE'] = 'registry.test/legacy:ignored'
+                result = case.RunRecovery()
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn('BSOD_DET__GUEST_FS__CTR_IMG: unbound variable', result.stderr)
+                self.assertFalse((case.root / 'pod.json').exists())
+                self.assertFalse(any(call[0] in ('exec', 'cp') for call in case.Calls()))
+                self.assertFalse((case.out / 'extraction-summary.json').exists())
+                case.AssertDeleted()
 
     def test_pod_generator_and_marshaler_fail_before_resource_apply(self):
         for scenario in ('generator-error', 'generator-malformed', 'marshaler-error'):
@@ -323,7 +356,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn("namespace: ''", template)
         self.assertIn("claimName: ''", template)
         self.assertIn("image: ''", template)
-        self.assertNotIn(self.env['BSOD_DET__GUESTFS__NTFS_IMAGE'], template)
+        self.assertNotIn(self.env['BSOD_DET__GUEST_FS__CTR_IMG'], template)
         pod = json.loads((self.root / 'pod.json').read_text())
         self.assertNotIn('annotations', pod['metadata'])
         generated = subprocess.run([self.env['REAL_OC'], 'create', '-f', str(fixture),
@@ -339,7 +372,7 @@ class RecoveryTests(unittest.TestCase):
         del expected['metadata']['annotations']
         expected['metadata']['name'] = pod['metadata']['name']
         expected['metadata']['namespace'] = self.metadata['namespace']
-        expected['spec']['containers'][0]['image'] = self.env['BSOD_DET__GUESTFS__NTFS_IMAGE']
+        expected['spec']['containers'][0]['image'] = self.env['BSOD_DET__GUEST_FS__CTR_IMG']
         expected['spec']['volumes'][0]['persistentVolumeClaim']['claimName'] = self.metadata['guestPvc']
         self.assertEqual(pod, expected)
         self.assertEqual(pod['metadata']['labels'], {'app': 'bsod--guest-fs--extraction'})
@@ -375,7 +408,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(spec['volumes'][0]['persistentVolumeClaim']['readOnly'])
         self.assertTrue(spec['securityContext']['runAsNonRoot'])
         container = spec['containers'][0]
-        self.assertEqual(container['image'], self.env['BSOD_DET__GUESTFS__NTFS_IMAGE'])
+        self.assertEqual(container['image'], self.env['BSOD_DET__GUEST_FS__CTR_IMG'])
         self.assertFalse(container['securityContext']['allowPrivilegeEscalation'])
         self.assertEqual(container['command'], ['/bin/bash', '-c'])
         self.assertEqual(container['args'], ['exec tail -f /dev/null'])
