@@ -100,44 +100,96 @@ function FindNTFS () {
     true
 }
 
-jq -e -s '
+jq -es '
     ((length == 1) and (.[0].status.printableStatus == "Stopped"))
 ' 0< <(
     oc -n "${ns}" get vm/"${vm}" -o json
 ) 1> /dev/null
 
-helperPod="guestfs-ntfs-$(date -u +%s)-$$"
+helperPod="gguest-fs--ntfs--$(date -u +'%s')-$$"
 typeset guestfsImage="${BSOD_DET__GUESTFS__NTFS_IMAGE:-quay.io/konveyor/oadp-vmfr-access:latest}"
-jq -n --arg name "${helperPod}" --arg ns "${ns}" --arg image "${guestfsImage}" --arg pvc "${guestPVC}" '
-  {
-    apiVersion:"v1", kind:"Pod",
-    metadata:{name:$name,namespace:$ns,labels:{app:"bsod-guestfs-extraction"}},
-    spec:{
-      restartPolicy:"Never", automountServiceAccountToken:false,
-      securityContext:{runAsNonRoot:true,fsGroup:1000800000,seccompProfile:{type:"RuntimeDefault"}},
-      nodeSelector:{"kubernetes.io/arch":"amd64"},
-      containers:[{
-        name:"libguestfs", image:$image, imagePullPolicy:"Always",
-        command:["/bin/bash","-c","set -euxo pipefail; shopt -s inherit_errexit; exec tail -f /dev/null"],
-        env:[
-          {name:"LIBGUESTFS_BACKEND",value:"direct"},
-          {name:"LIBGUESTFS_BACKEND_SETTINGS",value:"force_tcg"},
-          {name:"LIBGUESTFS_TMPDIR",value:"/tmp/guestfs"},
-          {name:"LIBGUESTFS_CACHEDIR",value:"/tmp/guestfs"},
-          {name:"HOME",value:"/home/guestfs"}
-        ],
-        securityContext:{allowPrivilegeEscalation:false,capabilities:{drop:["ALL"]}},
-        resources:{requests:{memory:"512Mi",cpu:"500m"},limits:{memory:"2Gi",cpu:"2000m"}},
-        volumeDevices:[{name:"guest-disk",devicePath:"/dev/vda"}],
-        volumeMounts:[{name:"guestfs-tmp",mountPath:"/tmp/guestfs"},{name:"guestfs-home",mountPath:"/home/guestfs"}],
-        workingDir:"/tmp/guestfs"
-      }],
-      volumes:[
-        {name:"guest-disk",persistentVolumeClaim:{claimName:$pvc,readOnly:true}},
-        {name:"guestfs-tmp",emptyDir:{}}, {name:"guestfs-home",emptyDir:{}}
-      ]
-    }
-  }' | oc apply -f -
+{
+    oc create -f - --dry-run=client -o json --save-config |
+    jq -c \
+        --arg name "${helperPod}" \
+        --arg ns "${ns}" \
+        --arg image "${guestfsImage}" \
+        --arg pvc "${guestPVC}" \
+        '
+            del(.metadata.annotations) |
+            .metadata.name = $name |
+            .metadata.namespace = $ns |
+            .spec.containers[0].image = $image |
+            .spec.volumes[0].persistentVolumeClaim.claimName = $pvc
+        '
+} 0<<'ocEOF' | oc apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+    name: guestfs-template
+    namespace: default
+    labels:
+        app: bsod-guestfs-extraction
+spec:
+    restartPolicy: Never
+    automountServiceAccountToken: false
+    securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000800000
+        seccompProfile:
+            type: RuntimeDefault
+    nodeSelector:
+        kubernetes.io/arch: amd64
+    containers:
+        - name: libguestfs
+          image: example.invalid/guestfs:template
+          imagePullPolicy: Always
+          command:
+              - /bin/bash
+              - -c
+              - set -euxo pipefail; shopt -s inherit_errexit; exec tail -f /dev/null
+          env:
+              - name: LIBGUESTFS_BACKEND
+                value: direct
+              - name: LIBGUESTFS_BACKEND_SETTINGS
+                value: force_tcg
+              - name: LIBGUESTFS_TMPDIR
+                value: /tmp/guestfs
+              - name: LIBGUESTFS_CACHEDIR
+                value: /tmp/guestfs
+              - name: HOME
+                value: /home/guestfs
+          securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                  drop:
+                      - ALL
+          resources:
+              requests:
+                  memory: 512Mi
+                  cpu: 500m
+              limits:
+                  memory: 2Gi
+                  cpu: 2000m
+          volumeDevices:
+              - name: guest-disk
+                devicePath: /dev/vda
+          volumeMounts:
+              - name: guestfs-tmp
+                mountPath: /tmp/guestfs
+              - name: guestfs-home
+                mountPath: /home/guestfs
+          workingDir: /tmp/guestfs
+    volumes:
+        - name: guest-disk
+          persistentVolumeClaim:
+              claimName: guest-disk-template
+              readOnly: true
+        - name: guestfs-tmp
+          emptyDir: {}
+        - name: guestfs-home
+          emptyDir: {}
+ocEOF
 
 oc --request-timeout=185s wait pod "${helperPod}" -n "${ns}" --for=jsonpath='{.status.phase}'=Running --timeout=180s
 oc exec -n "${ns}" "${helperPod}" -c "${container}" -- \

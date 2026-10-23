@@ -136,6 +136,8 @@ run_preflight() {
 }
 
 make_recovery_mocks() {
+  REAL_OC="$(command -v oc)"
+  export REAL_OC
   make_python_and_findmnt_mocks
   cat > "$BATS_TMPDIR/mockbin/oc" <<'EOF'
 #!/usr/bin/env bash
@@ -149,6 +151,7 @@ if [[ "${1:-}" == cp ]]; then
   exit 0
 fi
 case "$1" in
+  create) exec "$REAL_OC" "$@" ;;
   apply) cat >/dev/null ;;
   wait) exit 0 ;;
   get)
@@ -229,8 +232,8 @@ write_elf_memory_fixture() {
   [ "$(jq -r '.missingRequiredArtifactTypes|length' "$summary")" -eq 0 ]
   [ ! -e "$EVIDENCE_ROOT/fixture-recovery-001/bsod-screenshot.png" ]
   grep -q '^-n fixture-ns exec .*guestfish --ro -a /dev/vda run : list-filesystems' "$OC_LOG"
-  [ "$(grep -c '^-n fixture-ns delete pod/guestfs-ntfs-.* --ignore-not-found$' "$OC_LOG")" -eq 2 ]
-  [ "$(grep -c '^-n fixture-ns wait pod/guestfs-ntfs-.* --for=delete --timeout=60s$' "$OC_LOG")" -eq 2 ]
+  [ "$(grep -c '^-n fixture-ns delete pod/gguest-fs--ntfs--.* --ignore-not-found$' "$OC_LOG")" -eq 2 ]
+  [ "$(grep -c '^-n fixture-ns wait pod/gguest-fs--ntfs--.* --for=delete --timeout=60s$' "$OC_LOG")" -eq 2 ]
   ! grep -Eq '(^| )delete (pvc|volumesnapshot)( |/)' "$OC_LOG"
 }
 

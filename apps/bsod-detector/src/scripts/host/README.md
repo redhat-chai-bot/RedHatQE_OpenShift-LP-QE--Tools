@@ -248,7 +248,8 @@ Cleanup uses the initialized helper name, native `oc delete --ignore-not-found` 
 **Responsibilities**:
 - Validate output path and preflight metadata integrity
 - Require the metadata target VM's printable status to be **Stopped**, using a direct process substitution; no VMI absence or namespace-wide PVC scan is performed. Empty/malformed responses and non-Stopped statuses block extraction, but valid Stopped JSON followed by an API failure can pass because the producer exit status is not propagated. This point-in-time status check is not an exclusive PVC lock.
-- Create `guestfs-ntfs` pod using `quay.io/konveyor/oadp-vmfr-access` with `force_tcg` backend (no KVM required)
+- Create a `gguest-fs--ntfs--<epoch>-<pid>` helper using `quay.io/konveyor/oadp-vmfr-access` with `force_tcg` backend (no KVM required). A quoted static YAML template passes through `oc create --dry-run=client -o json --save-config`, then `jq --arg` injects name, namespace, image and PVC. Remove the generated placeholder annotation before applying JSON so the final last-applied configuration describes the actual helper; no `yq` is required. Rendering the same inputs yields the same payload, not whole-script idempotence.
+- Recovery tests require the real `oc` client on `PATH` for offline YAML-to-JSON generation; API operations and apply remain mocked. Generation/marshalling failures stop subsequent helper execution under `pipefail`; apply is a concurrent pipeline stage, not a transactional producer-status gate.
 - Dynamically detect Windows system partition via `guestfish list-filesystems`:
   - Tries each NTFS partition in order (sda3, sda4, etc.)
   - First partition where `System.evtx` / `Application.evtx` are found = Windows `C:\`

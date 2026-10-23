@@ -15,7 +15,7 @@ hostDir = Path(__file__).resolve().parents[1] / 'src/scripts/host'
 recovery = hostDir / 'extract--guest-os--crash-info.sh'
 
 mockOC = r'''
-import json, os, signal, sys, time
+import json, os, signal, subprocess, sys, time
 from pathlib import Path
 root = Path(os.environ['MOCK_ROOT'])
 args = sys.argv[1:]
@@ -65,8 +65,29 @@ if args[0] == 'get':
         print('Running')
     else:
         sys.exit(91)
+elif args[0] == 'create':
+    template = sys.stdin.read()
+    (root / 'pod-template.yaml').write_text(template)
+    if scenario == 'generator-error':
+        print('mock generator failure', file=sys.stderr)
+        sys.exit(31)
+    if scenario == 'generator-malformed':
+        print('{')
+        sys.exit(0)
+    result = subprocess.run([os.environ['REAL_OC'], *args], input=template, text=True, capture_output=True)
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    if scenario == 'generator-partial-error':
+        print('mock generator failure after valid stdout', file=sys.stderr)
+        sys.exit(31)
+    sys.exit(result.returncode)
 elif args[0] == 'apply':
-    (root / 'pod.json').write_text(sys.stdin.read())
+    payload = sys.stdin.read()
+    if not payload.strip():
+        print('mock apply: no objects passed', file=sys.stderr)
+        sys.exit(1)
+    json.loads(payload)
+    (root / 'pod.json').write_text(payload)
     (root / 'helper-pod').touch()
     if scenario == 'apply-error':
         sys.exit(18)
@@ -195,6 +216,7 @@ class RecoveryTests(unittest.TestCase):
         (self.out / 'vm-memory.elf').write_bytes(memory)
         self.env = dict(os.environ, PATH=f'{self.bin}:{os.environ["PATH"]}',
                         MOCK_ROOT=str(self.root),
+                        REAL_OC=shutil.which('oc'),
                         BSOD_DET__GUESTFS__NTFS_IMAGE='registry.test/guestfs:fixture')
 
     def RunRecovery(self, scenario='', *args, script=recovery, cwd=None):
@@ -213,7 +235,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(deletes), count)
         for call in deletes:
             self.assertEqual(call[1:3], ['-n', self.metadata['namespace']])
-            self.assertTrue(call[3].startswith('pod/guestfs-ntfs-'))
+            self.assertRegex(call[3], r'^pod/gguest-fs--ntfs--[0-9]+-[0-9]+$')
             self.assertEqual(call[4:], ['--ignore-not-found'])
         waits = [call for call in self.Calls() if call[0] == 'wait' and '--for=delete' in call]
         self.assertEqual(len(waits), count if waitCount is None else waitCount)
@@ -221,6 +243,93 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(call[1:4], deletes[0][1:4])
             self.assertEqual(call[4:], ['--for=delete', '--timeout=60s'])
         self.assertFalse(any(call[:2] == ['get', 'pod'] for call in self.Calls()))
+
+    def test_pod_template_rendering_is_repeatable_and_literal(self):
+        source = recovery.read_text()
+        start = source.index('{\n    oc create -f - --dry-run=client')
+        end = source.index('\nocEOF\n', start) + len('\nocEOF\n')
+        renderer = source[start:end].replace('| oc apply -f -', '| cat')
+        self.assertIn("0<<'ocEOF'", renderer)
+        self.assertNotIn('yq', renderer)
+        self.assertIn('helperPod="gguest-fs--ntfs--$(date -u +\'%s\')-$$"', source)
+        values = {'helperPod': 'gguest-fs--ntfs--123-456', 'ns': 'fixture-ns',
+                  'guestfsImage': 'registry.test/guestfs:fixture', 'guestPVC': 'rootdisk'}
+        for unusual in (False, True):
+            with self.subTest(unusual=unusual):
+                if unusual:
+                    values = {key: f'{key}: "quote"\n$(touch injected) `touch injected` \\ end'
+                              for key in values}
+                results = [subprocess.run(['bash', '-euc', 'set -o pipefail\n' + renderer],
+                                          cwd=self.root, env=dict(self.env, **values, PATH=os.environ['PATH']),
+                                          text=True, capture_output=True, timeout=10) for unused in range(2)]
+                for result in results:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(results[0].stdout, results[1].stdout)
+                pod = json.loads(results[0].stdout)
+                self.assertEqual(pod['metadata']['name'], values['helperPod'])
+                self.assertEqual(pod['metadata']['namespace'], values['ns'])
+                self.assertEqual(pod['spec']['containers'][0]['image'], values['guestfsImage'])
+                self.assertEqual(pod['spec']['volumes'][0]['persistentVolumeClaim']['claimName'], values['guestPVC'])
+                self.assertNotIn('annotations', pod['metadata'])
+                self.assertNotIn('creationTimestamp', pod['metadata'])
+                self.assertNotIn('status', pod)
+                self.assertFalse((self.root / 'injected').exists())
+        for broken in (renderer.replace('apiVersion: v1', 'apiVersion: ['),
+                       renderer.replace('del(.metadata.annotations)', 'del(')):
+            result = subprocess.run(['bash', '-euc', 'set -o pipefail\n' + broken],
+                                    cwd=self.root, env=dict(self.env, **values, PATH=os.environ['PATH']),
+                                    text=True, capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, '')
+            self.assertTrue(result.stderr)
+
+    def test_pod_generator_and_marshaler_fail_before_resource_apply(self):
+        for scenario in ('generator-error', 'generator-malformed', 'marshaler-error'):
+            with self.subTest(scenario=scenario):
+                case = RecoveryTests('test_success_contract')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                if scenario == 'marshaler-error':
+                    jq = case.bin / 'jq'
+                    jq.write_text('#!/usr/bin/env bash\n'
+                                  'if [ "$1" = -c ]; then printf "mock marshaler failure\\n" 1>&2; exit 32; fi\n'
+                                  f'exec {shutil.which("jq")} "$@"\n')
+                    jq.chmod(0o755)
+                result = case.RunRecovery(scenario)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((case.root / 'pod.json').exists())
+                self.assertFalse((case.root / 'helper-pod').exists())
+                self.assertFalse(any(call[0] in ('exec', 'cp') for call in case.Calls()))
+                self.assertFalse((case.out / 'extraction-summary.json').exists())
+                self.assertIn('mock apply: no objects passed', result.stderr)
+                self.assertIn({'generator-error': 'mock generator failure',
+                               'generator-malformed': 'parse error',
+                               'marshaler-error': 'mock marshaler failure'}[scenario], result.stderr)
+                case.AssertDeleted()
+
+    def test_pod_generator_uses_quoted_static_template(self):
+        result = self.RunRecovery()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        creates = [call for call in self.Calls() if call[0] == 'create']
+        self.assertEqual(creates, [['create', '-f', '-', '--dry-run=client', '-o', 'json', '--save-config']])
+        template = (self.root / 'pod-template.yaml').read_text()
+        self.assertIn('name: guestfs-template', template)
+        self.assertIn('namespace: default', template)
+        self.assertIn('claimName: guest-disk-template', template)
+        self.assertIn('image: example.invalid/guestfs:template', template)
+        self.assertNotIn(self.env['BSOD_DET__GUESTFS__NTFS_IMAGE'], template)
+        pod = json.loads((self.root / 'pod.json').read_text())
+        self.assertNotIn('annotations', pod['metadata'])
+        self.assertEqual(pod['spec']['nodeSelector'], {'kubernetes.io/arch': 'amd64'})
+
+    def test_partial_generator_failure_stops_after_apply_and_cleans(self):
+        result = self.RunRecovery('generator-partial-error')
+        self.assertEqual(result.returncode, 31, result.stderr)
+        self.assertTrue((self.root / 'pod.json').exists())
+        self.assertFalse((self.root / 'helper-pod').exists())
+        self.assertFalse(any(call[0] in ('exec', 'cp') for call in self.Calls()))
+        self.assertFalse((self.out / 'extraction-summary.json').exists())
+        self.AssertDeleted()
 
     def test_success_contract(self):
         result = self.RunRecovery()
@@ -532,7 +641,10 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 25, result.stderr)
         self.assertIn('mock startup timeout', result.stderr)
         self.assertIn('mock delete failure', result.stderr)
-        self.assertEqual([call[0] for call in self.Calls()], ['get', 'apply', 'wait', 'delete'])
+        calls = [call[0] for call in self.Calls()]
+        self.assertEqual(calls[0], 'get')
+        self.assertCountEqual(calls[1:3], ['create', 'apply'])
+        self.assertEqual(calls[3:], ['wait', 'delete'])
         self.assertTrue((self.root / 'helper-pod').exists())
         self.assertFalse((self.out / 'extraction-summary.json').exists())
 
@@ -766,7 +878,10 @@ source "$1" "${@:2}"
     def test_failed_apply_stops_before_extraction(self):
         result = self.RunRecovery('apply-error')
         self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([call[0] for call in self.Calls()], ['get', 'apply', 'delete', 'wait'])
+        calls = [call[0] for call in self.Calls()]
+        self.assertEqual(calls[0], 'get')
+        self.assertCountEqual(calls[1:3], ['create', 'apply'])
+        self.assertEqual(calls[3:], ['delete', 'wait'])
         self.AssertDeleted()
         self.assertFalse((self.root / 'helper-pod').exists())
 
