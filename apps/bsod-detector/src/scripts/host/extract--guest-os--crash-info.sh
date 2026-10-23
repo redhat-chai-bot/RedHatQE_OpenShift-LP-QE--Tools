@@ -60,33 +60,37 @@ typeset stale=''
 stale="$(find -H "${outDir}" -mindepth 1 \( -name MEMORY.DMP -o -name Minidump -o -name 'guestFS_*' -o -name events.json -o -name extraction-summary.json -o -name checksums.sha256 \) -print -quit)"
 [ -z "${stale}" ] || { : "Pre-existing extraction artifact rejected: ${stale}"; false; }
 
-typeset helperPod='' container='libguestfs'
+typeset helperPod='' helperPodCtr='libguestfs'
 
 function Cleanup () {
-    [ -z "${helperPod}" ] || {
-        oc -n "${ns}" delete "pod/${helperPod}" \
+    typeset podName="${1:?}"; (($#)) && shift
+    [ -z "${podName}" ] || {
+        oc -n "${ns}" delete "pod/${podName}" \
             --ignore-not-found
-        oc -n "${ns}" wait "pod/${helperPod}" \
+        oc -n "${ns}" wait "pod/${podName}" \
             --for=delete \
             --timeout=60s
     }
     true
 }
 
-trap Cleanup EXIT
+trap 'Cleanup "${helperPod}"' EXIT
 
 function FindNTFS () {
-    typeset device='' fsType=''
+    typeset podName="${1:?}"; (($#)) && shift
+    typeset ctrName="${1:?}"; (($#)) && shift
+
+    typeset blkDev='' fsType=''
     typeset -a partArr=()
 
-    while IFS=': ' read -r device fsType; do
-        if [ -n "${device}" ] && [ "${fsType}" = ntfs ]; then
-            partArr+=("${device}")
+    while IFS=': ' read -r blkDev fsType; do
+        if { [ -n "${blkDev}" ] && [ "${fsType}" = ntfs ]; } then
+            partArr+=("${blkDev}")
         fi
     done 0< <(
         oc -n "${ns}" exec \
-            "${helperPod}" \
-            -c "${container}" \
+            "${podName}" \
+            -c "${ctrName}" \
             -- \
             guestfish \
             --ro \
@@ -200,8 +204,7 @@ typeset -a evtxArr=(
     '/Windows/System32/winevt/Logs/System.evtx'
     '/Windows/System32/winevt/Logs/Application.evtx'
 )
-typeset ntfsPart='' ntfsOutput=''
-ntfsOutput="$(FindNTFS)"
+typeset ntfsPart=''
 # One QEMU session per partition avoids repeated startup OOMs. Copy each result
 # independently: a missing Application.evtx must not discard a valid System.evtx.
 while IFS= read -r ntfsPart; do
@@ -215,7 +218,7 @@ while IFS= read -r ntfsPart; do
         tempArr+=("${podTemp}")
     done
     batchArr+=(: umount-all)
-    oc exec -n "${ns}" "${helperPod}" -c "${container}" -- \
+    oc exec -n "${ns}" "${helperPod}" -c "${helperPodCtr}" -- \
         guestfish "${batchArr[@]}" || true
 
     typeset -i index=0
@@ -224,18 +227,18 @@ while IFS= read -r ntfsPart; do
         index+=1
         typeset dest="${outDir}/guestFS_${partId}${filePath}"
         mkdir -p "${dest%/*}"
-        if oc cp "${ns}/${helperPod}:${podTemp}" "${dest}" -c "${container}" && [ -s "${dest}" ]; then
+        if oc cp "${ns}/${helperPod}:${podTemp}" "${dest}" -c "${helperPodCtr}" && [ -s "${dest}" ]; then
             chmod 0600 "${dest}"
             hasLogs=1
         else
             rm -f "${dest}" || true
         fi
-        oc exec -n "${ns}" "${helperPod}" -c "${container}" -- rm -f "${podTemp}" || true
+        oc exec -n "${ns}" "${helperPod}" -c "${helperPodCtr}" -- rm -f "${podTemp}" || true
     done
     if ((hasLogs)); then
         break
     fi
-done 0<<< "${ntfsOutput}"
+done 0< <(FindNTFS "${helperPod}" "${helperPodCtr}")
 
 if [ ! -s "${outDir}/parse-dump-header.json" ]; then
     jq -n '{"ok":true,"totalDumps":0,"dumps":[],"warnings":["no on-disk dump available; primary artifact is vm-memory.elf.tar.gz"]}' \
@@ -256,7 +259,7 @@ chmod 0600 "${outDir}/events.json"
     chmod 0600 checksums.sha256
     exit 0
 )
-Cleanup
+Cleanup "${helperPod}"
 timeout --signal=TERM --kill-after=5 60 python3 "${scrDir}/reliability.py" write-summary \
     --out "${outDir}" --stage-errors "${outDir}/stage-errors.jsonl" --mode rhov-snapshot-recovery \
     --vm "${vm}" --namespace "${ns}" --run-id "${runId}" --filename extraction-summary.json 1> /dev/null || exit 1

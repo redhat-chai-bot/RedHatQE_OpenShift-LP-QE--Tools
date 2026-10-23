@@ -757,7 +757,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual([call[0] for call in self.Calls()], ['get'])
         self.assertIn('Cleanup', result.stderr)
-        self.assertIn("'[' -z '' ']'", result.stderr)
+        self.assertIn('1: parameter null or not set', result.stderr)
         self.assertFalse((self.root / 'helper-pod').exists())
 
     def test_cleanup_error_replaces_original_failure_on_exit(self):
@@ -774,16 +774,70 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue((self.root / 'helper-pod').exists())
         self.assertFalse((self.out / 'extraction-summary.json').exists())
 
+    def test_empty_cleanup_argument_replaces_malformed_vm_json_status(self):
+        result = self.RunRecovery('bad-json')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('parse error', result.stderr)
+        self.assertIn('1: parameter null or not set', result.stderr)
+        self.assertEqual([call[0] for call in self.Calls()], ['get'])
+        self.assertFalse((self.out / 'parse-dump-header.json').exists())
+        self.assertFalse((self.out / 'extraction-summary.json').exists())
+
     def test_cleanup_has_only_exit_trap_and_supplied_commands(self):
         source = recovery.read_text()
         self.assertNotIn('hasPod', source)
         self.assertNotIn("trap 'exit 130' INT", source)
         self.assertNotIn("trap 'exit 143' TERM", source)
-        self.assertEqual(re.findall(r'^trap .*$', source, re.MULTILINE), ['trap Cleanup EXIT'])
+        self.assertEqual(re.findall(r'^trap .*$', source, re.MULTILINE), ['trap \'Cleanup "${helperPod}"\' EXIT'])
         cleanup = re.search(r'^function Cleanup \(\) \{\n.*?^\}', source, re.MULTILINE | re.DOTALL).group()
         self.assertNotIn('timeout --', cleanup)
         self.assertNotIn('--wait=false', cleanup)
         self.assertNotIn('--request-timeout', cleanup)
+
+    def test_parameterized_helper_arguments_and_native_calls(self):
+        source = recovery.read_text()
+        for name, arguments, expected in (
+            ('Cleanup', [], 1), ('Cleanup', [''], 1),
+            ('Cleanup', ['other-pod'], 0), ('Cleanup', ['other-pod', 'ignored'], 0),
+            ('FindNTFS', [], 1), ('FindNTFS', ['other-pod'], 1),
+            ('FindNTFS', ['', 'other-container'], 1), ('FindNTFS', ['other-pod', ''], 1),
+            ('FindNTFS', ['other-pod', 'other-container'], 0),
+            ('FindNTFS', ['other-pod', 'other-container', 'ignored'], 0),
+        ):
+            with self.subTest(name=name, arguments=arguments):
+                callsFile = self.root / 'oc-argv.jsonl'
+                callsFile.unlink(missing_ok=True)
+                helper = re.search(r'^function ' + name + r' \(\) \{\n.*?^\}', source,
+                                   re.MULTILINE | re.DOTALL).group()
+                command = ('set -euxo pipefail; shopt -s inherit_errexit\n'
+                           'typeset ns=fixture-ns helperPod=wrong-pod helperPodCtr=wrong-container\n'
+                           + helper + '\n' + name + ' "$@"\n')
+                result = subprocess.run(['bash', '-c', command, 'argument-fixture', *arguments],
+                                        env=self.env, text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                calls = [json.loads(line) for line in callsFile.read_text().splitlines()] if callsFile.exists() else []
+                if expected:
+                    self.assertEqual(calls, [])
+                    self.assertIn('parameter null or not set', result.stderr)
+                elif name == 'Cleanup':
+                    self.assertEqual(calls, [
+                        ['-n', 'fixture-ns', 'delete', 'pod/other-pod', '--ignore-not-found'],
+                        ['-n', 'fixture-ns', 'wait', 'pod/other-pod', '--for=delete', '--timeout=60s'],
+                    ])
+                else:
+                    self.assertEqual(calls, [[
+                        '-n', 'fixture-ns', 'exec', 'other-pod', '-c', 'other-container', '--',
+                        'guestfish', '--ro', '-a', '/dev/vda', 'run', ':', 'list-filesystems',
+                    ]])
+                    self.assertEqual(result.stdout, '/dev/sda2\n/dev/sda3\n/dev/sda4\n')
+
+    def test_parameterized_helpers_have_direct_main_and_exit_callers(self):
+        source = recovery.read_text()
+        self.assertIn('done 0< <(FindNTFS "${helperPod}" "${helperPodCtr}")', source)
+        self.assertIn('\nCleanup "${helperPod}"\n', source)
+        self.assertNotIn('ntfsOutput', source)
+        self.assertNotRegex(source, r'\bcontainer=|\$\{container\}|\bdevice=|\$\{device\}')
+        self.assertNotIn('Cleanup ||', source)
 
     def test_cleanup_wait_and_delete_failures_remain_visible(self):
         for scenario in ('cleanup-error', 'cleanup-wait-error', 'cleanup-wait-timeout'):
@@ -1002,14 +1056,14 @@ source "$1" "${@:2}"
             with self.subTest(scenario=scenario):
                 (self.root / 'probe-done').touch()
                 command = ('set -euxo pipefail; shopt -s inherit_errexit\n'
-                           'typeset ns=fixture-ns pod=fixture-pod container=libguestfs extractLog="${1}"\n'
-                           + helper + '\ntypeset -i status=0\nFindNTFS || status=$?\nexit "${status}"\n')
-                result = subprocess.run(['bash', '-c', command, 'discovery-fixture', str(self.root / 'discovery.log')],
+                           'typeset ns=fixture-ns\n'
+                           + helper + '\ntypeset -i status=0\nFindNTFS fixture-pod libguestfs || status=$?\nexit "${status}"\n')
+                result = subprocess.run(['bash', '-c', command, 'discovery-fixture'],
                                         env=dict(self.env, SCENARIO=scenario), text=True, capture_output=True, timeout=10)
                 self.assertEqual(result.returncode, 0 if not scenario else 1, result.stderr)
                 self.assertEqual(result.stdout, '/dev/sda2\n/dev/sda3\n/dev/sda4\n' if not scenario else '')
                 if scenario.startswith('discovery-'):
-                    self.assertIn('mock discovery failure', (self.root / 'discovery.log').read_text())
+                    self.assertIn('mock discovery failure', result.stderr)
 
     def test_failed_apply_stops_before_extraction(self):
         result = self.RunRecovery('apply-error')
