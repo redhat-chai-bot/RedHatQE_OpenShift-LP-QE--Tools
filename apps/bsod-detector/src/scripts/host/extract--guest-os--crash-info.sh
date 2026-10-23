@@ -253,13 +253,20 @@ while IFS= read -r ntfsPart; do
             continue
         }
     done
-    oc -n "${ns}" exec "pod/${helperPod}" -c "${helperPodCtr}" -- test -d "${podTmp}/" && {
-        oc -n "${ns}" exec "pod/${helperPod}" \
+    {
+        oc -n "${ns}" exec \
+            "pod/${helperPod}" \
             -c "${helperPodCtr}" \
             -- \
-            tar zc -C "${podTmp}/" ./ \
-            1> "${outDir}/guest-fs--crash-info.tgz"
-        break
+            test -d "${podTmp}/" &&
+        {
+            oc -n "${ns}" exec "pod/${helperPod}" \
+                -c "${helperPodCtr}" \
+                -- \
+                tar zc -C "${podTmp}/" ./ \
+                1> "${outDir}/guest-fs--crash-info.tgz"
+            break
+        }
     }
 done 0< <(FindNTFS "${helperPod}" "${helperPodCtr}")
 
