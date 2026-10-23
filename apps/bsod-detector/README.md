@@ -709,7 +709,7 @@ capabilities:
   drop: ["ALL"]
 ```
 
-`force_kvm` requires a schedulable `devices.kubevirt.io/kvm` device (request and limit `"1"`). The supplied helper template requests 2Gi memory and limits it to 4Gi; it sets no CPU resources, node selector or fsGroup. Availability of KVM and admission of this Pod must be validated in the target environment; offline rendering tests do not prove runtime scheduling or guestfish success.
+`force_kvm` requires a schedulable `devices.kubevirt.io/kvm` device (request and limit `"1"`). The helper's initial resource budget requests 512Mi memory and 500m CPU, with limits of 2Gi memory and 2000m CPU; it sets no node selector or fsGroup. This is not measured resource adequacy. Availability of KVM and admission of this Pod must be validated in the target environment; offline rendering tests do not prove runtime scheduling or guestfish success.
 
 ---
 

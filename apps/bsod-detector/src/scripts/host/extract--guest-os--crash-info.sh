@@ -160,10 +160,12 @@ spec:
             - ALL
       resources:
         requests:
-          memory: 2Gi
+          memory: 512Mi
+          cpu: 500m
           devices.kubevirt.io/kvm: "1"
         limits:
-          memory: 4Gi
+          memory: 2Gi
+          cpu: 2000m
           devices.kubevirt.io/kvm: "1"
       volumeDevices:
         - name: vm-disk

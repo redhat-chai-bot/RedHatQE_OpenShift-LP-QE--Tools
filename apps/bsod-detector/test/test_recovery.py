@@ -314,7 +314,11 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(creates, [['create', '-f', '-', '--dry-run=client', '-o', 'json', '--save-config']])
         template = (self.root / 'pod-template.yaml').read_text()
         fixture = Path(__file__).parent / 'fixtures/guestfs-pod-template.yaml'
-        self.assertEqual(template, fixture.read_text())
+        override = fixture.with_name('guestfs-resource-override.yaml').read_text()
+        expectedTemplate = re.sub(r'^      resources:\n(?:        .*\n)+',
+                                  ''.join('      ' + line for line in override.splitlines(True)),
+                                  fixture.read_text(), count=1, flags=re.MULTILINE)
+        self.assertEqual(template, expectedTemplate)
         self.assertIn('name: guest-fs--ntfs', template)
         self.assertIn("namespace: ''", template)
         self.assertIn("claimName: ''", template)
@@ -327,6 +331,11 @@ class RecoveryTests(unittest.TestCase):
                                    text=True, capture_output=True, timeout=10)
         self.assertEqual(generated.returncode, 0, generated.stderr)
         expected = json.loads(generated.stdout)
+        resourceBudget = {
+            'requests': {'memory': '512Mi', 'cpu': '500m', 'devices.kubevirt.io/kvm': '1'},
+            'limits': {'memory': '2Gi', 'cpu': '2000m', 'devices.kubevirt.io/kvm': '1'},
+        }
+        expected['spec']['containers'][0]['resources'] = resourceBudget
         del expected['metadata']['annotations']
         expected['metadata']['name'] = pod['metadata']['name']
         expected['metadata']['namespace'] = self.metadata['namespace']
@@ -338,10 +347,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIn('nodeSelector', spec)
         self.assertNotIn('fsGroup', spec['securityContext'])
         container = spec['containers'][0]
-        self.assertEqual(container['resources'], {
-            'requests': {'memory': '2Gi', 'devices.kubevirt.io/kvm': '1'},
-            'limits': {'memory': '4Gi', 'devices.kubevirt.io/kvm': '1'},
-        })
+        self.assertEqual(container['resources'], resourceBudget)
         self.assertIn({'name': 'LIBGUESTFS_BACKEND_SETTINGS', 'value': 'force_kvm'}, container['env'])
         self.assertEqual(container['volumeDevices'], [{'name': 'vm-disk', 'devicePath': '/dev/vda'}])
         self.assertEqual(container['volumeMounts'], [

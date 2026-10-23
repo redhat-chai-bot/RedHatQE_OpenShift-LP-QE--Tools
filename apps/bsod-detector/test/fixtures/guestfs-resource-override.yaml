@@ -1,0 +1,9 @@
+resources:
+  requests:
+    memory: 512Mi
+    cpu: 500m
+    devices.kubevirt.io/kvm: "1"
+  limits:
+    memory: 2Gi
+    cpu: 2000m
+    devices.kubevirt.io/kvm: "1"
