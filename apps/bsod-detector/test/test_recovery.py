@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1349,6 +1350,69 @@ class ArchiveRecoveryTests(unittest.TestCase):
         expected = {f'Windows/System32/winevt/Logs/{name}.evtx': (self.root / 'fixture.evtx').read_bytes()
                     for name in ('System', 'Application')}
         self.assertEqual(content, expected)
+
+    def test_json_stubs_and_checksum_manifest_contents(self):
+        (self.out / 'extra data.dat').write_bytes(b'include this file')
+        (self.out / 'nested').mkdir()
+        (self.out / 'nested' / 'data.dat').write_bytes(b'nested data')
+        (self.out / 'linked.dat').symlink_to('extra data.dat')
+        for name in ('ignored.tmp', 'ignored.log', 'prior-summary.json'):
+            (self.out / name).write_text('{}')
+        (self.out / 'stage-errors.jsonl').write_text('')
+        result = self.RunRecovery()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        summary = json.loads((self.out / 'extraction-summary.json').read_text())
+        self.assertFalse(summary['ok'])
+        self.assertEqual(summary['missingRequiredArtifactTypes'], ['evtx'])
+        self.assertEqual(len(summary['invalidArtifacts']), 1)
+        self.assertEqual(summary['invalidArtifacts'][0]['path'], 'prior-summary.json')
+        self.assertEqual(summary['invalidArtifacts'][0]['error'], 'manifest-entry-missing')
+        self.assertFalse(summary['invalidArtifacts'][0]['valid'])
+        self.AssertDeleted()
+        parser = {'ok': True, 'totalDumps': 0, 'dumps': [],
+                  'warnings': ['no on-disk dump available; primary artifact is vm-memory.elf.tar.gz']}
+        events = {'ok': True, 'note': 'extract-evtx.py is a developer tool — run offline against guestFS_<partition>/Windows/System32/winevt/Logs/*.evtx',
+                  'events': []}
+        for name, value in (('parse-dump-header.json', parser), ('events.json', events)):
+            expected = subprocess.check_output(['jq', '-n', json.dumps(value, ensure_ascii=False)])
+            self.assertEqual((self.out / name).read_bytes(), expected)
+        names = {'vm-memory.elf', 'guest-fs--crash-info.tgz', 'parse-dump-header.json', 'events.json',
+                 'extra data.dat', 'linked.dat', 'nested/data.dat'}
+        rows = (self.out / 'checksums.sha256').read_text().splitlines()
+        self.assertEqual(len(rows), len(names))
+        self.assertEqual(rows, [hashlib.sha256((self.out / name).read_bytes()).hexdigest() + '  ' + name
+                                for name in sorted(names)])
+        for name in ('parse-dump-header.json', 'events.json', 'checksums.sha256'):
+            self.assertEqual((self.out / name).stat().st_mode & 0o777, 0o600)
+        self.assertFalse((self.out / 'checksums.sha256.tmp').exists())
+
+    def test_existing_json_modes_and_checksum_replacement(self):
+        for content in ('', '{"ok":true,"totalDumps":0,"dumps":[],"watcher":"preserve"}\n'):
+            with self.subTest(parser=content):
+                case = ArchiveRecoveryTests('test_archive_contains_only_requested_files_and_validator_remains_deferred')
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                parser = case.out / 'parse-dump-header.json'
+                parser.write_text(content)
+                parser.chmod(0o640)
+                events = case.out / 'events.json'
+                events.write_text('overwrite existing events')
+                events.chmod(0o644)
+                checksum = case.out / 'checksums.sha256'
+                checksum.write_text('overwrite existing checksum')
+                checksum.chmod(0o644)
+                result = case.RunRecovery()
+                case.AssertDeferredValidator(result)
+                self.assertEqual(parser.stat().st_mode & 0o777, 0o640)
+                if content:
+                    self.assertEqual(parser.read_text(), content)
+                else:
+                    self.assertEqual(json.loads(parser.read_text())['totalDumps'], 0)
+                self.assertEqual(events.stat().st_mode & 0o777, 0o644)
+                self.assertEqual(json.loads(events.read_text())['events'], [])
+                self.assertEqual(checksum.stat().st_mode & 0o777, 0o600)
+                self.assertNotIn('overwrite existing checksum', checksum.read_text())
+                self.assertFalse((case.out / 'checksums.sha256.tmp').exists())
 
     def test_existing_archive_is_replaced_not_appended(self):
         archive = self.out / 'guest-fs--crash-info.tgz'

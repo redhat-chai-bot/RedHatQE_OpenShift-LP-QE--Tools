@@ -265,24 +265,35 @@ while IFS= read -r ntfsPart; do
     }
 done 0< <(FindNTFS "${helperPod}" "${helperPodCtr}")
 
-if [ ! -s "${outDir}/parse-dump-header.json" ]; then
-    jq -n '{"ok":true,"totalDumps":0,"dumps":[],"warnings":["no on-disk dump available; primary artifact is vm-memory.elf.tar.gz"]}' \
-        1> "${outDir}/parse-dump-header.json"
-    chmod 0600 "${outDir}/parse-dump-header.json"
+typeset jsonFile=''
+jsonFile="${outDir}/parse-dump-header.json"
+if [ ! -s "${jsonFile}" ]; then
+    jq -n '
+        {"ok":true,"totalDumps":0,"dumps":[],"warnings":["no on-disk dump available; primary artifact is vm-memory.elf.tar.gz"]}
+    ' 1> "${jsonFile}"
 fi
-jq -e '.ok == true' "${outDir}/parse-dump-header.json" 1> /dev/null
-jq -n '{"ok":true,"note":"extract-evtx.py is a developer tool — run offline against guestFS_<partition>/Windows/System32/winevt/Logs/*.evtx","events":[]}' \
-    1> "${outDir}/events.json"
-chmod 0600 "${outDir}/events.json"
+jq -e '.ok == true' "${jsonFile}" 1> /dev/null
+jq -n '
+    {"ok":true,"note":"extract-evtx.py is a developer tool — run offline against guestFS_<partition>/Windows/System32/winevt/Logs/*.evtx","events":[]}
+' 1> "${outDir}/events.json"
 
 (
     cd "${outDir}"
     # Canonical relative paths; logs/errors/summaries can still change during cleanup.
-    find . \( -type f -o -type l \) ! -name '*.tmp' ! -name '*.log' ! -name stage-errors.jsonl ! -name '*-summary.json' ! -name checksums.sha256 -print0 |
-        sort -z | xargs -0 sha256sum | sed 's|  \./|  |' 1> checksums.sha256.tmp
+    find . \
+        \( -type f -o -type l \) \
+        ! -name '*.tmp' \
+        ! -name '*.log' \
+        ! -name stage-errors.jsonl \
+        ! -name '*-summary.json' \
+        ! -name checksums.sha256 \
+        -print0 |
+    sort -z |
+    xargs -0 sha256sum |
+    sed 's|  \./|  |' \
+    1> checksums.sha256.tmp
     mv -f checksums.sha256.tmp checksums.sha256
-    chmod 0600 checksums.sha256
-    exit 0
+    true
 )
 Cleanup "${helperPod}"
 timeout --signal=TERM --kill-after=5 60 python3 "${scrDir}/reliability.py" write-summary \
