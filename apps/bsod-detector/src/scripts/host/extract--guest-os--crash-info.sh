@@ -58,9 +58,6 @@ mkdir -p "${outDir}" || {
     false
 }
 
-typeset helperPod="guest-fs--ntfs--$(date -u +'%s')-$$"
-typeset helperPodCtr='libguestfs'
-
 function FindNTFS () {
     typeset podName="${1:?}"; (($#)) && shift
     typeset ctrName="${1:?}"; (($#)) && shift
@@ -99,6 +96,9 @@ function Cleanup () {
     }
     true
 }
+
+typeset helperPod="guest-fs--ntfs--$(date -u +'%s')-$$"
+typeset helperPodCtr='libguestfs'
 trap 'Cleanup "${helperPod}"' EXIT
 
 jq -es '
