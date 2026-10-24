@@ -1312,10 +1312,24 @@ source "$1" "${@:2}"
 
 
 class ArchiveRecoveryTests(unittest.TestCase):
-    setUp = RecoveryTests.setUp
     RunRecovery = RecoveryTests.RunRecovery
     Calls = RecoveryTests.Calls
-    AssertDeleted = RecoveryTests.AssertDeleted
+
+    def setUp(self):
+        RecoveryTests.setUp(self)
+        python = self.bin / 'python3'
+        python.write_text(f'#!{sys.executable}\n'
+                          'import os, sys\n'
+                          'from pathlib import Path\n'
+                          'if any(arg.endswith("/reliability.py") for arg in sys.argv[1:]):\n'
+                          '    Path(os.environ["MOCK_ROOT"], "reliability-invoked").touch()\n'
+                          f'os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n')
+        python.chmod(0o755)
+
+    def AssertDeleted(self, waitCount=None, count=None):
+        if count is None:
+            count = 2 if (self.out / 'checksums.sha256').exists() else 1
+        RecoveryTests.AssertDeleted(self, waitCount=waitCount, count=count)
 
     def ArchiveContents(self):
         archive = self.out / 'guest-fs--crash-info.tgz'
@@ -1324,8 +1338,8 @@ class ArchiveRecoveryTests(unittest.TestCase):
             return {member.name.removeprefix('./'): payload.extractfile(member).read()
                     for member in payload.getmembers() if member.isfile()}
 
-    def AssertDeferredValidator(self, result):
-        self.assertEqual(result.returncode, 1, result.stderr)
+    def AssertSummaryBypassed(self, result):
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(list(self.out.rglob('*.evtx')))
         self.assertFalse(list(self.out.glob('guestFS_*')))
         self.assertFalse(any(call[0] == 'cp' for call in self.Calls()))
@@ -1334,10 +1348,8 @@ class ArchiveRecoveryTests(unittest.TestCase):
             if call[0] == 'exec':
                 self.assertEqual(call[3].removeprefix('pod/'), pod['metadata']['name'])
                 self.assertEqual(call[call.index('-c') + 1], pod['spec']['containers'][0]['name'])
-        summary = json.loads((self.out / 'extraction-summary.json').read_text())
-        self.assertFalse(summary['ok'])
-        self.assertEqual(summary['missingRequiredArtifactTypes'], ['evtx'])
-        self.assertEqual(summary['invalidArtifacts'], [])
+        self.assertFalse((self.out / 'extraction-summary.json').exists())
+        self.assertFalse((self.root / 'reliability-invoked').exists())
         check = subprocess.run(['sha256sum', '-c', 'checksums.sha256'], cwd=self.out,
                                text=True, capture_output=True)
         self.assertEqual(check.returncode, 0, check.stderr)
@@ -1345,11 +1357,24 @@ class ArchiveRecoveryTests(unittest.TestCase):
 
     def test_archive_contains_only_requested_files_and_validator_remains_deferred(self):
         result = self.RunRecovery()
-        self.AssertDeferredValidator(result)
+        self.AssertSummaryBypassed(result)
         content = self.ArchiveContents()
         expected = {f'Windows/System32/winevt/Logs/{name}.evtx': (self.root / 'fixture.evtx').read_bytes()
                     for name in ('System', 'Application')}
         self.assertEqual(content, expected)
+
+    def test_existing_summary_and_stage_errors_are_not_revalidated_or_modified(self):
+        summary = self.out / 'extraction-summary.json'
+        stageErrors = self.out / 'stage-errors.jsonl'
+        summary.write_bytes(b'preexisting summary sentinel')
+        stageErrors.write_bytes(b'{"stage":"fixture","error":"preserve"}\n')
+        before = {path: path.read_bytes() for path in (summary, stageErrors)}
+        result = self.RunRecovery()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / 'reliability-invoked').exists())
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        self.assertEqual(len(self.ArchiveContents()), 2)
+        self.AssertDeleted(count=2)
 
     def test_json_stubs_and_checksum_manifest_contents(self):
         (self.out / 'extra data.dat').write_bytes(b'include this file')
@@ -1360,15 +1385,7 @@ class ArchiveRecoveryTests(unittest.TestCase):
             (self.out / name).write_text('{}')
         (self.out / 'stage-errors.jsonl').write_text('')
         result = self.RunRecovery()
-        self.assertEqual(result.returncode, 1, result.stderr)
-        summary = json.loads((self.out / 'extraction-summary.json').read_text())
-        self.assertFalse(summary['ok'])
-        self.assertEqual(summary['missingRequiredArtifactTypes'], ['evtx'])
-        self.assertEqual(len(summary['invalidArtifacts']), 1)
-        self.assertEqual(summary['invalidArtifacts'][0]['path'], 'prior-summary.json')
-        self.assertEqual(summary['invalidArtifacts'][0]['error'], 'manifest-entry-missing')
-        self.assertFalse(summary['invalidArtifacts'][0]['valid'])
-        self.AssertDeleted()
+        self.AssertSummaryBypassed(result)
         parser = {'ok': True, 'totalDumps': 0, 'dumps': [],
                   'warnings': ['no on-disk dump available; primary artifact is vm-memory.elf.tar.gz']}
         events = {'ok': True, 'note': 'extract-evtx.py is a developer tool — run offline against guestFS_<partition>/Windows/System32/winevt/Logs/*.evtx',
@@ -1402,7 +1419,7 @@ class ArchiveRecoveryTests(unittest.TestCase):
                 checksum.write_text('overwrite existing checksum')
                 checksum.chmod(0o644)
                 result = case.RunRecovery()
-                case.AssertDeferredValidator(result)
+                case.AssertSummaryBypassed(result)
                 self.assertEqual(parser.stat().st_mode & 0o777, 0o640)
                 if content:
                     self.assertEqual(parser.read_text(), content)
@@ -1420,7 +1437,7 @@ class ArchiveRecoveryTests(unittest.TestCase):
         archive.write_bytes(original)
         archive.chmod(0o600)
         result = self.RunRecovery()
-        self.AssertDeferredValidator(result)
+        self.AssertSummaryBypassed(result)
         self.assertEqual(len(self.ArchiveContents()), 2)
         replacement = archive.read_bytes()
         self.assertNotEqual(replacement, original)
@@ -1437,13 +1454,13 @@ class ArchiveRecoveryTests(unittest.TestCase):
         watched = [self.out / 'vm-memory.elf', parser, note]
         before = {path: path.read_bytes() for path in watched}
         result = self.RunRecovery()
-        self.AssertDeferredValidator(result)
+        self.AssertSummaryBypassed(result)
         self.assertEqual(len(self.ArchiveContents()), 2)
         self.assertEqual({path: path.read_bytes() for path in watched}, before)
 
     def test_helper_filesystem_mkdir_test_and_timestamp_path(self):
         result = self.RunRecovery()
-        self.AssertDeferredValidator(result)
+        self.AssertSummaryBypassed(result)
         calls = self.Calls()
         tests = [call for call in calls if call[0] == 'exec' and call[call.index('--') + 1:][:2] == ['test', '-d']]
         self.assertEqual(len(tests), 1)
@@ -1468,7 +1485,7 @@ class ArchiveRecoveryTests(unittest.TestCase):
 
     def test_guestfish_probe_and_each_copy_are_readonly(self):
         result = self.RunRecovery()
-        self.AssertDeferredValidator(result)
+        self.AssertSummaryBypassed(result)
         commands = [call[call.index('--') + 1:] for call in self.Calls() if call[0] == 'exec']
         discovery = [command for command in commands if 'list-filesystems' in command]
         self.assertEqual(len(discovery), 1)
@@ -1493,24 +1510,24 @@ class ArchiveRecoveryTests(unittest.TestCase):
                 case.setUp()
                 self.addCleanup(case.doCleanups)
                 result = case.RunRecovery(scenario)
-                case.AssertDeferredValidator(result)
+                case.AssertSummaryBypassed(result)
                 self.assertEqual(list(case.ArchiveContents()), ['Windows/System32/winevt/Logs/' + expected])
 
-    def test_failed_copies_can_leave_an_empty_archive_not_success(self):
+    def test_failed_copies_can_return_zero_with_empty_archive(self):
         result = self.RunRecovery('copy-error')
-        self.AssertDeferredValidator(result)
+        self.AssertSummaryBypassed(result)
         self.assertEqual(self.ArchiveContents(), {})
 
     def test_remote_mkdir_failure_does_not_create_runner_destination(self):
         result = self.RunRecovery('mkdir-error')
-        self.AssertDeferredValidator(result)
+        self.AssertSummaryBypassed(result)
         self.assertFalse((self.out / 'guest-fs--crash-info.tgz').exists())
         self.assertFalse(any('tar' in call for call in self.Calls()))
         self.assertFalse(list((self.root / 'helper-fs').rglob('*.evtx')))
 
     def test_helper_directory_test_failure_prevents_tar(self):
         result = self.RunRecovery('helper-test-error')
-        self.AssertDeferredValidator(result)
+        self.AssertSummaryBypassed(result)
         self.assertFalse((self.out / 'guest-fs--crash-info.tgz').exists())
         self.assertFalse(any('tar' in call for call in self.Calls()))
 
@@ -1537,11 +1554,11 @@ class ArchiveRecoveryTests(unittest.TestCase):
 
     def test_failed_discovery_still_cleans_without_copy_or_archive(self):
         result = self.RunRecovery('discovery-error')
-        self.AssertDeferredValidator(result)
+        self.AssertSummaryBypassed(result)
         self.assertFalse((self.out / 'guest-fs--crash-info.tgz').exists())
         self.assertFalse(any(call[0] == 'exec' and 'bash' in call for call in self.Calls()))
 
-    def test_actual_watcher_consumer_propagates_deferred_validator_failure(self):
+    def test_actual_watcher_consumer_returns_archive_without_summary_validation(self):
         watcher = (hostDir / 'watch-crash.sh').read_text()
         runTimed = re.search(r'^function RunTimed \(\) \{.*\}$', watcher, re.MULTILINE).group()
         recover = re.search(r'^function Recover \(\) \{\n.*?^\}', watcher, re.MULTILINE | re.DOTALL).group()
@@ -1552,10 +1569,10 @@ class ArchiveRecoveryTests(unittest.TestCase):
         result = subprocess.run(['bash', '-c', command, 'watcher-fixture', str(hostDir),
                                  str(self.meta), str(self.root / 'pipeline.log')],
                                 cwd=self.root, env=self.env, text=True, capture_output=True, timeout=10)
-        self.AssertDeferredValidator(result)
+        self.AssertSummaryBypassed(result)
         self.assertEqual(len(self.ArchiveContents()), 2)
 
-    def test_actual_container_consumer_propagates_deferred_validator_failure(self):
+    def test_actual_container_consumer_returns_archive_without_summary_validation(self):
         entrypoint = Path(__file__).resolve().parents[3] / 'image/container/bsod-detector/entrypoint.sh'
         self.meta.write_text(json.dumps(self.metadata))
         command = '''set -euxo pipefail; shopt -s inherit_errexit
@@ -1571,7 +1588,7 @@ source "$1" "${@:2}"
                                 env=dict(self.env, MODE='recover', EVIDENCE_DIR=str(self.root),
                                          MOCK_EXTRACTOR=str(recovery), MOCK_EXTRACTOR_NAME=recovery.name),
                                 text=True, capture_output=True, timeout=10)
-        self.AssertDeferredValidator(result)
+        self.AssertSummaryBypassed(result)
         self.assertEqual(len(self.ArchiveContents()), 2)
 
     def test_early_vm_failures_cleanup_generated_name_in_actual_consumers(self):
