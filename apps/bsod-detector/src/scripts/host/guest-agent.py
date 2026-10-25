@@ -195,7 +195,7 @@ def guest_put(local, guestpath):
     handle = agent({"execute": "guest-file-open",
                     "arguments": {"path": guestpath, "mode": "wb"}}, timeout=300)
     try:
-        CH = 512 * 1024  # 512KB chunks (base64 ~683KB; stays within oc exec ARG_MAX)
+        CH = 64 * 1024  # 64KB chunks (base64 ~85KB; stays within oc exec ARG_MAX on restricted clusters)
         for i in range(0, len(data), CH):
             chunk = base64.b64encode(data[i:i + CH]).decode()
             agent({"execute": "guest-file-write",

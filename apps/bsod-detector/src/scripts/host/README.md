@@ -2,6 +2,8 @@
 
 Scripts that run on the orchestration host (CI operator machine or laptop).
 
+Current extraction contract: `extract--guest-os--crash-info.sh --metadata METADATA.json` reads the shared output directory from metadata and streams `guest-fs--crash-info.tgz`; it does not retain loose EVTX or extract dumps. Its final reliability summary call remains commented out, and EXIT cleanup runs once. Historical extraction/validator descriptions below do not imply those deferred features are enabled.
+
 These scripts manage the full BSOD detection and artifact extraction pipeline orchestrated from outside the Kubernetes cluster.
 
 ---
@@ -82,8 +84,8 @@ These scripts manage the full BSOD detection and artifact extraction pipeline or
 | `BSOD_DET__SNAPSHOT__CLASS` | No | Storage snapshot class |
 | `BSOD_DET__MEMORY__DUMP_PVC` | No | Memory dump PVC name |
 | `BSOD_DET__READY__TIMEOUT` | No | Watcher readiness timeout (default: 300s) |
-| `BSOD_DET__PREFLIGHT__TIMEOUT` | No | Positive-integer validation only; trigger script currently uses a fixed 1800s preflight timeout |
-| `BSOD_RECOVERY_IMAGE` | No | Digest-pinned guestfs image |
+| `BSOD_DET__PREFLIGHT__TIMEOUT` | No | Preflight timeout (default: 300s) |
+| `BSOD_DET__RECOVERY__IMAGE` | No | Digest-pinned guestfs image |
 
 **Example**:
 ```bash
@@ -136,7 +138,8 @@ virtctl memory-dump remove
 ```
 bsod-screenshot.png          (VNC screenshot at crash)
 vm-memory.elf.tar.gz         (primary memory artifact ~1.5GB compressed)
-domain.xml                   (libvirt domain configuration at crash)
+domain-bsod.xml              (libvirt domain XML captured at crash moment — state=crashed/paused)
+domain.xml                   (pre-crash backup captured in Phase 2b)
 host-signals.json            (host diagnostics)
 launcher-compute.log         (KVM launcher logs)
 parse-dump-header.json       (bugcheck code stub — elf2dmp disabled)
@@ -160,7 +163,7 @@ evidence-summary.json        (final pipeline verdict)
 - Recovery image must be digest-pinned (`@sha256:[64 hex chars]`)
 - Evidence volume kind must be `pvc`, `network`, or `csi` (hostPath/emptyDir forbidden)
 - Evidence storage ID must be stable (alphanumeric + safe chars)
-- Snapshot class, memory dump PVC both required
+- Snapshot class required; memory dump PVC is **auto-created if missing**
 - `BSOD_DET__COMMAND__TIMEOUT` must be a positive integer
 
 **2. Helper scripts present**
@@ -180,7 +183,11 @@ evidence-summary.json        (final pipeline verdict)
 - VM `runStrategy` must be `Manual` (not `Always` — would auto-restart after BSOD)
 - Exactly one running `virt-launcher` pod must exist for the VM
 - Guest PVC must be `Block` mode with storage class and size (required for snapshot recovery)
-- Memory dump PVC must be `Bound`, `Filesystem` mode, and different from the guest PVC
+- **Memory dump PVC auto-creation**: If the named memory-dump PVC doesn't exist, preflight creates it with:
+  - Size: **same as guest disk PVC** (dynamically detected)
+  - Storage class: **same as guest disk PVC** (dynamically detected)
+  - Access mode: `ReadWriteOnce`, `Filesystem` mode
+  - Waits up to 120 seconds for the new PVC to bind before continuing
 - Snapshot class driver must match the guest PVC provisioner
 
 **5. Recovery image capability probe**
@@ -231,20 +238,19 @@ Writes all collected VM/storage/config data needed by downstream scripts.
 
 **Purpose**: Offline NTFS artifact extraction from stopped VM disk.
 
-**Usage**: `extract--guest-os--crash-info.sh --metadata PRE_STOP_METADATA.json`.
+**Usage**: `extract--guest-os--crash-info.sh --metadata METADATA.json`.
 Optionally export `BSOD_DET__GUEST_FS__CTR_IMG` before running the extractor, watcher or container. The extractor uses the value directly; unset or empty uses `quay.io/konveyor/oadp-vmfr-access:latest`. The legacy image environment variable is not consulted.
 Run it as an executable, as the watcher and container entrypoint do; it is not a sourceable shell library.
 The output directory comes only from metadata `.outputDir`; there is no extractor `--out` option.
 The extractor preserves the provided path spelling and accepts existing directory aliases and arbitrary directory names.
-Metadata `.runId` is retained in the extraction summary, independently of the output directory name.
-Stale-output scanning follows a command-line directory alias, not symlinks encountered below it.
+Metadata `.runId` is read independently of the output directory name. Existing extraction artifacts do not trigger a stale-output rejection.
 The extractor needs only `runId`, `outputDir`, `namespace`, `vm` and `guestPvc` metadata fields.
 It preserves and validates a watcher-produced dump-parser result, or writes the existing no-dump stub; on-disk dump extraction remains disabled.
-It rejects stale extraction artifacts, but does not revalidate evidence-mount identity or preflight-only storage/image fields.
+It does not revalidate evidence-mount identity or preflight-only storage/image fields.
 Preflight's persistent-storage validation is unchanged; extraction no longer checks whether that mount changed afterwards.
 Container `MODE=recover` takes the same metadata-only arguments; watcher/preflight and archived `MODE=extract` retain their own `--out` options.
-Extraction inherits stdout/stderr (captured in `watcher.log` when called by the watcher); it creates no `extraction.log` or stage-error entries. Summary generation still reads an existing watcher-owned `stage-errors.jsonl`, without creating or modifying it.
-Cleanup takes a required nonempty pod-name argument, uses native `oc delete --ignore-not-found` with its default wait behavior, then `oc wait --for=delete --timeout=60s`. Successful extraction calls `Cleanup "${helperPod}"` directly before summary generation and again through `trap 'Cleanup "${helperPod}"' EXIT`; there is no ownership flag or custom INT/TERM trap. The supplied `${1:?}` rejects an empty helper name on early EXIT before any cleanup API call; it can replace an earlier status (malformed VM JSON changes from 5 to 1). A main cleanup failure stops summary generation and remains a failure even when EXIT cleanup retries successfully. Native cleanup errors can replace an earlier exit status, and custom signal-status guarantees no longer apply.
+Extraction inherits stdout/stderr (captured in `watcher.log` when called by the watcher); it creates no `extraction.log` or stage-error entries. The final summary invocation is commented out pending the Python refactor; pre-existing summary and stage-error files are not revalidated or modified.
+Cleanup takes a required nonempty pod-name argument, uses native `oc delete --ignore-not-found` with its default wait behavior, then `oc wait --for=delete --timeout=60s`. The helper name is initialized before `trap 'Cleanup "${helperPod}"' EXIT`, which performs the only cleanup attempt; no main-path retry, ownership flag or custom INT/TERM trap is added. Native cleanup errors can replace an earlier exit status. A transient delete failure can leave the helper present because cleanup is not retried.
 
 **Responsibilities**:
 - Validate output path and preflight metadata integrity
@@ -252,7 +258,7 @@ Cleanup takes a required nonempty pod-name argument, uses native `oc delete --ig
 - Create a `guest-fs--ntfs--<epoch>-<pid>` helper using `BSOD_DET__GUEST_FS__CTR_IMG` directly, defaulting unset or empty to `quay.io/konveyor/oadp-vmfr-access:latest` (no legacy environment fallback), with `force_kvm`: request/limit one `devices.kubevirt.io/kvm` device. The initial budget requests 512Mi memory and 500m CPU, with limits of 2Gi memory and 2000m CPU; adequacy has not been measured. The supplied Pod template has no node selector or fsGroup; it uses `/bin/bash -c` with `args: [exec tail -f /dev/null]`, the `vm-disk` read-only PVC and `guest-fs--tmp`/`guest-fs--home` emptyDirs. A quoted static YAML template passes through `oc create --dry-run=client -o json --save-config`, then `jq --arg` injects only pod name, namespace, container name, image and PVC. The container name and image are blank in the template; nested jq updates set the name from `helperPodCtr` (normally `libguestfs`) and image together. The client accepts blank container-name/image/PVC placeholders and fills the blank namespace from local context; marshalling overwrites it. The original YAML has no annotations. Client `--save-config` generates a last-applied annotation; grouped jq updates preserve it unchanged in the raw apply input, including its template placeholders. This is not a claim about server-side final annotations; no `yq` is required. Rendering the same inputs yields the same payload, not whole-script idempotence.
 - Recovery tests require the real `oc` client on `PATH` for offline YAML-to-JSON generation; API operations and apply remain mocked. Generation/marshalling failures stop subsequent helper execution under `pipefail`; apply is a concurrent pipeline stage, not a transactional producer-status gate.
 - Wait once for the helper's Ready condition with native `oc wait --timeout=180s`, discarding stdout; no extractor `--request-timeout` or added process deadline is used. A failed wait stops before helper execution and triggers cleanup. Cleanup retains its supplied 60-second deletion wait.
-- Discover filesystems once through `FindNTFS "${helperPod}" "${helperPodCtr}"`, whose required arguments select the pod/container independently of the caller's variables. Its process-substitution status remains unchecked: failed/empty discovery can reach placeholder artifacts and a failed summary; partial valid producer output can still trigger extraction despite the producer failure.
+- Discover filesystems once through `FindNTFS "${helperPod}" "${helperPodCtr}"`, whose required arguments select the pod/container independently of the caller's variables. Its process-substitution status remains unchecked: failed/empty discovery can reach placeholder artifacts and return zero without the deferred summary gate; partial valid producer output can still trigger extraction despite the producer failure.
 - Probe each NTFS partition with readonly `guestfish -ra /dev/vda ... mount-ro ... ls /Windows`; failed probes continue to the next partition. `set-program virt-sh` sets an informative name, not a different executable.
 - Copy System.evtx and Application.evtx independently with helper-side Bash `mkdir -p` and readonly guestfish `copy-out`; a failed file does not prevent attempting the other. Each copy starts a separate guestfish session. The required `exec -a` replaces Bash, so the supplied final `true` is not reached after a successful exec.
 - Test `/tmp/bsod--guest-files--<epoch>/` inside the helper, then stream helper `tar zc` to runner `guest-fs--crash-info.tgz` and stop scanning partitions. The temporary name has no PID suffix. Directory existence does not prove any file copied: both failed copies can leave an empty archive. Tar failure can leave partial archive bytes on the runner; no transactional cleanup is claimed.
@@ -275,11 +281,10 @@ extraction-summary.json  (artifact inventory and validation)
 
 **Why no EventLogs/ symlink**: `.evtx` files are directly accessible under `guestFS_<partition>/Windows/System32/winevt/Logs/`. The archived parser is at `../../../archieve/src/scripts/host/extract-evtx.py`; its lookup files are maintained in `../../../src/data`.
 
-**Platform limitations (KVM + VirtIO Balloon)**:
-- `pagefile.sys` cannot be reliably created — Windows Server 2022 lazy pagefile allocation + balloon driver
-- `MEMORY.DMP` (on-disk): Not produced — `AutoReboot=0` prevents the boot that copies DedicatedDump.sys → MEMORY.DMP
-- `Minidump`: Not produced — requires pagefile which cannot be created
-- Intended primary memory artifact is `vm-memory.elf.tar.gz` from KubeVirt; capture depends on successful dump, PVC, export, and download stages.
+**Platform limitations (KVM + VirtIO)**:
+- `MEMORY.DMP` / `Minidump`: viostor (virtio-blk) and vioscsi (virtio-scsi) both fail in crash dump miniport mode — `StorPortGetUncachedExtension` returns error, no bytes written (viostor issue [#1629](https://github.com/virtio-win/kvm-guest-drivers-windows/issues/1629)). SATA (storahci.sys — inbox driver) is expected to work.
+- `pagefile.sys` IS pre-created in golden image (4GB via fsutil) — Minidump infrastructure is ready; currently blocked only by the StorPort VirtIO limitation above.
+- Invalid MEMORY.DMP (zero-filled) does NOT flip `ok=false` — only required artifact types affect the pipeline verdict. `vm-memory.elf.tar.gz` is always the primary dump artifact.
 
 **Environment Variables**:
 
@@ -565,7 +570,8 @@ All variables follow Red Hat Chaos Team naming: `BSOD_DET__[<COMPONENT>__]<NAME>
 ```
 bsod-screenshot.png           BSOD screenshot at crash
 vm-memory.elf.tar.gz          Primary memory artifact (~1.5GB compressed)
-domain.xml                    Libvirt domain config at crash
+domain-bsod.xml               Libvirt domain XML captured at crash moment (state=crashed/paused)
+domain.xml                    Pre-crash backup from Phase 2b
 host-signals.json             Host KVM diagnostics
 launcher-compute.log          virt-launcher pod logs
 parse-dump-header.json        Bugcheck code (elf2dmp disabled by default)

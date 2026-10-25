@@ -36,7 +36,7 @@ BSOD_DET__CONFIRM_TARGET="win2022-vm-hjoshi1" \
 | `BSOD_DET__EVIDENCE__DIR` | No | Evidence root (default: `/mnt/persistent-bsod-evidence`) |
 | `BSOD_DET__SNAPSHOT__CLASS` | No | Storage snapshot class |
 | `BSOD_DET__MEMORY__DUMP_PVC` | No | Memory dump PVC name |
-| `BSOD_RECOVERY_IMAGE` | No | Digest-pinned guestfs recovery image |
+| `BSOD_DET__RECOVERY__IMAGE` | No | Digest-pinned guestfs recovery image |
 | `BSOD_DET__READY__TIMEOUT` | No | Watcher readiness timeout in seconds (default: 300) |
 | `BSOD_DET__PREFLIGHT__TIMEOUT` | No | Currently validated as a positive integer; the preflight invocation uses a fixed 1800-second timeout |
 
@@ -71,8 +71,9 @@ The table below shows what each file is, who writes it, and at which pipeline ph
 | `watcher-ready` | 42 B | Pre-BSOD | `watch-crash.sh` | Run ID marker — written when watcher is armed and watching |
 | `recovery-metadata.json` | ~1.3 KB | Pre-BSOD | `preflight-rhov.sh` | VM name, namespace, PVC names, storage class, snapshot class, recovery image digest, armed epoch, pre-crash dump inventory |
 | `bsod-screenshot.png` | ~37 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `virtctl vnc` | VNC screenshot of the Windows blue screen at crash moment |
-| `vm-memory.elf.tar.gz` | ~800 MB–1.4 GB | At BSOD (VM still frozen) | `watch-crash.sh` → `virtctl memory-dump` | **Primary dump artifact.** Full physical RAM snapshot in ELF ET_CORE format, streamed from KubeVirt via HTTP export. Contains full Windows memory: kernel, drivers, user processes, page tables. Developer converts offline with `elf2dmp` for WinDbg/Volatility |
-| `domain.xml` | ~14 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `virsh dumpxml` inside virt-launcher pod | Complete libvirt XML domain definition at crash time — CPU topology, memory, all attached disks, network interfaces, QEMU devices. Richer than `oc get vmi -o yaml` as it reflects actual QEMU runtime state |
+| `vm-memory.elf.tar.gz` | ~800 MB–2.3 GB | At BSOD (VM still frozen) | `watch-crash.sh` → `virtctl memory-dump` | **Primary dump artifact.** Full physical RAM snapshot in ELF ET_CORE format, streamed from KubeVirt via HTTP export. Contains full Windows memory: kernel, drivers, user processes, page tables. Developer converts offline with `elf2dmp` for WinDbg/Volatility |
+| `domain-bsod.xml` | ~14 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `virsh dumpxml` | libvirt domain XML captured **at crash detection time** (state=crashed/paused). Primary XML artifact for forensics. |
+| `domain.xml` | ~14 KB | Pre-BSOD (Phase 2b) | `watch-crash.sh` → `virsh dumpxml` | Pre-crash backup domain XML. Fallback if crash-time capture fails. |
 | `launcher-compute.log` | ~100–200 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `oc logs` on virt-launcher pod | Raw KVM/QEMU compute container logs — hypervisor events, device errors, split-lock traps, memory balloon events, KVM internal errors |
 | `host-signals.json` | ~1.3 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `collect-host-signals.sh` | Parsed summary of `launcher-compute.log` — split-lock trap count, KVM internal error count, Hyper-V feature states (tlbflush/ipi/vapic/spinlocks/synictimer), risk assessment |
 | `parse-dump-header.json` | ~146 B | After VM stopped | `extract--guest-os--crash-info.sh` | Bugcheck code + parameters extracted from dump header. **Stub** when elf2dmp is disabled (no on-disk MEMORY.DMP on KVM). Run `parse-dump-header.sh` offline against elf2dmp output |
@@ -120,9 +121,10 @@ Pipeline start
             → watcher.log               (written throughout)
 ```
 
-**What is NOT captured (platform limitations)**:
-- `MEMORY.DMP` — `AutoReboot=0` prevents the reboot that copies DedicatedDump.sys → MEMORY.DMP
-- `Minidump/` — Requires pagefile.sys which Windows Server 2022 on KVM does not create
+**Crash dump artifacts (platform-dependent)**:
+- `MEMORY.DMP` — Extracted from DedicatedDump.sys via guestfish stdout streaming. Zero-filled on VirtIO (viostor/vioscsi) due to StorPort crash dump miniport limitation ([#1629](https://github.com/virtio-win/kvm-guest-drivers-windows/issues/1629)). Expected to work on SATA (storahci.sys). Invalid MEMORY.DMP does NOT cause `ok=false`.
+- `Minidump/` — Directory always created. Files present if pagefile.sys was active and driver supports crash dumps. pagefile.sys IS pre-created (4GB) in the golden image.
+- `MEMORY.DMP` workaround — Use `vm-memory.elf.tar.gz` (always captured) + `elf2dmp` offline for equivalent forensic data.
 - `vm-memory-windows.dmp` — elf2dmp conversion disabled (17GB, developer runs offline)
 - Volatility outputs — Developer tool, run offline against vm-memory.elf.tar.gz
 

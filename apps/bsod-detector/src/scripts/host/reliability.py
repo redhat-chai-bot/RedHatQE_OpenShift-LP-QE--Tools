@@ -481,7 +481,11 @@ def write_summary(args: argparse.Namespace) -> None:
     for filename in sorted(REQUIRED_RESULT_FILES.get(args.mode, set())):
         if filename not in artifact_paths:
             missing.append(f"json:{filename}")
-    ok = not stage_errors and not invalid and not missing
+    # Only fail on invalid required-type artifacts. Invalid supplementary artifacts (e.g. MEMORY.DMP
+    # type="dump" which is blocked by viostor #1629) are still reported in invalidArtifacts for
+    # visibility but do not flip ok — vm-memory.elf.tar.gz is the authoritative memory artifact.
+    invalid_required = [a for a in invalid if a["type"] in (required or set())]
+    ok = not stage_errors and not invalid_required and not missing
     summary = {
         "ok": ok,
         "mode": args.mode,

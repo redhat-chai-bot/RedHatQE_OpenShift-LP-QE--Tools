@@ -1,7 +1,6 @@
 # BSOD Detector
 
-Detect, capture, and analyze Blue Screen of Death (BSOD) events on Windows VMs
-running under KubeVirt / OpenShift Virtualization (RHOV).
+Detect, capture, and analyze Blue Screen of Death (BSOD) events on Windows VMs running under KubeVirt / OpenShift Virtualization (RHOV).
 
 ---
 
@@ -713,19 +712,18 @@ capabilities:
 ## Quick Start
 
 ```bash
-# 1. Set targets explicitly (no defaults — prevents wrong-VM targeting)
-export BSOD_DET__VM__NAME=win2022-vm-hjoshi1
-export BSOD_DET__NAMESPACE=windows-bsod
+export BSOD_DET__VM__NAME=<your-vm-name>
+export BSOD_DET__NAMESPACE=<your-namespace>
+export BSOD_DET__CONFIRM_TARGET=<your-vm-name>
+export BSOD_DET__RECOVERY__IMAGE="quay.io/konveyor/oadp-vmfr-access:latest@sha256:<digest>"
 
-# 2. Run pipeline
-./src/scripts/crash-injector/trigger-bsod-intentional.sh 0x01
+# Get current digest:
+# skopeo inspect docker://quay.io/konveyor/oadp-vmfr-access:latest | jq -r '.Digest'
 
-# 3. Check result
-run=$(ls -t /mnt/persistent-bsod-evidence/ | head -1)
-cat /mnt/persistent-bsod-evidence/$run/evidence-summary.json | jq '{ok,stageErrors}'
+bash src/scripts/crash-injector/trigger-bsod-intentional.sh 0x01
 ```
 
-**Diagnosing failures**:
+Check result:
 ```bash
 run=/path/to/run
 cat $run/stage-errors.jsonl | jq .
@@ -736,46 +734,90 @@ tail -30 $run/watcher.log
 
 ---
 
-## Golden Image Requirements
+## Architecture
 
-The Windows VM image must be pre-configured before pipeline use (one reboot required after applying):
-
-```powershell
-# Run as Administrator before sealing the image
-$cc = 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl'
-Set-ItemProperty $cc CrashDumpEnabled    7                          -Type DWord  # Automatic
-Set-ItemProperty $cc AutoReboot          0                          -Type DWord  # Stay frozen
-Set-ItemProperty $cc AlwaysKeepMemoryDump 1                         -Type DWord
-Set-ItemProperty $cc DedicatedDumpFile   'C:\DedicatedDump.sys'     -Type ExpandString
-
-# Pre-allocate DedicatedDump.sys (RAM + 1MB)
-$size = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory + 1MB
-fsutil file createnew C:\DedicatedDump.sys $size
-
-# Disable automatic pagefile (VirtIO Balloon blocks it on KVM anyway)
-$cs = Get-CimInstance Win32_ComputerSystem
-Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $false }
 ```
-
-Then reboot once: `virtctl stop <vm> -n <ns> && virtctl start <vm> -n <ns>`
+trigger-bsod-intentional.sh
+  │
+  ├── Phase 1a: Pre-cleanup — delete stale DVs/PVCs from previous failed runs
+  ├── Phase 1b: Validate notmyfaultc64.exe binary exists on host
+  ├── Phase 2:  preflight-rhov.sh
+  │               ├── Auto-create memory-dump PVC if missing
+  │               ├── Auto-create evidence PVC if missing
+  │               ├── QGA ping (5 retries)
+  │               ├── Crash dump registry validation (rebootRequired=false)
+  │               └── Write recovery-metadata.json
+  ├── Phase 2b: Add pvpanic device via QMP + pre-capture domain.xml + vmi-spec.json
+  ├── Phase 2c: Upload notmyfaultc64.exe to VM via QGA
+  ├── Phase 3:  Guest cleanup — remove stale MEMORY.DMP and Minidump files
+  ├── Phase 4:  watch-crash.sh (background)
+  │               ├── Poll QGA every 5s → BSOD detected
+  │               ├── Capture domain-bsod.xml at crash moment (always overwrites)
+  │               ├── CaptureMemory → vm-memory.elf.tar.gz (progress-monitored)
+  │               ├── CaptureScreenshot, CaptureHostSignals
+  │               ├── WaitDumpMonitor (disk write quiescence)
+  │               ├── StopVM
+  │               ├── extract--guest-os--crash-info.sh (metadata-only offline NTFS archive)
+  │               └── RestartVM → evidence-summary.json
+  ├── Phase 5:  Wait for watcher readiness
+  ├── Phase 6:  Inject BSOD via notmyfaultc64.exe /crash <type>
+  └── Phase 7:  Delete memory-dump and evidence PVCs (auto-recreated on next run)
+```
 
 ---
 
-## Developer Tools (Run Offline)
+## Evidence Artifacts
+
+Every pipeline run produces a timestamped directory under `/mnt/persistent-bsod-evidence/`:
+
+| File | Size | Phase | Description |
+|---|---|---|---|
+| `recovery-metadata.json` | ~1.2 KB | Pre-BSOD | VM name, namespace, PVC names, storage class, recovery image digest, armed epoch |
+| `watcher-ready` | 42 B | Pre-BSOD | Arming marker — written when watcher begins polling |
+| `vmi-spec.json` | ~13 KB | Pre-BSOD | KubeVirt VMI spec via `oc get vmi -o json` — available even when virt-launcher pod is Failed |
+| `domain.xml` | ~13 KB | Pre-BSOD | Pre-crash domain XML backup captured before injection |
+| `bsod-screenshot.png` | ~16 KB | At BSOD | VNC screenshot of the Windows blue screen |
+| `vm-memory.elf.tar.gz` | 1.5–2.5 GB | At BSOD | **Primary dump artifact.** Full physical RAM in ELF ET_CORE format via KubeVirt. Always works — captured at hypervisor level, independent of Windows pagefile state |
+| `domain-bsod.xml` | ~13 KB | At BSOD | Libvirt domain XML captured at crash detection time (state=crashed/paused) |
+| `launcher-compute.log` | 100–400 KB | At BSOD | Raw QEMU/KVM compute container logs |
+| `host-signals.json` | ~1.3 KB | At BSOD | Parsed KVM signals — split-lock traps, KVM errors, Hyper-V feature states |
+| `guest-fs--crash-info.tgz` | varies | After stop | Archive containing independently copied System.evtx and Application.evtx; no loose EVTX or automatic unpacking |
+| `parse-dump-header.json` | varies | After stop | Existing nonempty result reused, otherwise a no-dump stub; this extractor does not extract MEMORY.DMP or Minidump |
+| `events.json` | varies | After stop | Placeholder JSON; event parsing remains deferred |
+| `checksums.sha256` | varies | After stop | SHA-256 manifest with the extractor's existing exclusions |
+| `stage-errors.jsonl` | 0 B (success) | Throughout | One JSON line per stage failure. Empty on clean run |
+| `evidence-summary.json` | ~3 KB | End | Final pipeline verdict — `ok: true/false`, artifact inventory, stage errors |
+| `watcher.log` | 500 KB–1 MB | Throughout | Full timestamped execution trace |
+
+NTFS partitions are discovered dynamically. The extractor consumes only `--metadata METADATA.json`; `outputDir` comes from that file. Its final summary validator remains commented out pending the Python refactor: no fresh `extraction-summary.json` is produced, and exit zero is not proof of a complete archive. The watcher summary validator remains unchanged and can reject archive-only output.
+
+---
+
+## Platform Constraints — MEMORY.DMP and Minidump
+
+Windows crash dump miniport mode calls `StorPortGetUncachedExtension` to allocate DMA buffers. On KVM/VirtIO this call returns `SP_RETURN_ERROR` — no bytes are written to `DedicatedDump.sys`. This affects all VirtIO storage drivers on this platform ([virtio-win issue #1629](https://github.com/virtio-win/kvm-guest-drivers-windows/issues/1629)).
+
+The reviewed offline extractor does not extract `MEMORY.DMP`, `DedicatedDump.sys`, or `Minidump/`; incoming dump-streaming functionality is not enabled by this merge.
+
+**Primary artifact:** `vm-memory.elf.tar.gz` (hypervisor-level ELF dump) is always captured and provides equivalent forensic data. Convert offline with `elf2dmp` for WinDbg/Volatility.
+
+---
+
+## Offline Analysis (Developer Tools)
 
 These are **not called by the pipeline** — run manually on captured artifacts. The EVTX parser is archived; it is not shipped in the active script tree.
 
 ```bash
-# Convert ELF → Windows DMP for WinDbg
-inner_file=$(tar -tzf vm-memory.elf.tar.gz | grep -i '\.memory\.dump$' | head -1)
-tar -xzf vm-memory.elf.tar.gz -O "$inner_file" > memory.dump
-elf2dmp memory.dump vm-memory-windows.dmp
+# Convert ELF → Windows DMP for WinDbg / Volatility
+tar -xzf vm-memory.elf.tar.gz
+elf2dmp [inner-elf-file] memory-windows.dmp
 
 # Volatility3 analysis
-vol -f vm-memory-windows.dmp windows.info.Info
-vol -f vm-memory-windows.dmp windows.crashinfo.CrashInfo
+vol -f memory-windows.dmp windows.info.Info
+vol -f memory-windows.dmp windows.crashinfo.CrashInfo
+vol -f memory-windows.dmp windows.driverscan.DriverScan
 
-# Parse EventLogs → JSON crash detection
+# Parse Windows EventLogs → JSON (crash detection)
 pip install python-evtx
 run_dir=/path/to/run
 python3 apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py \
@@ -785,8 +827,20 @@ python3 apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py \
 
 ---
 
-## Directory Structure
+## Golden Image Setup
 
+Run these scripts inside the VM **before sealing the image**. One reboot required.
+
+```powershell
+# Step 1: Pre-reboot setup (run as Administrator — auto-reboots at end)
+# Installs: QGA, viostor, vioscsi, pvpanic drivers from virtio-win ISO
+# Configures: recovery disable, crash dump registry,
+#             DedicatedDump.sys (RAM + 1MB), pagefile.sys (4GB)
+.\src\scripts\guest\golden-image-pre-reboot.ps1
+
+# Step 2: Post-reboot verification (run as Administrator)
+# Verifies 9 checks — all must pass before sealing
+.\src\scripts\guest\golden-image-post-reboot.ps1
 ```
 apps/bsod-detector/
 ├── README.md (this file)
@@ -816,16 +870,17 @@ apps/bsod-detector/
     └── ...                                    # Unit tests
 ```
 
+**Driver compatibility:** All three storage drivers (viostor, vioscsi, storahci) are installed in the image. Windows PnP activates only the one matching the hardware presented at boot — installing all three has no impact on VM operations.
+
 ---
 
 ## Environment Variables
 
-All variables use `BSOD_DET__` prefix (Red Hat Chaos Team convention):
-
-| Variable | Required | Default | Purpose |
+| Variable | Required | Default | Description |
 |---|---|---|---|
-| `BSOD_DET__VM__NAME` | **Yes** | none | Target VM — must be explicit |
-| `BSOD_DET__NAMESPACE` | **Yes** | none | Kubernetes namespace — must be explicit |
+| `BSOD_DET__VM__NAME` | **Yes** | — | Target VM name — no default |
+| `BSOD_DET__NAMESPACE` | **Yes** | — | Kubernetes namespace — no default |
+| `BSOD_DET__CONFIRM_TARGET` | **Yes** | — | Must equal `BSOD_DET__VM__NAME` — authorization guard against wrong-VM crashes |
 | `BSOD_DET__EVIDENCE__DIR` | No | `/mnt/persistent-bsod-evidence` | Evidence storage root |
 | `BSOD_DET__SNAPSHOT__CLASS` | No | — | Storage snapshot class |
 | `BSOD_DET__MEMORY__DUMP_PVC` | No | — | Memory dump PVC name |
