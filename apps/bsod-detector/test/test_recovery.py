@@ -1328,7 +1328,7 @@ class ArchiveRecoveryTests(unittest.TestCase):
 
     def AssertDeleted(self, waitCount=None, count=None):
         if count is None:
-            count = 2 if (self.out / 'checksums.sha256').exists() else 1
+            count = 1
         RecoveryTests.AssertDeleted(self, waitCount=waitCount, count=count)
 
     def ArchiveContents(self):
@@ -1374,7 +1374,7 @@ class ArchiveRecoveryTests(unittest.TestCase):
         self.assertFalse((self.root / 'reliability-invoked').exists())
         self.assertEqual({path: path.read_bytes() for path in before}, before)
         self.assertEqual(len(self.ArchiveContents()), 2)
-        self.AssertDeleted(count=2)
+        self.AssertDeleted(count=1)
 
     def test_json_stubs_and_checksum_manifest_contents(self):
         (self.out / 'extra data.dat').write_bytes(b'include this file')
@@ -1539,7 +1539,8 @@ class ArchiveRecoveryTests(unittest.TestCase):
         self.AssertDeleted()
 
     def test_native_wait_apply_and_cleanup_failures_remain_nonzero(self):
-        for scenario, expected in (('wait-error', 19), ('apply-error', 18), ('cleanup-error', 25), ('cleanup-wait-error', 28)):
+        for scenario, expected in (('wait-error', 19), ('apply-error', 18), ('cleanup-error', 25), ('cleanup-wait-error', 28),
+                                   ('transient-delete', 25), ('transient-wait', 28)):
             with self.subTest(scenario=scenario):
                 case = ArchiveRecoveryTests('test_archive_contains_only_requested_files_and_validator_remains_deferred')
                 case.setUp()
@@ -1547,7 +1548,7 @@ class ArchiveRecoveryTests(unittest.TestCase):
                 result = case.RunRecovery(scenario)
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertFalse((case.out / 'extraction-summary.json').exists())
-                self.assertTrue(any(call[0] == 'delete' for call in case.Calls()))
+                case.AssertDeleted(count=1, waitCount=0 if scenario in ('cleanup-error', 'transient-delete') else 1)
                 if scenario in ('wait-error', 'apply-error'):
                     self.assertFalse(any(call[0] == 'exec' for call in case.Calls()))
                     self.assertFalse((case.out / 'guest-fs--crash-info.tgz').exists())
