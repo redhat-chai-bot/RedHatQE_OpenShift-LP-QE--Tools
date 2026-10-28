@@ -23,7 +23,7 @@ done
 }
 
 typeset tool=''
-for tool in oc jq python3 sha256sum timeout; do
+for tool in oc jq; do
     command -v "${tool}" 1> /dev/null || {
         : "Required tool missing: ${tool}"
         false
@@ -201,10 +201,10 @@ oc -n "${ns}" wait "pod/${helperPod}" \
     --for=condition=Ready \
     --timeout=180s 1> /dev/null
 
-typeset -a srcArr=(
-#   '/DedicatedDump.sys'
-    '/Windows/System32/winevt/Logs/System.evtx'
-    '/Windows/System32/winevt/Logs/Application.evtx'
+typeset -A fileArr=(
+    [/pagefile.sys]='/MEMORY.DMP'
+    [/Windows/System32/winevt/Logs/System.evtx]=''
+    [/Windows/System32/winevt/Logs/Application.evtx]=''
 )
 typeset ntfsPart=''
 while IFS= read -r ntfsPart; do
@@ -226,8 +226,12 @@ while IFS= read -r ntfsPart; do
             : umount-all ||
         continue
     }
-    for src in "${srcArr[@]}"; do
-        dst="${podTmp}/${src%/*}"
+    for src in "${!fileArr[@]}"; do
+        dst="${fileArr[${src}]:-${src}}"
+        src="/${src#/}"
+        while [[ "${src}" == */ ]]; do src="${src%/}"; done
+        dst="${podTmp}/${dst#/}"
+        while [[ "${dst}" == */ ]]; do dst="${dst%/}"; done
         {
             oc -n "${ns}" exec "pod/${helperPod}" \
                 -c "${helperPodCtr}" \
@@ -237,13 +241,17 @@ while IFS= read -r ntfsPart; do
                     typeset src="${1:?}"; (($#)) && shift
                     typeset dst="${1:?}"; (($#)) && shift
 
-                    mkdir -p "${dst}"
-                    exec -a virt-sh guestfish \
-                        -ra /dev/vda \
-                        run \
-                        : mount-ro "${ntfsPart}" / \
-                        : copy-out "${src}" "${dst}" \
-                        : umount-all
+                    mkdir -p "${dst%/*}"
+                    (
+                        exec -a virt-sh guestfish \
+                            -ra /dev/vda \
+                            run \
+                            : mount-ro "${ntfsPart}" / \
+                            : copy-out "${src}" "${dst%/*}" \
+                            : umount-all
+                    )
+                    [ "${src##*/}" = "${dst##*/}" ] ||
+                    mv -T -- "${dst%/*}/${src##*/}" "${dst}"
 
                     true
                 ' '' "${ntfsPart}" "${src}" "${dst}" ||
@@ -261,42 +269,13 @@ while IFS= read -r ntfsPart; do
                 -c "${helperPodCtr}" \
                 -- \
                 tar zc -C "${podTmp}/" ./ \
-                1> "${outDir}/guest-fs--crash-info.tgz"
+                1> "${outDir}/guest-fs--crash-info--${ntfsPart##*/}.tgz"
             break
         }
     }
 done 0< <(FindNTFS "${helperPod}" "${helperPodCtr}")
 
-typeset jsonFile=''
-jsonFile="${outDir}/parse-dump-header.json"
-if [ ! -s "${jsonFile}" ]; then
-    jq -n '
-        {"ok":true,"totalDumps":0,"dumps":[],"warnings":["no on-disk dump available; primary artifact is vm-memory.elf.tar.gz"]}
-    ' 1> "${jsonFile}"
-fi
-jq -e '.ok == true' "${jsonFile}" 1> /dev/null
-jq -n '
-    {"ok":true,"note":"extract-evtx.py is a developer tool — run offline against guestFS_<partition>/Windows/System32/winevt/Logs/*.evtx","events":[]}
-' 1> "${outDir}/events.json"
-
-(
-    cd "${outDir}"
-    # Canonical relative paths; logs/errors/summaries can still change during cleanup.
-    find . \
-        \( -type f -o -type l \) \
-        ! -name '*.tmp' \
-        ! -name '*.log' \
-        ! -name stage-errors.jsonl \
-        ! -name '*-summary.json' \
-        ! -name checksums.sha256 \
-        -print0 |
-    sort -z |
-    xargs -0 sha256sum |
-    sed 's|  \./|  |' \
-    1> checksums.sha256.tmp
-    mv -f checksums.sha256.tmp checksums.sha256
-    true
-)
+# Python Code to parse MEMORY.DMP
 # Revisit summary validation when reliability.py is refactored.
 # timeout --signal=TERM --kill-after=5 60 python3 "${scrDir}/reliability.py" write-summary \
 #     --out "${outDir}" --stage-errors "${outDir}/stage-errors.jsonl" --mode rhov-snapshot-recovery \

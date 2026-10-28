@@ -2,7 +2,7 @@
 
 Scripts that run on the orchestration host (CI operator machine or laptop).
 
-Current extraction contract: `extract--guest-os--crash-info.sh --metadata METADATA.json` reads the shared output directory from metadata and streams `guest-fs--crash-info.tgz`; it does not retain loose EVTX or extract dumps. Its final reliability summary call remains commented out, and EXIT cleanup runs once. A successful exit does not establish archive completeness; the watcher summary validator remains separate.
+Current extraction contract: `extract--guest-os--crash-info.sh --metadata METADATA.json` reads the shared output directory from metadata and streams `guest-fs--crash-info--<partition>.tgz`, recursively mapping raw pagefile.sys bytes to MEMORY.DMP and retaining EVTX source paths. It does not convert or validate dump bytes, retain loose EVTX or generate JSON/checksums. Its final reliability summary call remains commented out, and EXIT cleanup runs once. A successful exit does not establish archive completeness; the watcher summary validator remains separate.
 
 These scripts manage the full BSOD detection and artifact extraction pipeline orchestrated from outside the Kubernetes cluster.
 
@@ -142,7 +142,6 @@ domain-bsod.xml              (libvirt domain XML captured at crash moment — st
 domain.xml                   (pre-crash backup captured in Phase 2b)
 host-signals.json            (host diagnostics)
 launcher-compute.log         (KVM launcher logs)
-parse-dump-header.json       (bugcheck code stub — elf2dmp disabled)
 watcher.log                  (full execution trace)
 stage-errors.jsonl           (per-stage error tracking)
 evidence-summary.json        (final pipeline verdict)
@@ -245,7 +244,7 @@ The output directory comes only from metadata `.outputDir`; there is no extracto
 The extractor preserves the provided path spelling and accepts existing directory aliases and arbitrary directory names.
 Metadata `.runId` is read independently of the output directory name. Existing extraction artifacts do not trigger a stale-output rejection.
 The extractor needs only `runId`, `outputDir`, `namespace`, `vm` and `guestPvc` metadata fields.
-It preserves and validates a watcher-produced dump-parser result, or writes the existing no-dump stub; on-disk dump extraction remains disabled.
+JSON/parser/checksum generation is removed. Existing outputs are not parsed, validated or rewritten; the parser placeholder comment does not perform conversion.
 It does not revalidate evidence-mount identity or preflight-only storage/image fields.
 Preflight's persistent-storage validation is unchanged; extraction no longer checks whether that mount changed afterwards.
 Container `MODE=recover` takes the same metadata-only arguments; watcher/preflight and archived `MODE=extract` retain their own `--out` options.
@@ -260,10 +259,9 @@ Cleanup takes a required nonempty pod-name argument, uses native `oc delete --ig
 - Wait once for the helper's Ready condition with native `oc wait --timeout=180s`, discarding stdout; no extractor `--request-timeout` or added process deadline is used. A failed wait stops before helper execution and triggers cleanup. Cleanup retains its supplied 60-second deletion wait.
 - Discover filesystems once through `FindNTFS "${helperPod}" "${helperPodCtr}"`, whose required arguments select the pod/container independently of the caller's variables. Its process-substitution status remains unchecked: failed/empty discovery can reach placeholder artifacts and return zero without the deferred summary gate; partial valid producer output can still trigger extraction despite the producer failure.
 - Probe each NTFS partition with readonly `guestfish -ra /dev/vda ... mount-ro ... ls /Windows`; failed probes continue to the next partition. `set-program virt-sh` sets an informative name, not a different executable.
-- Copy System.evtx and Application.evtx independently with helper-side Bash `mkdir -p` and readonly guestfish `copy-out`; a failed file does not prevent attempting the other. Each copy starts a separate guestfish session. The required `exec -a` replaces Bash, so the supplied final `true` is not reached after a successful exec.
-- Test `/tmp/bsod--guest-files--<epoch>/` inside the helper, then stream helper `tar zc` to runner `guest-fs--crash-info.tgz` and stop scanning partitions. The temporary name has no PID suffix. Directory existence does not prove any file copied: both failed copies can leave an empty archive. Tar failure can leave partial archive bytes on the runner; no transactional cleanup is claimed.
-- Archive-only output has no loose EVTX or implicit unpacking. The extractor final validator is commented out, so missing/empty archives can return zero. The separate watcher `natural-rhov` validator still requires loose EVTX and can fail on a valid archive. Checksum inclusion does not validate archive members.
-- Generate `checksums.sha256` manifest (log files excluded — still being written at manifest time)
+- Iterate `fileArr` original keys, default empty mappings to the source path, normalize file/directory trailing slashes and anchor each final destination under the helper temporary directory. Recursively `copy-out` to the destination parent inside a subshell retaining `exec -a virt-sh`; then rename the source basename with native `mv -T` when necessary. A failed copy stops that helper Bash before rename and the outer loop continues independently. Each copy starts a separate guestfish session; the parent helper Bash survives the subshell exec to rename and reach its final `true`.
+- Test `/tmp/bsod--guest-files--<epoch>/` inside the helper, then stream helper `tar zc` to runner `guest-fs--crash-info--<partition>.tgz` and stop scanning partitions. The temporary name has no PID suffix. Directory existence does not prove any file copied: all failed copies can leave an empty archive. Tar failure can leave partial archive bytes on the runner; no transactional cleanup is claimed.
+- Archive-only output has no loose EVTX or implicit unpacking. The extractor final validator is commented out, so missing/empty archives can return zero. The separate watcher `natural-rhov` validator still requires loose EVTX and can fail on a valid archive. The extractor no longer generates JSON or checksums.
 - Do not invoke the commented final `reliability.py write-summary` call or write a fresh `extraction-summary.json`
 
 **Optional offline tool (archived)**:
@@ -272,13 +270,10 @@ Cleanup takes a required nonempty pod-name argument, uses native `oc delete --ig
 
 **Output structure**:
 ```
-guest-fs--crash-info.tgz  (archive members: Windows/System32/winevt/Logs/*.evtx)
-parse-dump-header.json   (reuse nonempty JSON or write no-dump stub)
-events.json              (stub — optional parser is archived, not in the active script tree)
-checksums.sha256         (manifest of evidence files)
+guest-fs--crash-info--<partition>.tgz  (archive members: Windows/System32/winevt/Logs/*.evtx)
 ```
 
-**Offline analysis**: EVTX files are archive members, not loose `guestFS_*` outputs. Unpack manually into a separate directory before using the archived parser. The extractor does not extract `MEMORY.DMP`, `DedicatedDump.sys` or `Minidump/`; no platform-specific dump availability or verdict is promised here. KubeVirt memory capture is a separate fallible watcher operation.
+**Offline analysis**: EVTX files are archive members, not loose `guestFS_*` outputs. Unpack manually into a separate directory before using the archived parser. Raw pagefile.sys bytes may be archived as MEMORY.DMP; this is not conversion or validation of a Windows dump. DedicatedDump.sys and Minidump/ are not requested; no platform-specific dump availability or verdict is promised here. KubeVirt memory capture is a separate fallible watcher operation.
 
 **Environment Variables**:
 
@@ -372,7 +367,7 @@ guest-agent.py <cmd>
 }
 ```
 
-**Note**: When elf2dmp is disabled (default), `parse-dump-header.json` is written as a stub with `ok=true` and no dumps — the bugcheck code from the ELF dump is not extracted at pipeline time. Developer runs elf2dmp offline and re-runs parse-dump-header.sh.
+**Note**: The current extractor does not call this parser or write parse-dump-header.json. Developers may run the parser separately against an independently obtained compatible dump; raw pagefile bytes renamed MEMORY.DMP are not a converted dump.
 
 ---
 
@@ -417,8 +412,9 @@ guest-agent.py <cmd>
 **Usage (offline)**:
 ```bash
 run_dir=/path/to/run
+archive=/path/to/guest-fs--crash-info--PARTITION.tgz
 mkdir -p "$run_dir/offline-guest-files"
-tar -xzf "$run_dir/guest-fs--crash-info.tgz" -C "$run_dir/offline-guest-files"
+tar -xzf "$archive" -C "$run_dir/offline-guest-files"
 python3 apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py \
   --data-dir apps/bsod-detector/src/data \
   "$run_dir"/offline-guest-files/Windows/System32/winevt/Logs/*.evtx
@@ -450,7 +446,7 @@ trigger-bsod-intentional.sh
   │    │    ├─ Create guestfs-ntfs pod
   │    │    ├─ Detect Windows partition dynamically
   │    │    ├─ Independent readonly guestfish copy-out per file
-  │    │    ├─ Stream guest-fs--crash-info.tgz, write JSON/checksums
+  │    │    ├─ Stream mapped guest-fs--crash-info--<partition>.tgz
   │    │    └─ EXIT cleanup once (no final summary invocation)
   │    ├─ RestartVM
   │    └─ write evidence-summary.json
@@ -570,7 +566,6 @@ domain-bsod.xml               Libvirt domain XML captured at crash moment (state
 domain.xml                    Pre-crash backup from Phase 2b
 host-signals.json             Host KVM diagnostics
 launcher-compute.log          virt-launcher pod logs
-parse-dump-header.json        Bugcheck code (elf2dmp disabled by default)
 watcher.log                   Full execution trace
 stage-errors.jsonl            Per-stage error tracking
 evidence-summary.json         Final pipeline verdict
@@ -594,11 +589,11 @@ evidence-summary.json         Final pipeline verdict
 1. Read the five required metadata fields and create the shared output directory.
 2. Require target VM printableStatus Stopped; process-substitution producer status is not propagated.
 3. Render/apply the read-only helper Pod and wait once for Ready.
-4. Probe each NTFS partition, independently copy requested EVTX files in the helper, then stream `guest-fs--crash-info.tgz`.
-5. Reuse nonempty parser JSON or create its no-dump stub, retain its `.ok == true` check, write placeholder `events.json` and the checksum manifest.
+4. Probe each NTFS partition, independently copy requested EVTX files in the helper, then stream `guest-fs--crash-info--<partition>.tgz`.
+5. Leave only `# Python Code to parse MEMORY.DMP` as a placeholder; no parser, JSON or checksum generation is performed.
 6. Skip the commented final summary validator; run EXIT cleanup once. Native errors remain visible, but zero is not extraction-completeness proof.
 
-Outputs, when their stages succeed: `guest-fs--crash-info.tgz`, `parse-dump-header.json`, `events.json` and `checksums.sha256`. No fresh extraction summary, loose EVTX, dump files or extraction log is produced.
+Output, when its stage succeeds: `guest-fs--crash-info--<partition>.tgz`. It may include raw pagefile.sys bytes named MEMORY.DMP; this rename is not conversion or validation as a Windows dump. No JSON/parser/checksum files, fresh extraction summary, loose EVTX or extraction log are produced. Existing watcher outputs are left unchanged.
 
 ---
 
@@ -798,8 +793,9 @@ guest-agent.py <cmd>
 
 ```bash
 run_dir=/path/to/run
+archive=/path/to/guest-fs--crash-info--PARTITION.tgz
 mkdir -p "$run_dir/offline-guest-files"
-tar -xzf "$run_dir/guest-fs--crash-info.tgz" -C "$run_dir/offline-guest-files"
+tar -xzf "$archive" -C "$run_dir/offline-guest-files"
 python3 apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py \
   --data-dir apps/bsod-detector/src/data \
   "$run_dir"/offline-guest-files/Windows/System32/winevt/Logs/*.evtx
@@ -807,4 +803,4 @@ python3 apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py \
 
 **Requires**: `pip install python-evtx`
 
-**Note**: This is a developer tool archived for offline use. The pipeline writes `events.json` as a stub; developers run this manually against extracted `.evtx` files.
+**Note**: This is a developer tool archived for offline use. The extractor no longer writes `events.json`; developers run this manually against extracted `.evtx` files.

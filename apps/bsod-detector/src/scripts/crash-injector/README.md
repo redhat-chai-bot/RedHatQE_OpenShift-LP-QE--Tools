@@ -76,10 +76,7 @@ The table below shows what each file is, who writes it, and at which pipeline ph
 | `domain.xml` | ~14 KB | Pre-BSOD (Phase 2b) | `watch-crash.sh` → `virsh dumpxml` | Pre-crash backup domain XML. Fallback if crash-time capture fails. |
 | `launcher-compute.log` | ~100–200 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `oc logs` on virt-launcher pod | Raw KVM/QEMU compute container logs — hypervisor events, device errors, split-lock traps, memory balloon events, KVM internal errors |
 | `host-signals.json` | ~1.3 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `collect-host-signals.sh` | Parsed summary of `launcher-compute.log` — split-lock trap count, KVM internal error count, Hyper-V feature states (tlbflush/ipi/vapic/spinlocks/synictimer), risk assessment |
-| `parse-dump-header.json` | varies | After VM stopped | `extract--guest-os--crash-info.sh` | Existing nonempty JSON reused; otherwise a no-dump stub, with its existing `.ok == true` check. No dump extraction or header parsing is performed |
-| `guest-fs--crash-info.tgz` | varies | After VM stopped | `extract--guest-os--crash-info.sh` | Requested System.evtx/Application.evtx copied independently into an archive; no loose EVTX files or automatic unpacking |
-| `events.json` | ~162 B | After VM stopped | `extract--guest-os--crash-info.sh` | **Stub.** The EVTX parser is archived at `apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py`; its lookup data is maintained in active `apps/bsod-detector/src/data`. |
-| `checksums.sha256` | ~900 B | After VM stopped | `extract--guest-os--crash-info.sh` | SHA-256 hashes of all evidence files (except log files and summary files generated after this point). Used by reliability.py to detect tampering |
+| `guest-fs--crash-info--<partition>.tgz` | varies | After VM stopped | `extract--guest-os--crash-info.sh` | Recursive source-to-destination mapping: raw pagefile.sys bytes stored as MEMORY.DMP plus EVTX files; no conversion, loose outputs or automatic unpacking |
 | `stage-errors.jsonl` | 0 B (success) | Throughout | `watch-crash.sh` | Watcher stage failures; extraction does not append entries and inherits stdout/stderr into the watcher log. |
 | `evidence-summary.json` | ~3 KB | End of pipeline | `watch-crash.sh` → `reliability.py write-summary` | Final pipeline verdict — `ok: true/false`, consolidated stage errors, missing required artifact types, invalid artifacts |
 | `watcher.log` | ~100–120 KB | Throughout | `watch-crash.sh` | Full timestamped execution trace of the entire pipeline — QGA pings, BSOD detection, memory capture, stop VM, recovery, restart |
@@ -104,10 +101,7 @@ Pipeline start
   ├─── [VM stopped] virtctl stop
   │
   ├─── [Recovery] extract--guest-os--crash-info.sh via guestfs-ntfs pod
-  │         → guest-fs--crash-info.tgz     (independent readonly guestfish copy-out, then tar)
-  │         → parse-dump-header.json     (stub)
-  │         → events.json               (stub)
-  │         → checksums.sha256
+  │         → guest-fs--crash-info--<partition>.tgz     (independent readonly guestfish copy-out, then tar)
   │
   ├─── [VM restarted] virtctl start
   │
