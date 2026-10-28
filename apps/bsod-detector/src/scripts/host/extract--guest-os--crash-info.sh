@@ -9,12 +9,12 @@ typeset metadataFile='' outDir=''
 
 while (($#)); do
     case "${1}" in
-        (--metadata)    metadataFile="${2:?}"; shift 2;;
-        (-h|--help)
-            echo "usage: ${scrName} --metadata METADATA.json"
-            exit 0
-            ;;
-        (*) echo "${scrName%.sh}: unknown argument: ${1}" 1>&2; exit 2;;
+      (--metadata)    metadataFile="${2:?}"; shift 2;;
+      (-h|--help)
+        echo "usage: ${scrName} --metadata METADATA.json"
+        exit 0
+        ;;
+      (*) echo "${scrName%.sh}: unknown argument: ${1}" 1>&2; exit 2;;
     esac
 done
 [ -r "${metadataFile}" ] || {
