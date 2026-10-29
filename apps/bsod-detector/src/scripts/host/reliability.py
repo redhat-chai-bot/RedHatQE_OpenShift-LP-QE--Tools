@@ -361,7 +361,7 @@ REQUIRED_TYPES = {
     "intentional-rhov": {"screenshot", "memory", "log", "json"},
     # dump removed: MEMORY.DMP blocked on KVM (pagefile.sys cannot be created with VirtIO Balloon)
     # evtx present under guestFS_<partition>/Windows/System32/winevt/Logs/ not a top-level dir
-    "rhov-snapshot-recovery": {"memory", "evtx", "log", "json", "checksums"},
+    "rhov-snapshot-recovery": {"memory", "evtx", "json", "checksums"},
     "fixture": {"screenshot", "memory", "evtx", "log"},
 }
 

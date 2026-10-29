@@ -341,11 +341,9 @@ function RestartVM () {
 }
 
 function Recover () {
-  typeset recoveryBin="${scriptDir}/extract-crash-info.sh"
+  typeset recoveryTimeout=3600 recoveryBin="${scriptDir}/extract--guest-os--crash-info.sh"
   [[ -x "${recoveryBin}" ]] || { RecordError recovery "recovery script missing: ${recoveryBin}"; return 1; }
-  # No outer timeout — extract-crash-info.sh has its own stall detection per transfer.
-  # A blanket timeout here kills active MEMORY.DMP/vmexport streams before they complete.
-  "${recoveryBin}" --metadata "${metadataFile}" --out "${outDir}" >>"${pipelineLog}" 2>&1
+  RunTimed "${recoveryTimeout}" "${recoveryBin}" --metadata "${metadataFile}" >>"${pipelineLog}" 2>&1
 }
 
 function CrashResponse () {

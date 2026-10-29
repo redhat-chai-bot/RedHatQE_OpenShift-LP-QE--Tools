@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Fail-closed RHOV preflight validation before crash injection and watcher.
-# Verifies: cluster permissions, VM/VMI state, storage configuration, recovery image capability.
-# Produces recovery-metadata.json consumed by watch-crash.sh and extract-crash-info.sh.
+# Fail-closed RHOV preflight validation before crash injection and watcher
+# Verifies: cluster permissions, VM/VMI state, storage configuration, recovery image capability
+# Produces metadata.json consumed by watch-crash.sh and extract--guest-os--crash-info.sh
+# Side effects: temporary probe pod only; no VM lifecycle changes (runStrategy must be Manual)
 set -euxo pipefail; shopt -s inherit_errexit
 umask 077
 
@@ -69,7 +70,8 @@ case "${evidenceKind}" in pvc|network|csi) ;; *) Die 'evidence volume kind must 
 ValidName "${ns}" namespace; ValidName "${vm}" VM; ValidName "${snapClass}" snapshot-class; ValidName "${memoryPvc}" memory-dump-PVC
 
 for tool in oc virtctl jq python3 sha256sum findmnt timeout realpath sync; do RequireCommand "${tool}"; done
-for helper in guest-agent.py reliability.py extract-crash-info.sh collect-host-signals.sh parse-dump-header.sh; do
+# Verify all helper scripts exist and are readable (will be invoked by watch-crash.sh and extract--guest-os--crash-info.sh)
+for helper in guest-agent.py reliability.py extract--guest-os--crash-info.sh collect-host-signals.sh parse-dump-header.sh; do
   [[ -r "${scriptDir}/${helper}" ]] || Die "required helper missing: ${scriptDir}/${helper}"
 done
 [[ -r "${configureScript}" && -r "${crashControlFile}" ]] || Die 'guest configuration inputs are missing'
@@ -310,6 +312,8 @@ typeset inventory=''; inventory="$(RunTimed 60 "${guestAgent[@]}" exec powershel
 jq -e 'if type=="array" then all(.[]; (.path|type)=="string" and (.size|type)=="number" and (.mtime|type)=="number") elif . == null then true else false end' <<<"${inventory}" >/dev/null || Die 'guest dump inventory is invalid'
 [[ "$(jq -r type <<<"${inventory}")" == array ]] || inventory='[]'
 
+# Write all validated state to metadata JSON file for consumption by watch-crash.sh and extract--guest-os--crash-info.sh
+# Schema version 2: defines all fields expected by watcher and extraction scripts
 typeset armedEpoch=''; armedEpoch="$(date -u +%s)"
 typeset temporary="${metadataFile}.tmp"
 jq -n --arg runId "${runId}" --arg outputDir "${outDir}" --arg namespace "${ns}" --arg vm "${vm}" \

@@ -136,11 +136,35 @@ run_preflight() {
 }
 
 make_recovery_mocks() {
+  REAL_OC="$(command -v oc)"
+  export REAL_OC
   make_python_and_findmnt_mocks
+  export MOCK_ROOT="$BATS_TMPDIR/helper-mock"
+  "$REAL_PYTHON" -B - "$REPO_ROOT/test/test_recovery.py" "$MOCK_ROOT" <<'EOF'
+import importlib.util
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location('recovery_fixture', sys.argv[1])
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+root = Path(sys.argv[2])
+(root / 'helper-bin').mkdir(parents=True)
+(root / 'helper-fs').mkdir()
+data = bytearray(4096)
+data[:8] = b'ElfFile\x00'
+(root / 'fixture.evtx').write_bytes(data)
+(root / 'oc.py').write_text(fixture.mockOC)
+for name, body in (('mkdir', fixture.helperMkdir), ('guestfish', fixture.helperGuestfish)):
+    path = root / 'helper-bin' / name
+    path.write_text(f'#!{sys.executable}\n' + body)
+    path.chmod(0o755)
+EOF
   cat > "$BATS_TMPDIR/mockbin/oc" <<'EOF'
 #!/usr/bin/env bash
 [[ "${1:-}" == --request-timeout=* ]] && shift
 printf '%s\n' "$*" >> "$OC_LOG"
+if [ "${1:-}" = -n ]; then shift 2; fi
 if [[ "${1:-}" == cp ]]; then
   target="$3"
   mkdir -p "$(dirname "$target")"
@@ -148,17 +172,22 @@ if [[ "${1:-}" == cp ]]; then
   exit 0
 fi
 case "$1" in
+  create) exec "$REAL_OC" "$@" ;;
   apply) cat >/dev/null ;;
+  wait) exit 0 ;;
   get)
     case "$2" in
       volumesnapshot) printf true ;;
       pvc) printf Bound ;;
       pod) printf Running ;;
-      vmi) printf '{"items":[]}' ;;
+      vm/*) printf '{"status":{"printableStatus":"Stopped"}}' ;;
       *) exit 91 ;;
     esac ;;
   exec)
     all="$*"
+    if [[ "$all" == *'set-program virt-sh'* || "$all" == *'bash -o pipefail -O inherit_errexit -euxc'* || "$all" == *'test -d '* || "$all" == *'tar zc '* ]]; then
+      exec "$REAL_PYTHON" -B "$MOCK_ROOT/oc.py" "$@"
+    fi
     if [[ "$all" == *'guestfish --ro -a /dev/vda run : list-filesystems'* ]]; then [[ "${MISSING_GUESTFISH:-0}" == 0 ]] || exit 1; printf '/dev/sda3: ntfs\n'; exit 0; fi
     if [[ "$all" == *guestfish* && "$all" == *'download /Windows/'* ]]; then exit 0; fi
     if [[ "$all" == *'/bin/bash -ceu'* ]]; then [[ "${MISSING_GUESTFISH:-0}" == 0 ]]; exit; fi
@@ -198,9 +227,10 @@ write_recovery_metadata() {
 
 run_recovery() {
   run env PATH="$BATS_TMPDIR/mockbin:$PATH" REAL_PYTHON="$REAL_PYTHON" EVIDENCE_ROOT="$EVIDENCE_ROOT" \
+    BSOD_DET__GUEST_FS__CTR_IMG='registry.test/guestfs:fixture' \
     OC_LOG="$OC_LOG" BSOD_EXTRACT_EVTX_BIN="$BATS_TMPDIR/mockbin/extract-evtx" \
     MISSING_GUESTFISH="${MISSING_GUESTFISH:-0}" DUMP_CODE="${DUMP_CODE:-10}" EVTX_FAIL="${EVTX_FAIL:-0}" MOUNT_SOURCE="${MOUNT_SOURCE:-}" \
-    bash "$HOST_DIR/extract-crash-info.sh" --metadata "$BATS_TMPDIR/metadata.json" --out "$EVIDENCE_ROOT/fixture-recovery-001"
+    bash "$HOST_DIR/extract--guest-os--crash-info.sh" --metadata "$BATS_TMPDIR/metadata.json"
 }
 
 write_elf_memory_fixture() {
@@ -226,20 +256,38 @@ write_elf_memory_fixture() {
   [ "$(jq -r .ok "$summary")" = true ]
   [ "$(jq -r '.missingRequiredArtifactTypes|length' "$summary")" -eq 0 ]
   [ ! -e "$EVIDENCE_ROOT/fixture-recovery-001/bsod-screenshot.png" ]
-  grep -q '^delete pod ' "$OC_LOG"
-  ! grep -q '^delete pvc ' "$OC_LOG"
-  ! grep -q '^delete volumesnapshot ' "$OC_LOG"
+  [ "$(grep -c '^-n fixture-ns exec .*guestfish --ro -a /dev/vda run : list-filesystems' "$OC_LOG")" -eq 1 ]
+  grep -q '^-n fixture-ns wait pod/guest-fs--ntfs--.* --for=condition=Ready --timeout=180s$' "$OC_LOG"
+  ! grep -q -- --request-timeout "$OC_LOG"
+  [ "$(grep -c '^-n fixture-ns delete pod/guest-fs--ntfs--.* --ignore-not-found$' "$OC_LOG")" -eq 2 ]
+  [ "$(grep -c '^-n fixture-ns wait pod/guest-fs--ntfs--.* --for=delete --timeout=60s$' "$OC_LOG")" -eq 2 ]
+  ! grep -Eq '(^| )delete (pvc|volumesnapshot)( |/)' "$OC_LOG"
 }
 
-@test "recovery rejects stale output, changed storage, and unavailable guestfish" {
+@test "recovery reaches archive creation with existing output" {
   export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
   mkdir "$EVIDENCE_ROOT"; make_recovery_mocks; write_recovery_metadata
   printf stale > "$EVIDENCE_ROOT/fixture-recovery-001/MEMORY.DMP"; run_recovery
-  [ "$status" -ne 0 ]; [[ "$output" == *'pre-existing extraction artifact rejected'* ]]
-  rm -rf "$EVIDENCE_ROOT/fixture-recovery-001"; write_recovery_metadata; rm "$EVIDENCE_ROOT/.bsod-storage-identity"; MOUNT_SOURCE=other:/mount; run_recovery
-  [ "$status" -ne 0 ]; [[ "$output" == *'mount identity changed'* ]]
-  unset MOUNT_SOURCE; rm -rf "$EVIDENCE_ROOT/fixture-recovery-001"; write_recovery_metadata; MISSING_GUESTFISH=1; run_recovery
-  [ "$status" -ne 0 ]; grep -q 'guestfish not available or block device not accessible' "$EVIDENCE_ROOT/fixture-recovery-001/stage-errors.jsonl"
+  [ "$status" -ne 0 ]; [[ "$output" != *'Pre-existing extraction artifact rejected'* ]]
+  grep -q '^apply -f -' "$OC_LOG"
+  [ -s "$EVIDENCE_ROOT/fixture-recovery-001/guest-fs--crash-info.tgz" ]
+  [ "$(<"$EVIDENCE_ROOT/fixture-recovery-001/MEMORY.DMP")" = stale ]
+  tar tzf "$EVIDENCE_ROOT/fixture-recovery-001/guest-fs--crash-info.tgz" | grep -q 'Windows/System32/winevt/Logs/System.evtx'
+  grep -q '^-n fixture-ns delete pod/' "$OC_LOG"
+}
+
+@test "recovery handles unavailable guestfish without requiring storage metadata" {
+  export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
+  mkdir "$EVIDENCE_ROOT"; make_recovery_mocks; write_recovery_metadata
+  rm -rf "$EVIDENCE_ROOT/fixture-recovery-001"; write_recovery_metadata; rm "$EVIDENCE_ROOT/.bsod-storage-identity"
+  jq 'del(.evidenceMount)' "$BATS_TMPDIR/metadata.json" > "$BATS_TMPDIR/metadata.tmp"
+  mv "$BATS_TMPDIR/metadata.tmp" "$BATS_TMPDIR/metadata.json"
+  write_elf_memory_fixture "$EVIDENCE_ROOT/fixture-recovery-001/vm-memory.elf"; run_recovery
+  [ "$status" -eq 0 ]
+  rm -rf "$EVIDENCE_ROOT/fixture-recovery-001"; write_recovery_metadata; MISSING_GUESTFISH=1; run_recovery
+  [ "$status" -ne 0 ]
+  [[ "$output" == *guestfish* ]]
+  [ ! -e "$EVIDENCE_ROOT/fixture-recovery-001/stage-errors.jsonl" ]
 }
 
 make_watcher_mocks() {
@@ -286,7 +334,8 @@ echo '{"ok":true}'
 EOF
   cat > "$BATS_TMPDIR/mockbin/recovery" <<'EOF'
 #!/usr/bin/env bash
-while (($#)); do [[ "$1" == --out ]] && { out="$2"; break; }; shift; done
+[[ "$1" == --metadata && "$#" == 2 ]] || exit 2
+out="$(jq -er .outputDir "$2")"
 "$REAL_PYTHON" -c 'import struct,sys,pathlib; p=pathlib.Path(sys.argv[1]); d=bytearray(8192); d[:8]=b"PAGEDU64"; struct.pack_into("<I",d,0x38,10); (p/"MEMORY.DMP").write_bytes(d); e=bytearray(4096); e[:8]=b"ElfFile\x00"; struct.pack_into("<I",e,0x78,4096); (p/"System.evtx").write_bytes(e)' "$out"
 echo '{"ok":true}' > "$out/parse-dump-header.json"
 echo '{"ok":true}' > "$out/events.json"
@@ -372,6 +421,6 @@ run_watcher() {
   ! grep -q 'memory-dump .*\/dev\/stdout' "$HOST_DIR/watch-crash.sh"
   grep -q 'virtctl vnc screenshot' "$HOST_DIR/watch-crash.sh"
   grep -q 'virtctl memory-dump get' "$HOST_DIR/watch-crash.sh"
-  grep -q 'recover-natural-crash.sh' "$HOST_DIR/watch-crash.sh"
+  grep -q 'extract--guest-os--crash-info.sh' "$HOST_DIR/watch-crash.sh"
   grep -q 'exec-crash' "$REPO_ROOT/src/scripts/crash-injector/trigger-bsod-intentional.sh"
 }

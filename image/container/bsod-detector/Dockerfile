@@ -9,7 +9,7 @@
 #
 #   MODE=recover
 #     Post-stop evidence recovery from preflight metadata.
-#     Calls recover-natural-crash.sh — snapshot-backed guestfish extraction.
+#     Calls extract--guest-os--crash-info.sh — snapshot-backed guestfish extraction.
 #
 #   MODE=extract
 #     Offline dump extraction from a guest disk image via libguestfs.
@@ -42,7 +42,7 @@
 #   # Recover evidence from a hard-frozen VM
 #   podman run --rm -e MODE=recover \
 #     -v /mnt/persistent-bsod-evidence:/evidence bsod-detector \
-#     --metadata /evidence/<run>/recovery-metadata.json --out /evidence/<run>
+#     --metadata /evidence/<run>/recovery-metadata.json
 #
 #   # Offline dump extraction from a disk image (original use case)
 #   podman run --rm -e MODE=extract \
@@ -108,7 +108,7 @@ oc-EOF
 # required for scripts, only for evidence output and optional KUBECONFIG.
 COPY apps/bsod-detector/src/scripts/host/watch-crash.sh             /usr/local/bin/watch-crash.sh
 COPY apps/bsod-detector/src/scripts/host/preflight-rhov.sh          /usr/local/bin/preflight-rhov.sh
-COPY apps/bsod-detector/src/scripts/host/recover-natural-crash.sh   /usr/local/bin/recover-natural-crash.sh
+COPY apps/bsod-detector/src/scripts/host/extract--guest-os--crash-info.sh   /usr/local/bin/extract--guest-os--crash-info.sh
 COPY apps/bsod-detector/src/scripts/host/guest-agent.py             /usr/local/bin/guest-agent.py
 COPY apps/bsod-detector/src/scripts/host/reliability.py             /usr/local/bin/reliability.py
 COPY apps/bsod-detector/src/scripts/host/parse-dump-header.sh       /usr/local/bin/parse-dump-header.sh
@@ -120,7 +120,7 @@ COPY apps/bsod-detector/archieve/host-tools/extract-dump.sh          /usr/local/
 RUN chmod +x \
     /usr/local/bin/watch-crash.sh \
     /usr/local/bin/preflight-rhov.sh \
-    /usr/local/bin/recover-natural-crash.sh \
+    /usr/local/bin/extract--guest-os--crash-info.sh \
     /usr/local/bin/guest-agent.py \
     /usr/local/bin/reliability.py \
     /usr/local/bin/parse-dump-header.sh \
