@@ -230,7 +230,8 @@ while IFS= read -r ntfsPart; do
         dst="${fileArr[${src}]:-${src}}"
         src="/${src#/}"
         while [[ "${src}" == */ ]]; do src="${src%/}"; done
-        dst="${podTmp}/${dst#/}"
+        [[ "${dst}" == /* ]] || dst="/${dst#/}"
+        dst="${podTmp}${dst}"
         while [[ "${dst}" == */ ]]; do dst="${dst%/}"; done
         {
             oc -n "${ns}" exec "pod/${helperPod}" \
