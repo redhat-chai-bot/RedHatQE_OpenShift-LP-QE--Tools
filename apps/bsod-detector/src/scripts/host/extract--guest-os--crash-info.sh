@@ -86,42 +86,42 @@ function FindNTFS () {
 }
 
 function Cleanup () {
-    typeset -i exitRc="${1?}"; (($#)) && shift
-    typeset guestfsPid="${1?}"; (($#)) && shift
-    typeset guestfsIn="${1?}"; (($#)) && shift
-    typeset podName="${1?}"; (($#)) && shift
-    typeset -i delRc=0 childRc=0
+    typeset -i es="${1?}"; (($#)) && shift
+    typeset -i hlprPodPid="${1?}"; (($#)) && shift
+    typeset -i hlprPodStdIn="${1?}"; (($#)) && shift
+    typeset hlprPodName="${1?}"; (($#)) && shift
+    typeset -i hlprPodDelES=0 hlprPodES=0
 
-    # An exited virtctl already requested deletion of any Pod it created, so a
-    # same-name Pod is then not this run's to delete.
-    [ -z "${guestfsPid}" ] || kill -0 "${guestfsPid}" || podName=''
+    # Delete only while this run's virtctl still runs; liveness is not proof
+    # that the same-name Pod is this run's helper.
+    ((hlprPodPid)) && kill -0 "${hlprPodPid}" || hlprPodName=''
     # EOF ends the virtctl attach session; virtctl then deletes its helper.
-    [ -z "${guestfsIn}" ] || exec {guestfsIn}>&-
-    # After success the helper is Running: virtctl attaches, reads EOF and
-    # exits, so reap it first. After a failure, deleting first also ends a
-    # virtctl wait on a Pending Pod.
-    ((exitRc)) || [ -z "${guestfsPid}" ] || wait "${guestfsPid}" || childRc=$?
-    [ -z "${podName}" ] || {
-        oc -n "${ns}" delete "pod/${podName}" \
+    ((hlprPodStdIn)) && exec {hlprPodStdIn}>&-
+    # Clean exit: the helper is Running, so virtctl attaches, reads EOF and
+    # exits; reap it before deleting.
+    ((es)) || ((! hlprPodPid)) || wait "${hlprPodPid}" || hlprPodES=$?
+    [ -z "${hlprPodName}" ] || {
+        oc -n "${ns}" delete "pod/${hlprPodName}" \
             --ignore-not-found \
             --timeout=60s \
             --wait=true ||
-        delRc=$?
+        hlprPodDelES=$?
     }
-    ((exitRc == 0)) || [ -z "${guestfsPid}" ] ||
-    wait "${guestfsPid}" || childRc=$?
+    # Failure: delete first, which also ends a virtctl wait on a Pending Pod,
+    # then reap.
+    ((! es)) || ((! hlprPodPid)) || wait "${hlprPodPid}" || hlprPodES=$?
 
-    ((delRc == 0)) || return "${delRc}"
-    ((exitRc || (childRc == 0))) || return "${childRc}"
-    true
+    ((hlprPodDelES)) && return "${hlprPodDelES}"
+    ((hlprPodES)) && return "${hlprPodES}"
+    return "${es}"
 }
 
-typeset helperPod="libguestfs-tools-${guestPVC}"
+typeset hlprPod="libguestfs-tools-${guestPVC}"
 typeset helperPodCtr='libguestfs'
 typeset dfltCtrImg='quay.io/kubevirt/libguestfs-tools:20261112_5c3989e66e'
-typeset guestfsPid='' guestfsIn='' ownedPod='' podRef=''
-typeset -i podPoll=0
-trap 'Cleanup "$?" "${guestfsPid}" "${guestfsIn}" "${ownedPod}"' EXIT
+typeset -i guestfsPid=0 guestfsIn=0
+typeset podRef=''
+trap 'Cleanup "$?" "${guestfsPid}" "${guestfsIn}" "${hlprPod}"' EXIT
 
 jq -es '
     ((length == 1) and (.[0].status.printableStatus == "Stopped"))
@@ -131,7 +131,7 @@ jq -es '
 
 # virtctl names its helper libguestfs-tools-<pvc>; never adopt or delete a
 # same-name Pod that existed before this run.
-podRef="$(oc -n "${ns}" get "pod/${helperPod}" --ignore-not-found -o name)"
+podRef="$(oc -n "${ns}" get "pod/${hlprPod}" --ignore-not-found -o name)"
 [ -z "${podRef}" ] || {
     : "Pre-existing helper Pod: ${podRef}"
     false
@@ -145,26 +145,20 @@ coproc guestfsProc {
 }
 # shellcheck disable=SC2154  # Set by the coproc builtin.
 guestfsPid="${guestfsProc_PID}"
+# Bash opens a new unused descriptor (>=10), stores its number in guestfsIn
+# and, through the trailing '-', closes the original coproc write end. A
+# plain number assignment would not keep the descriptor alive: Bash closes
+# coproc descriptors itself once it reaps the coprocess.
 exec {guestfsIn}>&"${guestfsProc[1]}"-
 
-# Poll with bounded gets: `oc wait` on older clients cannot await creation.
-# An exited virtctl ends the run with its failure status (1 if it exited 0);
-# a helper found while virtctl still runs is attributed to this run.
-while :; do
-    kill -0 "${guestfsPid}" || { wait "${guestfsPid}"; false; }
-    podRef="$(oc -n "${ns}" get "pod/${helperPod}" --ignore-not-found -o name)"
-    [ -z "${podRef}" ] || break
-    ((++podPoll < 60)) || {
-        : "Helper Pod not created: ${helperPod}"
-        false
-    }
-    sleep 1
-done
-ownedPod="${helperPod}"
-oc -n "${ns}" wait "pod/${helperPod}" \
+oc -n "${ns}" wait "pod/${hlprPod}" \
+    --for=create \
+    --timeout=60s 1> /dev/null
+oc -n "${ns}" wait "pod/${hlprPod}" \
     --for=condition=Ready \
     --timeout=180s 1> /dev/null
-kill -0 "${guestfsPid}" || { wait "${guestfsPid}"; false; }
+# An exited virtctl has already requested deletion of its helper.
+kill -0 "${guestfsPid}"
 
 typeset -A fileArr=(
     [/pagefile.sys]='/MEMORY.DMP'
@@ -179,7 +173,7 @@ while IFS= read -r ntfsPart; do
     typeset src='' dst=''
 
     {
-        oc -n "${ns}" exec "pod/${helperPod}" \
+        oc -n "${ns}" exec "pod/${hlprPod}" \
             -c "${helperPodCtr}" \
             -- \
             guestfish \
@@ -199,7 +193,7 @@ while IFS= read -r ntfsPart; do
         dst="${podTmp}${dst}"
         while [[ "${dst}" == */ ]]; do dst="${dst%/}"; done
         {
-            oc -n "${ns}" exec "pod/${helperPod}" \
+            oc -n "${ns}" exec "pod/${hlprPod}" \
                 -c "${helperPodCtr}" \
                 -- \
                 bash -o pipefail -O inherit_errexit -euxc '
@@ -226,12 +220,12 @@ while IFS= read -r ntfsPart; do
     done
     {
         oc -n "${ns}" exec \
-            "pod/${helperPod}" \
+            "pod/${hlprPod}" \
             -c "${helperPodCtr}" \
             -- \
             test -d "${podTmp}/" &&
         {
-            oc -n "${ns}" exec "pod/${helperPod}" \
+            oc -n "${ns}" exec "pod/${hlprPod}" \
                 -c "${helperPodCtr}" \
                 -- \
                 tar zc -C "${podTmp}/" ./ \
@@ -239,9 +233,9 @@ while IFS= read -r ntfsPart; do
             break
         }
     }
-done 0< <(FindNTFS "${helperPod}" "${helperPodCtr}")
+done 0< <(FindNTFS "${hlprPod}" "${helperPodCtr}")
 # A virtctl that exited during extraction has also deleted its helper.
-kill -0 "${guestfsPid}" || { wait "${guestfsPid}"; false; }
+kill -0 "${guestfsPid}"
 
 # Python Code to parse MEMORY.DMP
 # Revisit summary validation when reliability.py is refactored.

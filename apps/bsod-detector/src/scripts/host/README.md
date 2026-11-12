@@ -252,32 +252,39 @@ It does not revalidate evidence-mount identity or preflight-only storage/image f
 Preflight's persistent-storage validation is unchanged; extraction no longer checks whether that mount changed afterwards.
 Container `MODE=recover` takes the same metadata-only arguments; watcher/preflight and archived `MODE=extract` retain their own `--out` options.
 Extraction inherits stdout/stderr (captured in `watcher.log` when called by the watcher); it creates no `extraction.log` or stage-error entries. The final summary invocation is commented out pending the Python refactor; pre-existing summary and stage-error files are not revalidated or modified.
-`trap 'Cleanup "$?" "${guestfsPid}" "${guestfsIn}" "${ownedPod}"' EXIT` is the only cleanup; no custom INT/TERM trap
-is added. Cleanup closes the owned virtctl stdin descriptor and reaps virtctl. It deletes this run's helper with one
-blocking `oc delete --ignore-not-found --timeout=60s --wait=true` only while virtctl still runs; an exited virtctl
-has already requested deletion of any Pod it created. After success it reaps before deleting (virtctl attaches to the
-Running Pod and exits on EOF); after a failure it deletes first, which also ends a virtctl wait on a Pending Pod.
-A delete failure replaces the exit status; a virtctl failure replaces only a zero status. Failures before virtctl
-starts make no cleanup calls. When polling gives up before the Pod exists, the reap lasts as long as virtctl runs
-(upstream waits up to 500s for Running after it creates the Pod).
+`trap 'Cleanup "$?" "${guestfsPid}" "${guestfsIn}" "${hlprPod}"' EXIT` is the only cleanup; no custom INT/TERM trap is
+added. The virtctl PID and stdin descriptor start as 0, so failures before virtctl starts make no kill, wait or delete
+calls. Cleanup deletes `hlprPod` with one blocking `oc delete --ignore-not-found --timeout=60s --wait=true` only if
+this run's virtctl was still running when cleanup began; liveness is not proof that the same-name Pod is this run's
+helper, and an exited virtctl has already requested deletion of any Pod it created. Cleanup always closes the owned
+stdin descriptor and reaps virtctl. After a clean exit it reaps before deleting (virtctl attaches to the Running Pod
+and exits on EOF); after a failure it deletes first, which also ends a virtctl wait on a Pending Pod. The exit status
+is the delete failure, else the virtctl failure, else the original status. A terminating signal keeps its status
+because Bash re-raises it after the trap. The trap sees the status of the last completed command (usually 0); when it
+is 0, cleanup takes the clean-exit order and the reap lasts until virtctl exits (on EOF once attached, or after
+upstream's 500s Pending limit).
 
 **Responsibilities**:
 - Validate output path and preflight metadata integrity
 - Require the metadata target VM's printable status to be **Stopped**, using a direct process substitution; no VMI absence or namespace-wide PVC scan is performed. Empty/malformed responses and non-Stopped statuses block extraction, but valid Stopped JSON followed by an API failure can pass because the producer exit status is not propagated. This point-in-time status check is not an exclusive PVC lock.
-- Reject a pre-existing `libguestfs-tools-<pvc>` Pod before starting virtctl; it is never adopted or deleted.
+- Reject a pre-existing `libguestfs-tools-<pvc>` Pod with one `oc get` before starting virtctl; it is never adopted or
+  deleted.
 - Run `virtctl -n <ns> guestfs --vm <vm> --image <image> <pvc>` as a Bash coprocess. Its PID is saved at once, its
   stdin write end moves to a descriptor owned by the extractor and its stdout goes to stderr. Upstream virtctl
   creates `libguestfs-tools-<pvc>` with container `libguestfs` and the block PVC at `/dev/vda`, waits up to 500s for
   Running, then attaches a TTY. Stdin EOF ends the attach, after which virtctl deletes the Pod without waiting.
-- Poll with `oc get --ignore-not-found` once per second, up to 60 attempts (no `oc wait --for=create`, so older
-  clients work); exhaustion fails with a `Helper Pod not created` breadcrumb. Each attempt first checks that virtctl
-  still runs: an exited virtctl ends the run with its failure status, or 1 if it exited 0. A Pod found while virtctl
-  runs is attributed to this run; upstream exposes no Pod UID, so a same-name Pod created by someone else in that
-  window cannot be told apart, but cleanup never deletes once virtctl has exited. A same-name Pod that does not use
-  the PVC makes virtctl's own create fail, and upstream's deferred delete then removes it; the extractor cannot
-  prevent that. Then wait once for Ready (`--timeout=180s`, stdout discarded) and check virtctl again before any
-  `oc exec` and after extraction.
-- Discover filesystems once through `FindNTFS "${helperPod}" "${helperPodCtr}"`, whose required arguments select the pod/container independently of the caller's variables. Its process-substitution status remains unchecked: failed/empty discovery can reach placeholder artifacts and return zero without the deferred summary gate; partial valid producer output can still trigger extraction despite the producer failure.
+- Wait natively on the named Pod: `oc wait --for=create --timeout=60s`, then `--for=condition=Ready --timeout=180s`
+  (stdout discarded). `--for=create` needs an oc client built on kubectl 1.31 or later (OpenShift 4.18+). A virtctl
+  exit before Pod creation is noticed only after the 60s create timeout, and a later one only when a wait or
+  liveness check fails; cleanup then reports virtctl's failure status. virtctl must still run after the Ready wait
+  and after extraction.
+- Upstream exposes no Pod UID, so a same-name Pod created by someone else between the pre-check and virtctl's create
+  cannot be told apart from this run's helper. A same-name Pod that does not use the PVC makes virtctl's own create
+  fail, and upstream's deferred delete then removes it; the extractor cannot prevent that.
+- Discover filesystems once through `FindNTFS "${hlprPod}" "${helperPodCtr}"`, whose required arguments select the
+  pod/container independently of the caller's variables. Its process-substitution status remains unchecked:
+  failed/empty discovery can reach placeholder artifacts and return zero without the deferred summary gate; partial
+  valid producer output can still trigger extraction despite the producer failure.
 - Probe each NTFS partition with readonly `guestfish -ra /dev/vda ... mount-ro ... ls /Windows`; failed probes continue to the next partition. `set-program virt-sh` sets an informative name, not a different executable.
 - Iterate `fileArr` original keys, default empty mappings to the source path, normalize file/directory trailing slashes and anchor each final destination under the helper temporary directory. Recursively `copy-out` to the destination parent inside a subshell retaining `exec -a virt-sh`; then rename the source basename with native `mv -T` when necessary. A failed copy stops that helper Bash before rename and the outer loop continues independently. Each copy starts a separate guestfish session; the parent helper Bash survives the subshell exec to rename and reach its final `true`.
 - Test `/tmp/bsod--guest-files--<epoch>/` inside the helper, then stream helper `tar zc` to runner `guest-fs--crash-info--<partition>.tgz` and stop scanning partitions. The temporary name has no PID suffix. Directory existence does not prove any file copied: all failed copies can leave an empty archive. Tar failure can leave partial archive bytes on the runner; no transactional cleanup is claimed.
@@ -602,13 +609,13 @@ evidence-summary.json         Final pipeline verdict
 | Function | Purpose |
 |----------|---------|
 | `FindNTFS()` | Read filesystem discovery from the required helper pod/container |
-| `Cleanup()` | EXIT-only: close virtctl stdin, delete this run's helper, reap virtctl |
+| `Cleanup()` | EXIT-only: close virtctl stdin, reap it, delete `hlprPod` if virtctl ran when cleanup began |
 
 #### Extraction Flow
 
 1. Read the five required metadata fields and create the shared output directory.
 2. Require target VM printableStatus Stopped; process-substitution producer status is not propagated.
-3. Reject a pre-existing helper, start the `virtctl guestfs` coprocess, poll for its Pod and wait once for Ready.
+3. Reject a pre-existing helper, start the `virtctl guestfs` coprocess, then wait for its Pod to exist and be Ready.
 4. Probe each NTFS partition, independently copy requested EVTX files in the helper, then stream `guest-fs--crash-info--<partition>.tgz`.
 5. Leave only `# Python Code to parse MEMORY.DMP` as a placeholder; no parser, JSON or checksum generation is performed.
 6. Skip the commented final summary validator; run EXIT cleanup once. Native errors remain visible, but zero is not extraction-completeness proof.

@@ -670,7 +670,7 @@ Stop VM (virtctl stop)
     ↓
 Reject a pre-existing libguestfs-tools-<pvc> Pod (never adopted or deleted)
 virtctl guestfs --vm <vm> --image <image> <pvc> as a coprocess with owned stdin
-Bounded Pod polling while virtctl runs, then one Ready wait
+oc wait --for=create (60s), then --for=condition=Ready (180s)
 Block PVC attached as /dev/vda inside the libguestfs container
     ↓
 Readonly guestfish Windows probe per NTFS partition
@@ -680,7 +680,7 @@ Independent file sessions: helper mkdir -p, guestfish -ra /dev/vda
 Helper test -d /tmp/bsod--guest-files--<epoch>/
 Helper tar zc -C <directory>/ ./ → guest-fs--crash-info--<partition>.tgz on runner
     ↓
-Close virtctl stdin, delete this run's Pod, reap virtctl
+Close virtctl stdin, reap virtctl, delete the Pod if virtctl ran when cleanup began
 ```
 
 **One guestfish session** = one QEMU startup for all target files. Multiple separate sessions caused pod OOM on the second file transfer.
@@ -713,7 +713,8 @@ capabilities:
 virtctl owns the helper Pod spec (upstream `pkg/virtctl/guestfs`): the security context above, one
 `devices.kubevirt.io/kvm` limit, no CPU or memory budget, no `force_kvm` setting and pull policy `IfNotPresent`.
 It mounts the PVC read-write and keeps the default service-account token; guestfish sessions stay read-only.
-`--vm` (virtctl v1.6.0+) copies the VM's tolerations, affinity, node selector and template labels. virtctl
+`--vm` (virtctl v1.6.0+) copies the VM's tolerations, affinity, node selector and template labels.
+`oc wait --for=create` needs an oc client built on kubectl 1.31 or later (OpenShift 4.18+). virtctl
 refuses a PVC used by any other Pod, in any phase. Unset or empty `BSOD_DET__GUEST_FS__CTR_IMG` uses the pinned
 default:
 

@@ -88,6 +88,19 @@ elif args[0] == 'wait':
             print('mock helper pod still exists', file=sys.stderr)
             sys.exit(29)
         sys.exit(0)
+    if '--for=create' in args:
+        # kubectl polls until the named Pod exists or the timeout ends. Test
+        # speed shortcut: fail at once when virtctl exited without creating
+        # it, instead of waiting out the real 60s timeout.
+        deadline = time.monotonic() + 5
+        while not (root / 'helper-pod').exists():
+            if (scenario == 'create-timeout' or time.monotonic() > deadline
+                    or (root / 'virtctl-exited').exists()):
+                print('error: timed out waiting for the condition',
+                      file=sys.stderr)
+                sys.exit(1)
+            time.sleep(0.05)
+        sys.exit(0)
     if not (root / 'helper-pod').exists():
         print('Error from server (NotFound): mock helper pod', file=sys.stderr)
         sys.exit(1)
@@ -169,6 +182,9 @@ elif args[0] == 'cp':
         sys.exit(24)
     dest.write_bytes(b'' if scenario == 'empty-copy' else src.read_bytes())
 elif args[0] == 'delete':
+    if os.environ.get('MOCK_DELETE_STATUS'):
+        print('mock delete failure', file=sys.stderr)
+        sys.exit(int(os.environ['MOCK_DELETE_STATUS']))
     if scenario == 'transient-delete' and not (root / 'cleanup-attempted').exists():
         (root / 'cleanup-attempted').touch()
         print('mock transient deletion failure', file=sys.stderr)
@@ -220,9 +236,12 @@ status = 0
 if scenario == 'virtctl-error':
     print('mock PVC is used by another pod', file=sys.stderr)
     status = 41
-elif scenario == 'virtctl-hang':
-    time.sleep(3)
-    status = 43
+elif scenario == 'create-timeout':
+    # A virtctl that never creates its Pod. Test speed shortcut: it ends on
+    # stdin EOF, whereas upstream reads stdin only after it attaches.
+    while os.read(0, 1024):
+        pass
+    Log('eof')
 else:
     pod.write_text('foreign' if scenario == 'virtctl-foreign-race' else '')
     Log('created')
@@ -249,7 +268,7 @@ else:
             while os.read(0, 1024):
                 pass
             Log('eof')
-            status = 45 if scenario == 'virtctl-eof-error' else 0
+            status = int(os.environ.get('VIRTCTL_EOF_STATUS', '0'))
     if scenario != 'virtctl-foreign-race':
         # Deferred non-blocking delete: the Pod can linger while terminating.
         Log('removePod')
@@ -512,7 +531,7 @@ class RecoveryTests(unittest.TestCase):
         source = recovery.read_text()
         self.assertNotRegex(source, r'\bDie\b')
         messages = re.findall(r'(?:^|\{)[ \t]*: ([\'"])(.*?)\1', source, re.MULTILINE)
-        self.assertEqual(len(messages), 5)
+        self.assertEqual(len(messages), 4)
         for quote, message in messages:
             with self.subTest(message=message):
                 self.assertTrue(message[0].isupper())
@@ -683,8 +702,7 @@ class RecoveryTests(unittest.TestCase):
                    '--ignore-not-found', '-o', 'name']
         self.assertEqual(rawReads[0], ['-n', 'fixture-ns', 'get',
                                        'vm/fixture-vm', '-o', 'json'])
-        self.assertGreaterEqual(len(rawReads), 3)
-        self.assertEqual(rawReads[1:], [podRead] * (len(rawReads) - 1))
+        self.assertEqual(rawReads[1:], [podRead])
         self.AssertDeleted()
 
     def test_vm_status_partial_output_does_not_propagate_producer_failure(self):
@@ -760,10 +778,8 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 25, result.stderr)
         self.assertIn('mock startup timeout', result.stderr)
         self.assertIn('mock delete failure', result.stderr)
-        calls = [call[0] for call in self.Calls()]
-        self.assertEqual(calls[:2], ['get', 'get'])
-        self.assertEqual(set(calls[2:-2]), {'get'})
-        self.assertEqual(calls[-2:], ['wait', 'delete'])
+        self.assertEqual([call[0] for call in self.Calls()],
+                         ['get', 'get', 'wait', 'wait', 'delete'])
         self.assertTrue((self.root / 'helper-pod').exists())
         self.assertFalse((self.out / 'extraction-summary.json').exists())
 
@@ -783,7 +799,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIn("trap 'exit 143' TERM", source)
         self.assertEqual(re.findall(r'^trap .*$', source, re.MULTILINE), [(
             'trap \'Cleanup "$?" "${guestfsPid}" "${guestfsIn}" '
-            '"${ownedPod}"\' EXIT')])
+            '"${hlprPod}"\' EXIT')])
         cleanup = re.search(r'^function Cleanup \(\) \{\n.*?^\}', source, re.MULTILINE | re.DOTALL).group()
         self.assertNotIn('timeout --', cleanup)
         self.assertNotIn('--wait=false', cleanup)
@@ -792,10 +808,11 @@ class RecoveryTests(unittest.TestCase):
     def test_parameterized_helper_arguments_and_native_calls(self):
         source = recovery.read_text()
         for name, arguments, expected in (
-            ('Cleanup', [], 1), ('Cleanup', ['0', '', ''], 1),
-            ('Cleanup', ['0', '', '', ''], 0),
-            ('Cleanup', ['0', '', '', 'other-pod'], 0),
-            ('Cleanup', ['0', '', '', 'other-pod', 'ignored'], 0),
+            ('Cleanup', [], 1), ('Cleanup', ['0', '0', '0'], 1),
+            ('Cleanup', ['0', '0', '0', ''], 0),
+            ('Cleanup', ['0', '0', '0', 'other-pod'], 0),
+            ('Cleanup', ['0', 'LIVE', '0', 'other-pod'], 0),
+            ('Cleanup', ['3', 'LIVE', '0', 'other-pod', 'ignored'], 3),
             ('FindNTFS', [], 1), ('FindNTFS', ['other-pod'], 1),
             ('FindNTFS', ['', 'other-container'], 1), ('FindNTFS', ['other-pod', ''], 1),
             ('FindNTFS', ['other-pod', 'other-container'], 0),
@@ -807,22 +824,33 @@ class RecoveryTests(unittest.TestCase):
                 (self.root / 'helper-pod').touch()
                 helper = re.search(r'^function ' + name + r' \(\) \{\n.*?^\}', source,
                                    re.MULTILINE | re.DOTALL).group()
+                live = ('sleep 0.2 &\nset -- "${@/#LIVE/$!}"\n'
+                        if 'LIVE' in arguments else '')
                 command = ('set -euxo pipefail; shopt -s inherit_errexit\n'
-                           'typeset ns=fixture-ns helperPod=wrong-pod helperPodCtr=wrong-container\n'
-                           + helper + '\n' + name + ' "$@"\n')
+                           'typeset ns=fixture-ns hlprPod=wrong-pod '
+                           'helperPodCtr=wrong-container\n'
+                           + helper + '\n' + live + name + ' "$@"\n')
                 result = subprocess.run(['bash', '-c', command, 'argument-fixture', *arguments],
                                         env=self.env, text=True, capture_output=True, timeout=10)
                 self.assertEqual(result.returncode, expected, result.stderr)
                 calls = [json.loads(line) for line in callsFile.read_text().splitlines()] if callsFile.exists() else []
-                if expected:
+                if expected == 1:
                     self.assertEqual(calls, [])
                     self.assertIn('parameter not set' if name == 'Cleanup' else
                                   'parameter null or not set', result.stderr)
                 elif name == 'Cleanup':
+                    # No child (PID 0) means nothing to delete or reap.
+                    self.assertNotIn('+ kill -0 0\n', result.stderr)
+                    self.assertNotIn('+ wait 0\n', result.stderr)
                     self.assertEqual(calls, [
                         ['-n', 'fixture-ns', 'delete', 'pod/other-pod', '--ignore-not-found',
                          '--timeout=60s', '--wait=true'],
-                    ] if arguments[3] else [])
+                    ] if arguments[1] == 'LIVE' else [])
+                    if arguments[1] == 'LIVE':
+                        reap = result.stderr.index('+ wait ')
+                        delete = result.stderr.index(
+                            '+ oc -n fixture-ns delete')
+                        self.assertEqual(reap < delete, arguments[0] == '0')
                 else:
                     self.assertEqual(calls, [[
                         '-n', 'fixture-ns', 'exec', 'other-pod', '-c', 'other-container', '--',
@@ -832,8 +860,9 @@ class RecoveryTests(unittest.TestCase):
 
     def test_parameterized_helpers_have_direct_main_and_exit_callers(self):
         source = recovery.read_text()
-        self.assertIn('done 0< <(FindNTFS "${helperPod}" "${helperPodCtr}")', source)
-        self.assertIn('\nCleanup "${helperPod}"\n', source)
+        self.assertIn('done 0< <(FindNTFS "${hlprPod}" "${helperPodCtr}")',
+                      source)
+        self.assertIn('"${hlprPod}"\' EXIT', source)
         self.assertNotIn('ntfsOutput', source)
         self.assertNotRegex(source, r'\bcontainer=|\$\{container\}|\bdevice=|\$\{device\}')
         self.assertNotIn('Cleanup ||', source)
