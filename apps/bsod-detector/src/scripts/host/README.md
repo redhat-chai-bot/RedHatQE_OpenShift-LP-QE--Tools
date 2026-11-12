@@ -238,7 +238,10 @@ Writes all collected VM/storage/config data needed by downstream scripts.
 **Purpose**: Offline NTFS artifact extraction from stopped VM disk.
 
 **Usage**: `extract--guest-os--crash-info.sh --metadata METADATA.json`.
-Optionally export `BSOD_DET__GUEST_FS__CTR_IMG` before running the extractor, watcher or container. The extractor uses the value directly; unset or empty uses `quay.io/konveyor/oadp-vmfr-access:latest`. The legacy image environment variable is not consulted.
+Optionally export `BSOD_DET__GUEST_FS__CTR_IMG` before running the extractor, watcher or container. The extractor
+passes the value directly to `virtctl guestfs --image`; unset or empty uses the pinned default
+`quay.io/kubevirt/libguestfs-tools:20261112_5c3989e66e`.
+The legacy image environment variable is not consulted.
 Run it as an executable, as the watcher and container entrypoint do; it is not a sourceable shell library.
 The output directory comes only from metadata `.outputDir`; there is no extractor `--out` option.
 The extractor preserves the provided path spelling and accepts existing directory aliases and arbitrary directory names.
@@ -249,14 +252,31 @@ It does not revalidate evidence-mount identity or preflight-only storage/image f
 Preflight's persistent-storage validation is unchanged; extraction no longer checks whether that mount changed afterwards.
 Container `MODE=recover` takes the same metadata-only arguments; watcher/preflight and archived `MODE=extract` retain their own `--out` options.
 Extraction inherits stdout/stderr (captured in `watcher.log` when called by the watcher); it creates no `extraction.log` or stage-error entries. The final summary invocation is commented out pending the Python refactor; pre-existing summary and stage-error files are not revalidated or modified.
-Cleanup takes a required nonempty pod-name argument, uses native `oc delete --ignore-not-found` with its default wait behavior, then `oc wait --for=delete --timeout=60s`. The helper name is initialized before `trap 'Cleanup "${helperPod}"' EXIT`, which performs the only cleanup attempt; no main-path retry, ownership flag or custom INT/TERM trap is added. Native cleanup errors can replace an earlier exit status. A transient delete failure can leave the helper present because cleanup is not retried.
+`trap 'Cleanup "$?" "${guestfsPid}" "${guestfsIn}" "${ownedPod}"' EXIT` is the only cleanup; no custom INT/TERM trap
+is added. Cleanup closes the owned virtctl stdin descriptor and reaps virtctl. It deletes this run's helper with one
+blocking `oc delete --ignore-not-found --timeout=60s --wait=true` only while virtctl still runs; an exited virtctl
+has already requested deletion of any Pod it created. After success it reaps before deleting (virtctl attaches to the
+Running Pod and exits on EOF); after a failure it deletes first, which also ends a virtctl wait on a Pending Pod.
+A delete failure replaces the exit status; a virtctl failure replaces only a zero status. Failures before virtctl
+starts make no cleanup calls. When polling gives up before the Pod exists, the reap lasts as long as virtctl runs
+(upstream waits up to 500s for Running after it creates the Pod).
 
 **Responsibilities**:
 - Validate output path and preflight metadata integrity
 - Require the metadata target VM's printable status to be **Stopped**, using a direct process substitution; no VMI absence or namespace-wide PVC scan is performed. Empty/malformed responses and non-Stopped statuses block extraction, but valid Stopped JSON followed by an API failure can pass because the producer exit status is not propagated. This point-in-time status check is not an exclusive PVC lock.
-- Create a `guest-fs--ntfs--<epoch>-<pid>` helper using `BSOD_DET__GUEST_FS__CTR_IMG` directly, defaulting unset or empty to `quay.io/konveyor/oadp-vmfr-access:latest` (no legacy environment fallback), with `force_kvm`: request/limit one `devices.kubevirt.io/kvm` device. The initial budget requests 512Mi memory and 500m CPU, with limits of 2Gi memory and 2000m CPU; adequacy has not been measured. The supplied Pod template has no node selector or fsGroup; it uses `/bin/bash -c` with `args: [exec tail -f /dev/null]`, the `vm-disk` read-only PVC and `guest-fs--tmp`/`guest-fs--home` emptyDirs. A quoted static YAML template passes through `oc create --dry-run=client -o json --save-config`, then `jq --arg` injects only pod name, namespace, container name, image and PVC. The container name and image are blank in the template; nested jq updates set the name from `helperPodCtr` (normally `libguestfs`) and image together. The client accepts blank container-name/image/PVC placeholders and fills the blank namespace from local context; marshalling overwrites it. The original YAML has no annotations. Client `--save-config` generates a last-applied annotation; grouped jq updates preserve it unchanged in the raw apply input, including its template placeholders. This is not a claim about server-side final annotations; no `yq` is required. Rendering the same inputs yields the same payload, not whole-script idempotence.
-- Recovery tests require the real `oc` client on `PATH` for offline YAML-to-JSON generation; API operations and apply remain mocked. Generation/marshalling failures stop subsequent helper execution under `pipefail`; apply is a concurrent pipeline stage, not a transactional producer-status gate.
-- Wait once for the helper's Ready condition with native `oc wait --timeout=180s`, discarding stdout; no extractor `--request-timeout` or added process deadline is used. A failed wait stops before helper execution and triggers cleanup. Cleanup retains its supplied 60-second deletion wait.
+- Reject a pre-existing `libguestfs-tools-<pvc>` Pod before starting virtctl; it is never adopted or deleted.
+- Run `virtctl -n <ns> guestfs --vm <vm> --image <image> <pvc>` as a Bash coprocess. Its PID is saved at once, its
+  stdin write end moves to a descriptor owned by the extractor and its stdout goes to stderr. Upstream virtctl
+  creates `libguestfs-tools-<pvc>` with container `libguestfs` and the block PVC at `/dev/vda`, waits up to 500s for
+  Running, then attaches a TTY. Stdin EOF ends the attach, after which virtctl deletes the Pod without waiting.
+- Poll with `oc get --ignore-not-found` once per second, up to 60 attempts (no `oc wait --for=create`, so older
+  clients work); exhaustion fails with a `Helper Pod not created` breadcrumb. Each attempt first checks that virtctl
+  still runs: an exited virtctl ends the run with its failure status, or 1 if it exited 0. A Pod found while virtctl
+  runs is attributed to this run; upstream exposes no Pod UID, so a same-name Pod created by someone else in that
+  window cannot be told apart, but cleanup never deletes once virtctl has exited. A same-name Pod that does not use
+  the PVC makes virtctl's own create fail, and upstream's deferred delete then removes it; the extractor cannot
+  prevent that. Then wait once for Ready (`--timeout=180s`, stdout discarded) and check virtctl again before any
+  `oc exec` and after extraction.
 - Discover filesystems once through `FindNTFS "${helperPod}" "${helperPodCtr}"`, whose required arguments select the pod/container independently of the caller's variables. Its process-substitution status remains unchecked: failed/empty discovery can reach placeholder artifacts and return zero without the deferred summary gate; partial valid producer output can still trigger extraction despite the producer failure.
 - Probe each NTFS partition with readonly `guestfish -ra /dev/vda ... mount-ro ... ls /Windows`; failed probes continue to the next partition. `set-program virt-sh` sets an informative name, not a different executable.
 - Iterate `fileArr` original keys, default empty mappings to the source path, normalize file/directory trailing slashes and anchor each final destination under the helper temporary directory. Recursively `copy-out` to the destination parent inside a subshell retaining `exec -a virt-sh`; then rename the source basename with native `mv -T` when necessary. A failed copy stops that helper Bash before rename and the outer loop continues independently. Each copy starts a separate guestfish session; the parent helper Bash survives the subshell exec to rename and reach its final `true`.
@@ -282,7 +302,7 @@ guest-fs--crash-info--<partition>.tgz  (archive members: Windows/System32/winevt
 | `BSOD_DET__COMMAND__TIMEOUT` | Command timeout (default: 30s) |
 | `BSOD_DET__EXTRACT_EVTX__BIN` | Legacy override referenced only by the commented parser hook; the active pipeline does not use it |
 | `BSOD_DET__DATA__DIR` | Legacy override referenced only by the commented parser hook; active pipeline does not use it |
-| `BSOD_DET__GUEST_FS__CTR_IMG` | Guestfs helper image; unset or empty defaults to `quay.io/konveyor/oadp-vmfr-access:latest`, with no legacy environment fallback |
+| `BSOD_DET__GUEST_FS__CTR_IMG` | `virtctl guestfs` image; unset or empty uses the pinned tag, no legacy fallback |
 
 ---
 
@@ -582,13 +602,13 @@ evidence-summary.json         Final pipeline verdict
 | Function | Purpose |
 |----------|---------|
 | `FindNTFS()` | Read filesystem discovery from the required helper pod/container |
-| `Cleanup()` | EXIT-only native pod delete and deletion wait |
+| `Cleanup()` | EXIT-only: close virtctl stdin, delete this run's helper, reap virtctl |
 
 #### Extraction Flow
 
 1. Read the five required metadata fields and create the shared output directory.
 2. Require target VM printableStatus Stopped; process-substitution producer status is not propagated.
-3. Render/apply the read-only helper Pod and wait once for Ready.
+3. Reject a pre-existing helper, start the `virtctl guestfs` coprocess, poll for its Pod and wait once for Ready.
 4. Probe each NTFS partition, independently copy requested EVTX files in the helper, then stream `guest-fs--crash-info--<partition>.tgz`.
 5. Leave only `# Python Code to parse MEMORY.DMP` as a placeholder; no parser, JSON or checksum generation is performed.
 6. Skip the commented final summary validator; run EXIT cleanup once. Native errors remain visible, but zero is not extraction-completeness proof.

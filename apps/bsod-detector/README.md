@@ -668,8 +668,10 @@ The `.evtx` files are extracted from the stopped VM's NTFS disk into `guest-fs--
 ```
 Stop VM (virtctl stop)
     ↓
-Create guest-fs--ntfs--<epoch>-<pid> helper (BSOD_DET__GUEST_FS__CTR_IMG, force_kvm backend)
-PVC attached as block device → /dev/vda inside pod
+Reject a pre-existing libguestfs-tools-<pvc> Pod (never adopted or deleted)
+virtctl guestfs --vm <vm> --image <image> <pvc> as a coprocess with owned stdin
+Bounded Pod polling while virtctl runs, then one Ready wait
+Block PVC attached as /dev/vda inside the libguestfs container
     ↓
 Readonly guestfish Windows probe per NTFS partition
 Independent file sessions: helper mkdir -p, guestfish -ra /dev/vda
@@ -678,7 +680,7 @@ Independent file sessions: helper mkdir -p, guestfish -ra /dev/vda
 Helper test -d /tmp/bsod--guest-files--<epoch>/
 Helper tar zc -C <directory>/ ./ → guest-fs--crash-info--<partition>.tgz on runner
     ↓
-Delete pod, cleanup
+Close virtctl stdin, delete this run's Pod, reap virtctl
 ```
 
 **One guestfish session** = one QEMU startup for all target files. Multiple separate sessions caused pod OOM on the second file transfer.
@@ -708,7 +710,18 @@ capabilities:
   drop: ["ALL"]
 ```
 
-`force_kvm` requires a schedulable `devices.kubevirt.io/kvm` device (request and limit `"1"`). The helper's initial resource budget requests 512Mi memory and 500m CPU, with limits of 2Gi memory and 2000m CPU; it sets no node selector or fsGroup. This is not measured resource adequacy. Availability of KVM and admission of this Pod must be validated in the target environment; offline rendering tests do not prove runtime scheduling or guestfish success.
+virtctl owns the helper Pod spec (upstream `pkg/virtctl/guestfs`): the security context above, one
+`devices.kubevirt.io/kvm` limit, no CPU or memory budget, no `force_kvm` setting and pull policy `IfNotPresent`.
+It mounts the PVC read-write and keeps the default service-account token; guestfish sessions stay read-only.
+`--vm` (virtctl v1.6.0+) copies the VM's tolerations, affinity, node selector and template labels. virtctl
+refuses a PVC used by any other Pod, in any phase. Unset or empty `BSOD_DET__GUEST_FS__CTR_IMG` uses the pinned
+default:
+
+```
+quay.io/kubevirt/libguestfs-tools:20261112_5c3989e66e
+```
+
+Lifecycle tests mock virtctl and oc; they do not prove scheduling, KVM availability or guestfish success.
 
 ---
 
@@ -889,5 +902,5 @@ apps/bsod-detector/
 | `BSOD_DET__COMMAND__TIMEOUT` | No | `30` | Command timeout (seconds) |
 | `BSOD_DET__READY__TIMEOUT` | No | `300` | Watcher readiness timeout |
 | `BSOD_DET__PREFLIGHT__TIMEOUT` | No | `300` | Positive-integer validation only; trigger currently uses a fixed 1800s preflight timeout |
-| `BSOD_DET__GUEST_FS__CTR_IMG` | No | `quay.io/konveyor/oadp-vmfr-access:latest` | guestfs helper image; unset or empty uses the default, with no legacy environment fallback |
+| `BSOD_DET__GUEST_FS__CTR_IMG` | No | Pinned nightly tag | `virtctl guestfs` image; no legacy fallback |
 | `BSOD_RECOVERY_IMAGE` | No | — | Digest-pinned recovery image |

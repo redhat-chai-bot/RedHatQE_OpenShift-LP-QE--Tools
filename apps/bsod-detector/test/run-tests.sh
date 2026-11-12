@@ -21,7 +21,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
   "${testDir}/test_recovery.py" \
   "${testDir}/test_evtx.py" \
   "${testDir}/test_container_contract.py" \
-  "${testDir}/test_recursive_mapping.py"
+  "${testDir}/test_recursive_mapping.py" \
+  "${testDir}/test_guestfs_lifecycle.py"
 
 # Keep the default suite explicit: archived pre-RHOV Bats files live under
 # archieve/test and must not be mistaken for active workflow coverage.

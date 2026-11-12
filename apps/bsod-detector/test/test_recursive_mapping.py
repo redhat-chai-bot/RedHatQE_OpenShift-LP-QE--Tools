@@ -114,7 +114,8 @@ class RecursiveMappingTests(unittest.TestCase):
         deletes = [call for call in self.Calls() if call[0] == 'delete']
         self.assertEqual(len(deletes), 1)
         self.assertEqual(deletes[0][1:3], ['-n', self.metadata['namespace']])
-        self.assertRegex(deletes[0][3], r'^pod/guest-fs--ntfs--[0-9]+-[0-9]+$')
+        self.assertEqual(deletes[0][3], 'pod/libguestfs-tools-'
+                         + self.metadata['guestPvc'])
         self.assertEqual(deletes[0][4:], ['--ignore-not-found', '--timeout=60s', '--wait=true'])
         self.assertFalse(any(call[0] == 'wait' and '--for=delete' in call for call in self.Calls()))
 
@@ -214,7 +215,8 @@ class RecursiveMappingTests(unittest.TestCase):
         self.assertEqual(len(self.Contents()), 3)
 
     def test_native_failure_and_cleanup_contracts(self):
-        for scenario, status in (('api-error', 1), ('wait-error', 19), ('apply-error', 18),
+        for scenario, status in (('api-error', 1), ('wait-error', 19),
+                                 ('virtctl-error', 41),
                                  ('cleanup-error', 25), ('cleanup-wait-error', 28),
                                  ('cleanup-wait-timeout', 28), ('tar-error', 35)):
             with self.subTest(scenario=scenario):
@@ -223,6 +225,10 @@ class RecursiveMappingTests(unittest.TestCase):
                 self.addCleanup(case.doCleanups)
                 result = case.RunRecovery(scenario)
                 self.assertEqual(result.returncode, status, result.stderr)
+                if scenario in ('api-error', 'virtctl-error'):
+                    self.assertFalse([call for call in case.Calls()
+                                      if call[0] == 'delete'])
+                    continue
                 case.AssertBlockingDelete()
                 if scenario.startswith('cleanup-'):
                     self.assertTrue((case.root / 'helper-pod').exists())

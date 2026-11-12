@@ -23,7 +23,7 @@ done
 }
 
 typeset tool=''
-for tool in oc jq; do
+for tool in oc jq virtctl; do
     command -v "${tool}" 1> /dev/null || {
         : "Required tool missing: ${tool}"
         false
@@ -86,19 +86,42 @@ function FindNTFS () {
 }
 
 function Cleanup () {
-    typeset podName="${1:?}"; (($#)) && shift
+    typeset -i exitRc="${1?}"; (($#)) && shift
+    typeset guestfsPid="${1?}"; (($#)) && shift
+    typeset guestfsIn="${1?}"; (($#)) && shift
+    typeset podName="${1?}"; (($#)) && shift
+    typeset -i delRc=0 childRc=0
+
+    # An exited virtctl already requested deletion of any Pod it created, so a
+    # same-name Pod is then not this run's to delete.
+    [ -z "${guestfsPid}" ] || kill -0 "${guestfsPid}" || podName=''
+    # EOF ends the virtctl attach session; virtctl then deletes its helper.
+    [ -z "${guestfsIn}" ] || exec {guestfsIn}>&-
+    # After success the helper is Running: virtctl attaches, reads EOF and
+    # exits, so reap it first. After a failure, deleting first also ends a
+    # virtctl wait on a Pending Pod.
+    ((exitRc)) || [ -z "${guestfsPid}" ] || wait "${guestfsPid}" || childRc=$?
     [ -z "${podName}" ] || {
         oc -n "${ns}" delete "pod/${podName}" \
             --ignore-not-found \
             --timeout=60s \
-            --wait=true
+            --wait=true ||
+        delRc=$?
     }
+    ((exitRc == 0)) || [ -z "${guestfsPid}" ] ||
+    wait "${guestfsPid}" || childRc=$?
+
+    ((delRc == 0)) || return "${delRc}"
+    ((exitRc || (childRc == 0))) || return "${childRc}"
     true
 }
 
-typeset helperPod="guest-fs--ntfs--$(date -u +'%s')-$$"
+typeset helperPod="libguestfs-tools-${guestPVC}"
 typeset helperPodCtr='libguestfs'
-trap 'Cleanup "${helperPod}"' EXIT
+typeset dfltCtrImg='quay.io/kubevirt/libguestfs-tools:20261112_5c3989e66e'
+typeset guestfsPid='' guestfsIn='' ownedPod='' podRef=''
+typeset -i podPoll=0
+trap 'Cleanup "$?" "${guestfsPid}" "${guestfsIn}" "${ownedPod}"' EXIT
 
 jq -es '
     ((length == 1) and (.[0].status.printableStatus == "Stopped"))
@@ -106,99 +129,42 @@ jq -es '
     oc -n "${ns}" get vm/"${vm}" -o json
 ) 1> /dev/null
 
-{
-    oc create -f - --dry-run=client -o json --save-config |
-    jq -c \
-        --arg name "${helperPod}" \
-        --arg ns "${ns}" \
-        --arg ctrName "${helperPodCtr}" \
-        --arg ctrImg "${BSOD_DET__GUEST_FS__CTR_IMG:-quay.io/konveyor/oadp-vmfr-access:latest}" \
-        --arg pvc "${guestPVC}" \
-        '
-            .metadata|=(
-                .name=$name |
-                .namespace=$ns
-            ) |
-            .spec|=(
-                .containers[0]|=(
-                    .name=$ctrName |
-                    .image=$ctrImg
-                ) |
-                .volumes[0].persistentVolumeClaim.claimName=$pvc
-            )
-        '
-} 0<<'ocEOF' | oc apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  labels:
-    app: bsod--guest-fs--extraction
-  name: guest-fs--ntfs
-  namespace: ''
-spec:
-  automountServiceAccountToken: false
-  containers:
-    - name: ''
-      image: ''
-      imagePullPolicy: Always
-      command:
-        - /bin/bash
-        - -c
-      args:
-        - exec tail -f /dev/null
-      workingDir: /tmp/guestfs
-      env:
-        - name: LIBGUESTFS_BACKEND
-          value: direct
-        - name: LIBGUESTFS_BACKEND_SETTINGS
-          value: force_kvm
-        - name: LIBGUESTFS_TMPDIR
-          value: /tmp/guestfs
-        - name: LIBGUESTFS_CACHEDIR
-          value: /tmp/guestfs
-        - name: HOME
-          value: /home/guestfs
-      securityContext:
-        allowPrivilegeEscalation: false
-        capabilities:
-          drop:
-            - ALL
-      resources:
-        requests:
-          memory: 512Mi
-          cpu: 500m
-          devices.kubevirt.io/kvm: "1"
-        limits:
-          memory: 2Gi
-          cpu: 2000m
-          devices.kubevirt.io/kvm: "1"
-      volumeDevices:
-        - name: vm-disk
-          devicePath: /dev/vda
-      volumeMounts:
-        - name: guest-fs--tmp
-          mountPath: /tmp/guestfs
-        - name: guest-fs--home
-          mountPath: /home/guestfs
-  restartPolicy: Never
-  securityContext:
-    runAsNonRoot: true
-    seccompProfile:
-      type: RuntimeDefault
-  volumes:
-    - name: vm-disk
-      persistentVolumeClaim:
-        claimName: ''
-        readOnly: true
-    - name: guest-fs--tmp
-      emptyDir: {}
-    - name: guest-fs--home
-      emptyDir: {}
-ocEOF
+# virtctl names its helper libguestfs-tools-<pvc>; never adopt or delete a
+# same-name Pod that existed before this run.
+podRef="$(oc -n "${ns}" get "pod/${helperPod}" --ignore-not-found -o name)"
+[ -z "${podRef}" ] || {
+    : "Pre-existing helper Pod: ${podRef}"
+    false
+}
+coproc guestfsProc {
+    exec virtctl -n "${ns}" guestfs \
+        --vm "${vm}" \
+        --image "${BSOD_DET__GUEST_FS__CTR_IMG:-${dfltCtrImg}}" \
+        "${guestPVC}" \
+        1>&2
+}
+# shellcheck disable=SC2154  # Set by the coproc builtin.
+guestfsPid="${guestfsProc_PID}"
+exec {guestfsIn}>&"${guestfsProc[1]}"-
 
+# Poll with bounded gets: `oc wait` on older clients cannot await creation.
+# An exited virtctl ends the run with its failure status (1 if it exited 0);
+# a helper found while virtctl still runs is attributed to this run.
+while :; do
+    kill -0 "${guestfsPid}" || { wait "${guestfsPid}"; false; }
+    podRef="$(oc -n "${ns}" get "pod/${helperPod}" --ignore-not-found -o name)"
+    [ -z "${podRef}" ] || break
+    ((++podPoll < 60)) || {
+        : "Helper Pod not created: ${helperPod}"
+        false
+    }
+    sleep 1
+done
+ownedPod="${helperPod}"
 oc -n "${ns}" wait "pod/${helperPod}" \
     --for=condition=Ready \
     --timeout=180s 1> /dev/null
+kill -0 "${guestfsPid}" || { wait "${guestfsPid}"; false; }
 
 typeset -A fileArr=(
     [/pagefile.sys]='/MEMORY.DMP'
@@ -274,6 +240,8 @@ while IFS= read -r ntfsPart; do
         }
     }
 done 0< <(FindNTFS "${helperPod}" "${helperPodCtr}")
+# A virtctl that exited during extraction has also deleted its helper.
+kill -0 "${guestfsPid}" || { wait "${guestfsPid}"; false; }
 
 # Python Code to parse MEMORY.DMP
 # Revisit summary validation when reliability.py is refactored.
