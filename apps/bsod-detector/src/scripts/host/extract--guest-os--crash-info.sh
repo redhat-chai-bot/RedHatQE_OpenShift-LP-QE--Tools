@@ -94,7 +94,7 @@ function Cleanup () {
 
     # An exited `virtctl` already requested deletion of any Pod it created, so
     # a same-name Pod is then not this run's to delete.
-    ((hlprPodPid)) && kill -0 "${hlprPodPid}" || hlprPodName=''
+    ((hlprPodPid)) && kill -0 ${hlprPodPid} || hlprPodName=''
     # EOF ends the `virtctl guestfs` child process, then deletes its helper.
     ((hlprPodStdIn)) && exec {hlprPodStdIn}>&-
     # On clean exit, close the `virtctl guestfs` child process first, then
