@@ -132,7 +132,7 @@ jq -es '
 
 # The `virtctl guestfs` names the helper Pod as `libguestfs-tools-<pvc>`.
 # Do NOT adopt or delete a same-name Pod that existed before this run.
-podRef="$(oc -n "${ns}" get "pod/${hlprPod}" --ignore-not-found -o name)"
+podRef="$(oc -n "${ns}" get -o name "Pod/${hlprPod}" --ignore-not-found)"
 [ -z "${podRef}" ] || {
     : "Pre-existing helper Pod: ${podRef}"
     false

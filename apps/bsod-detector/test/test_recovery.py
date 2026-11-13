@@ -67,9 +67,10 @@ if args[0] == 'get':
             sys.exit(17)
         else:
             print('{"status":{"printableStatus":"Stopped"}}')
-    elif args[3].startswith('pod/'):
+    elif any(arg.lower().startswith('pod/') for arg in args):
+        podArg = next(a for a in args if a.lower().startswith('pod/'))
         if (root / 'helper-pod').exists():
-            print(args[3])
+            print('pod/' + podArg.split('/', 1)[1])
     else:
         sys.exit(91)
 elif args[0] == 'wait':
@@ -698,8 +699,8 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(any('vmi' in call for call in reads))
         rawReads = [json.loads(line) for line in (self.root / 'oc-argv.jsonl').read_text().splitlines()
                     if '"get"' in line]
-        podRead = ['-n', 'fixture-ns', 'get', 'pod/libguestfs-tools-rootdisk',
-                   '--ignore-not-found', '-o', 'name']
+        podRead = ['-n', 'fixture-ns', 'get', '-o', 'name',
+                   'Pod/libguestfs-tools-rootdisk', '--ignore-not-found']
         self.assertEqual(rawReads[0], ['-n', 'fixture-ns', 'get',
                                        'vm/fixture-vm', '-o', 'json'])
         self.assertEqual(rawReads[1:], [podRead])
