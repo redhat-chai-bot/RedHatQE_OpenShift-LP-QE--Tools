@@ -123,19 +123,19 @@ class GuestfsLifecycleTests(unittest.TestCase):
         self.assertLess(ready, source.index('FindNTFS "${hlprPod}"'))
 
     def test_owned_stdin_descriptor_survives_coprocess_reaping(self):
-        line = 'exec {guestfsIn}>&"${guestfsProc[1]}"-'
+        line = 'exec {guestfsStdIn}>&"${guestfsProc[1]}"-'
         self.assertEqual(fixtures.recovery.read_text().count(line), 1)
         script = ('set -euo pipefail\n'
-                  'typeset -i guestfsIn=0\n'
+                  'typeset -i guestfsStdIn=0\n'
                   'coproc guestfsProc { sleep 0.3; exit 3; }\n'
                   'typeset -i pid="${guestfsProc_PID}"\n'
                   + line + '\n'
                   'wait "${pid}" || (($? == 3))\n'
                   '/bin/true\n'
-                  '[ -e "/proc/$$/fd/${guestfsIn}" ]\n'
-                  'echo "${guestfsIn} ${guestfsProc[1]-unset}"\n'
-                  'exec {guestfsIn}>&-\n'
-                  '[ ! -e "/proc/$$/fd/${guestfsIn}" ]\n')
+                  '[ -e "/proc/$$/fd/${guestfsStdIn}" ]\n'
+                  'echo "${guestfsStdIn} ${guestfsProc[1]-unset}"\n'
+                  'exec {guestfsStdIn}>&-\n'
+                  '[ ! -e "/proc/$$/fd/${guestfsStdIn}" ]\n')
         result = subprocess.run(['bash', '-c', script], text=True,
                                 capture_output=True, timeout=10, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)

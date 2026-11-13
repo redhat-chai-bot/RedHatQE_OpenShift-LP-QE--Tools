@@ -120,9 +120,9 @@ function Cleanup () {
 typeset hlprPod="libguestfs-tools-${guestPVC}"
 typeset helperPodCtr='libguestfs'
 typeset dfltCtrImg='quay.io/kubevirt/libguestfs-tools:20261112_5c3989e66e'
-typeset -i guestfsPid=0 guestfsIn=0
+typeset -i guestfsPid=0 guestfsStdIn=0
 typeset podRef=''
-trap 'Cleanup "$?" "${guestfsPid}" "${guestfsIn}" "${hlprPod}"' EXIT
+trap 'Cleanup "$?" "${guestfsPid}" "${guestfsStdIn}" "${hlprPod}"' EXIT
 
 jq -es '
     ((length == 1) and (.[0].status.printableStatus == "Stopped"))
@@ -130,8 +130,8 @@ jq -es '
     oc -n "${ns}" get vm/"${vm}" -o json
 ) 1> /dev/null
 
-# virtctl names its helper libguestfs-tools-<pvc>; never adopt or delete a
-# same-name Pod that existed before this run.
+# The `virtctl guestfs` names the helper Pod as `libguestfs-tools-<pvc>`.
+# Do NOT adopt or delete a same-name Pod that existed before this run.
 podRef="$(oc -n "${ns}" get "pod/${hlprPod}" --ignore-not-found -o name)"
 [ -z "${podRef}" ] || {
     : "Pre-existing helper Pod: ${podRef}"
@@ -144,13 +144,13 @@ coproc guestfsProc {
         "${guestPVC}" \
         1>&2
 }
-# shellcheck disable=SC2154  # Set by the coproc builtin.
+# shellcheck disable=SC2154 # Set by the `coproc` builtin.
 guestfsPid="${guestfsProc_PID}"
-# Bash opens a new unused descriptor (>=10), stores its number in guestfsIn
-# and, through the trailing '-', closes the original coproc write end. A
-# plain number assignment would not keep the descriptor alive: Bash closes
-# coproc descriptors itself once it reaps the coprocess.
-exec {guestfsIn}>&"${guestfsProc[1]}"-
+# The following makes Bash opens a new unused FD (>=10), stores its number in
+# the given var. and, through the trailing '-', closes the original `coproc`
+# write FD. A plain number assignment would not keep the FD alive: Bash closes
+# `coproc` descriptors itself once it reaps the coprocess.
+exec {guestfsStdIn}>&"${guestfsProc[1]}"-
 
 oc -n "${ns}" wait "pod/${hlprPod}" \
     --for=create \
@@ -158,9 +158,7 @@ oc -n "${ns}" wait "pod/${hlprPod}" \
 oc -n "${ns}" wait "pod/${hlprPod}" \
     --for=condition=Ready \
     --timeout=180s 1> /dev/null
-# Signal 0 checks that the local virtctl child exists and is signalable;
-# it sends no signal. Abort before extraction if this check fails.
-kill -0 "${guestfsPid}"
+kill -0 "${guestfsPid}" # Ensure the `virtctl guestfs` process is alive.
 
 typeset -A fileArr=(
     [/pagefile.sys]='/MEMORY.DMP'
@@ -236,9 +234,7 @@ while IFS= read -r ntfsPart; do
         }
     }
 done 0< <(FindNTFS "${hlprPod}" "${helperPodCtr}")
-# Recheck the local virtctl child after extraction, again without signalling.
-# Do not report success if the child is absent or no longer signalable.
-kill -0 "${guestfsPid}"
+kill -0 "${guestfsPid}" # Ensure the `virtctl guestfs` process is alive.
 
 # Python Code to parse MEMORY.DMP
 # Revisit summary validation when reliability.py is refactored.

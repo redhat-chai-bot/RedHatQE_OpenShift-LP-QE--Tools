@@ -798,7 +798,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIn("trap 'exit 130' INT", source)
         self.assertNotIn("trap 'exit 143' TERM", source)
         self.assertEqual(re.findall(r'^trap .*$', source, re.MULTILINE), [(
-            'trap \'Cleanup "$?" "${guestfsPid}" "${guestfsIn}" '
+            'trap \'Cleanup "$?" "${guestfsPid}" "${guestfsStdIn}" '
             '"${hlprPod}"\' EXIT')])
         cleanup = re.search(r'^function Cleanup \(\) \{\n.*?^\}', source, re.MULTILINE | re.DOTALL).group()
         self.assertNotIn('timeout --', cleanup)

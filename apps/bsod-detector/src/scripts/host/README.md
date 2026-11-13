@@ -252,10 +252,10 @@ It does not revalidate evidence-mount identity or preflight-only storage/image f
 Preflight's persistent-storage validation is unchanged; extraction no longer checks whether that mount changed afterwards.
 Container `MODE=recover` takes the same metadata-only arguments; watcher/preflight and archived `MODE=extract` retain their own `--out` options.
 Extraction inherits stdout/stderr (captured in `watcher.log` when called by the watcher); it creates no `extraction.log` or stage-error entries. The final summary invocation is commented out pending the Python refactor; pre-existing summary and stage-error files are not revalidated or modified.
-`trap 'Cleanup "$?" "${guestfsPid}" "${guestfsIn}" "${hlprPod}"' EXIT` is the only cleanup; no custom INT/TERM trap is
-added. The virtctl PID and stdin descriptor start as 0, so failures before virtctl starts make no kill, wait or delete
-calls. Cleanup deletes `hlprPod` with one blocking `oc delete --ignore-not-found --timeout=60s --wait=true` only if
-this run's virtctl was still running when cleanup began; liveness is not proof that the same-name Pod is this run's
+`trap 'Cleanup "$?" "${guestfsPid}" "${guestfsStdIn}" "${hlprPod}"' EXIT` is the only cleanup; no custom INT/TERM trap
+is added. The virtctl PID and stdin descriptor start as 0, so failures before virtctl starts make no kill, wait or
+delete calls. Cleanup deletes `hlprPod` with one blocking `oc delete --ignore-not-found --timeout=60s --wait=true` only
+if this run's virtctl was still running when cleanup began; liveness is not proof that the same-name Pod is this run's
 helper, and an exited virtctl has already requested deletion of any Pod it created. Cleanup always closes the owned
 stdin descriptor and reaps virtctl. After a clean exit it reaps before deleting (virtctl attaches to the Running Pod
 and exits on EOF); after a failure it deletes first, which also ends a virtctl wait on a Pending Pod. The exit status
