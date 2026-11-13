@@ -92,13 +92,16 @@ function Cleanup () {
     typeset hlprPodName="${1?}"; (($#)) && shift
     typeset -i hlprPodDelES=0 hlprPodES=0
 
-    # Delete only while this run's virtctl still runs; liveness is not proof
-    # that the same-name Pod is this run's helper.
+    # An exited `virtctl` already requested deletion of any Pod it created, so
+    # a same-name Pod is then not this run's to delete.
     ((hlprPodPid)) && kill -0 "${hlprPodPid}" || hlprPodName=''
-    # EOF ends the virtctl attach session; virtctl then deletes its helper.
+    # EOF ends the `virtctl guestfs` child process, then deletes its helper.
     ((hlprPodStdIn)) && exec {hlprPodStdIn}>&-
-    # Clean exit: the helper is Running, so virtctl attaches, reads EOF and
-    # exits; reap it before deleting.
+    # On clean exit, close the `virtctl guestfs` child process first, then
+    # ensure the helper Pod is deleted.
+    # On failure exit, delete the helper Pod first, in case the
+    # `virtctl guestfs` child process is still waiting (hence not yet reading
+    # its STDIN).
     ((es)) || ((! hlprPodPid)) || wait "${hlprPodPid}" || hlprPodES=$?
     [ -z "${hlprPodName}" ] || {
         oc -n "${ns}" delete "pod/${hlprPodName}" \
@@ -107,8 +110,6 @@ function Cleanup () {
             --wait=true ||
         hlprPodDelES=$?
     }
-    # Failure: delete first, which also ends a virtctl wait on a Pending Pod,
-    # then reap.
     ((! es)) || ((! hlprPodPid)) || wait "${hlprPodPid}" || hlprPodES=$?
 
     ((hlprPodDelES)) && return "${hlprPodDelES}"
