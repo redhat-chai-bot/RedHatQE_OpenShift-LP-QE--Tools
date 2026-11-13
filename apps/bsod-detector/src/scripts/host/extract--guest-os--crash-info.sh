@@ -146,10 +146,15 @@ coproc guestfsProc {
 }
 # shellcheck disable=SC2154 # Set by the `coproc` builtin.
 guestfsPid="${guestfsProc_PID}"
-# The following makes Bash opens a new unused FD (>=10), stores its number in
-# the given var. and, through the trailing '-', closes the original `coproc`
-# write FD. A plain number assignment would not keep the FD alive: Bash closes
-# `coproc` descriptors itself once it reaps the coprocess.
+# When the `coproc` process is terminated and reaped, Bash also closes the
+# parent's write end of its stdin pipe, `${guestfsProc[1]}`, freeing that FD
+# for reuse. If only the FD number was stored in another variable, that
+# variable may now refer to a closed or reused FD. A safer approach is to
+# duplicate the pipe's write end into another FD and close the original.
+# This new FD remains open in the parent even after the coprocess is reaped.
+# The following redirection opens a new unused FD (>=10), stores its number
+# in the given variable and, through the trailing '-', closes the original
+# `coproc` write FD.
 exec {guestfsStdIn}>&"${guestfsProc[1]}"-
 
 oc -n "${ns}" wait "pod/${hlprPod}" \
