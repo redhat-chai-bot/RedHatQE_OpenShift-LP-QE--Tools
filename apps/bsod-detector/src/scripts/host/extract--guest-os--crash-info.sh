@@ -119,7 +119,7 @@ function Cleanup () {
 
 typeset hlprPod="libguestfs-tools-${guestPVC}"
 typeset helperPodCtr='libguestfs'
-typeset dfltCtrImg='quay.io/kubevirt/libguestfs-tools:20261112_5c3989e66e'
+typeset defCtrImg='quay.io/kubevirt/libguestfs-tools:20261112_5c3989e66e'
 typeset -i guestfsPid=0 guestfsStdIn=0
 typeset podRef=''
 trap 'Cleanup "$?" "${guestfsPid}" "${guestfsStdIn}" "${hlprPod}"' EXIT
@@ -140,7 +140,7 @@ podRef="$(oc -n "${ns}" get "pod/${hlprPod}" --ignore-not-found -o name)"
 coproc guestfsProc {
     exec virtctl -n "${ns}" guestfs \
         --vm "${vm}" \
-        --image "${BSOD_DET__GUEST_FS__CTR_IMG:-${dfltCtrImg}}" \
+        --image "${BSOD_DET__GUEST_FS__CTR_IMG:-${defCtrImg}}" \
         "${guestPVC}" \
         1>&2
 }
