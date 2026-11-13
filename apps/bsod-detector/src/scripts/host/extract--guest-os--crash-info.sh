@@ -120,8 +120,8 @@ function Cleanup () {
 typeset hlprPod="libguestfs-tools-${guestPVC}"
 typeset helperPodCtr='libguestfs'
 typeset defCtrImg='quay.io/kubevirt/libguestfs-tools:20261112_5c3989e66e'
-typeset -i guestfsPid=0 guestfsStdIn=0
 typeset podRef=''
+typeset -i guestfsPid=0 guestfsStdIn=0
 trap 'Cleanup "$?" "${guestfsPid}" "${guestfsStdIn}" "${hlprPod}"' EXIT
 
 jq -es '
