@@ -158,7 +158,8 @@ oc -n "${ns}" wait "pod/${hlprPod}" \
 oc -n "${ns}" wait "pod/${hlprPod}" \
     --for=condition=Ready \
     --timeout=180s 1> /dev/null
-# An exited virtctl has already requested deletion of its helper.
+# Signal 0 checks that the local virtctl child exists and is signalable;
+# it sends no signal. Abort before extraction if this check fails.
 kill -0 "${guestfsPid}"
 
 typeset -A fileArr=(
@@ -235,7 +236,8 @@ while IFS= read -r ntfsPart; do
         }
     }
 done 0< <(FindNTFS "${hlprPod}" "${helperPodCtr}")
-# A virtctl that exited during extraction has also deleted its helper.
+# Recheck the local virtctl child after extraction, again without signalling.
+# Do not report success if the child is absent or no longer signalable.
 kill -0 "${guestfsPid}"
 
 # Python Code to parse MEMORY.DMP
