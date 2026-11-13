@@ -147,7 +147,7 @@ coproc guestfsProc {
 # shellcheck disable=SC2154 # Set by the `coproc` builtin.
 guestfsPid="${guestfsProc_PID}"
 # When the `coproc` process is terminated and reaped, Bash also closes the
-# parent's write end of its stdin pipe, `${guestfsProc[1]}`, freeing that FD
+# parent's write end of its STDIN pipe, `${guestfsProc[1]}`, freeing that FD
 # for reuse. If only the FD number was stored in another variable, that
 # variable may now refer to a closed or reused FD. A safer approach is to
 # duplicate the pipe's write end into another FD and close the original.
