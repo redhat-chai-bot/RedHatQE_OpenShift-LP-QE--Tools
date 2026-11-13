@@ -112,9 +112,9 @@ function Cleanup () {
     }
     ((! es)) || ((! hlprPodPid)) || wait "${hlprPodPid}" || hlprPodES=$?
 
-    ((hlprPodDelES)) && return "${hlprPodDelES}"
-    ((hlprPodES)) && return "${hlprPodES}"
-    return "${es}"
+    ((hlprPodDelES)) && return ${hlprPodDelES}
+    ((hlprPodES)) && return ${hlprPodES}
+    return ${es}
 }
 
 typeset hlprPod="libguestfs-tools-${guestPVC}"
