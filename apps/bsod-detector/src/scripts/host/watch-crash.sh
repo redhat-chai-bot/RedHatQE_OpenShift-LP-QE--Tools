@@ -7,7 +7,7 @@ umask 077
 typeset scriptDir=''; scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 typeset ns=''; typeset vm=''; typeset outArg=''; typeset outDir=''; typeset metadataFile=''; typeset runId=''
 typeset interval=5; typeset miss=2; typeset quiesceWait=900; typeset idleSamples=3
-typeset snapClass="${BSOD_DET__SNAPSHOT__CLASS:-}"; typeset recoveryImage="${BSOD_DET__RECOVERY__IMAGE:-}"
+typeset snapClass="${BSOD_DET__SNAPSHOT__CLASS:-}"
 typeset memoryPvc="${BSOD_DET__MEMORY__DUMP_PVC:-}"; typeset diskTarget=''; typeset noRestart=0
 typeset evidenceRoot="${BSOD_DET__EVIDENCE__MOUNT:-}"; typeset evidenceKind="${BSOD_EVIDENCE_VOLUME_KIND:-}"
 typeset evidenceId="${BSOD_DET__EVIDENCE__STORAGE_ID:-}"; typeset readyFile=''
@@ -68,13 +68,12 @@ while (($#)); do
     --quiesce-wait) quiesceWait="${2:?}"; shift 2 ;;
     --idle-samples) idleSamples="${2:?}"; shift 2 ;;
     --snap-class) snapClass="${2:?}"; shift 2 ;;
-    --recovery-image) recoveryImage="${2:?}"; shift 2 ;;
     --memory-dump-pvc) memoryPvc="${2:?}"; shift 2 ;;
     --disk-target) diskTarget="${2:?}"; shift 2 ;;
     --intentional) summaryMode='intentional-rhov'; shift ;;
     --no-restart) noRestart=1; shift ;;
     -h|--help)
-      echo 'usage: watch-crash.sh --ns NS --vm VM --out EVIDENCE_MOUNT_OR_RUN_DIR [--metadata PREFLIGHT.json --run-id ID] --evidence-mount MOUNT --evidence-volume-kind KIND --evidence-storage-id ID --snap-class CLASS --recovery-image IMAGE@sha256:DIGEST --memory-dump-pvc PVC [options]'
+      echo 'usage: watch-crash.sh --ns NS --vm VM --out EVIDENCE_MOUNT_OR_RUN_DIR [--metadata PREFLIGHT.json --run-id ID] --evidence-mount MOUNT --evidence-volume-kind KIND --evidence-storage-id ID --snap-class CLASS --memory-dump-pvc PVC [options]'
       exit 0 ;;
     *) Die "unknown argument: $1" ;;
   esac
@@ -98,7 +97,7 @@ else
   metadataFile="${outDir}/recovery-metadata.json"
   typeset -a preflightArgs=(--ns "${ns}" --vm "${vm}" --out "${outDir}" --metadata "${metadataFile}" --run-id "${runId}"
     --evidence-mount "${evidenceRoot}" --evidence-volume-kind "${evidenceKind}" --evidence-storage-id "${evidenceId}"
-    --snap-class "${snapClass}" --recovery-image "${recoveryImage}" --memory-dump-pvc "${memoryPvc}")
+    --snap-class "${snapClass}" --memory-dump-pvc "${memoryPvc}")
   [[ -n "${diskTarget}" ]] && preflightArgs+=(--disk-target "${diskTarget}")
   RunTimed "${preflightTimeout}" "${scriptDir}/preflight-rhov.sh" "${preflightArgs[@]}" || Die 'preflight failed or timed out'
 fi

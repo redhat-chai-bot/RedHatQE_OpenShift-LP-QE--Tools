@@ -9,8 +9,8 @@ typeset crashType="${1:-}"; typeset vm="${BSOD_DET__VM__NAME:-}"; typeset ns="${
 # Storage configuration: evidence root (mounted PVC), volume kind, and storage identity
 typeset evidenceRoot="${BSOD_DET__EVIDENCE__DIR:-/mnt/persistent-bsod-evidence}"; typeset evidenceKind="${BSOD_EVIDENCE_VOLUME_KIND:-pvc}"
 typeset evidenceId="${BSOD_DET__EVIDENCE__STORAGE_ID:-shared-bsod-evidence}"; typeset memoryPvc="${BSOD_DET__MEMORY__DUMP_PVC:-${BSOD_DET__VM__NAME}-memdump}"
-# Kubernetes storage classes and container image for extraction pod
-typeset snapClass="${BSOD_DET__SNAPSHOT__CLASS:-ocs-storagecluster-rbdplugin-snapclass}"; typeset recoveryImage="${BSOD_DET__RECOVERY__IMAGE:-quay.io/konveyor/oadp-vmfr-access:latest@sha256:e26c74ce8957768bd0bca7fdec01e28874c834cfdbea6fb9e8a5136ec7548cf0}"
+# Kubernetes storage class for snapshot recovery
+typeset snapClass="${BSOD_DET__SNAPSHOT__CLASS:-ocs-storagecluster-rbdplugin-snapclass}"
 # Timeouts: how long to wait for watcher readiness and preflight validation
 typeset readyTimeout="${BSOD_DET__READY__TIMEOUT:-300}"
 typeset preflightTimeout="${BSOD_DET__PREFLIGHT__TIMEOUT:-300}"
@@ -79,7 +79,7 @@ typeset nmfExpectedSize; nmfExpectedSize="$(stat -c%s "${nmfBin}")"
 mkdir "${outDir}" || Die "cannot create unique run directory ${outDir}"
 timeout --signal=TERM --kill-after=5 1800 "${hostDir}/preflight-rhov.sh" --ns "${ns}" --vm "${vm}" --out "${outDir}" --metadata "${metadataFile}" --run-id "${runId}" \
   --evidence-mount "${evidenceRoot}" --evidence-volume-kind "${evidenceKind}" --evidence-storage-id "${evidenceId}" \
-  --snap-class "${snapClass}" --recovery-image "${recoveryImage}" --memory-dump-pvc "${memoryPvc}" --require-trigger
+  --snap-class "${snapClass}" --memory-dump-pvc "${memoryPvc}" --require-trigger
 # Extract launcher pod name and domain from preflight metadata for guest agent access
 BSOD_DET__POD__NAME="$(jq -er .launcherPod "${metadataFile}")"; export BSOD_DET__POD__NAME
 BSOD_DET__DOMAIN__NAME="$(jq -er .domain "${metadataFile}")"; export BSOD_DET__DOMAIN__NAME
@@ -155,7 +155,7 @@ jq -e '.memory == false and .minidumpCount == 0' <<<"${cleanupResult}" >/dev/nul
 bash "${hostDir}/watch-crash.sh" \
   --ns "${ns}" --vm "${vm}" --out "${outDir}" --metadata "${metadataFile}" --run-id "${runId}" --ready-file "${readyFile}" \
   --evidence-mount "${evidenceRoot}" --evidence-volume-kind "${evidenceKind}" --evidence-storage-id "${evidenceId}" \
-  --snap-class "${snapClass}" --recovery-image "${recoveryImage}" --memory-dump-pvc "${memoryPvc}" --intentional &
+  --snap-class "${snapClass}" --memory-dump-pvc "${memoryPvc}" --intentional &
 watcherPid=$!
 # Wait for watcher to signal readiness - means it's armed and watching for crash
 typeset readyDeadline=$((SECONDS + readyTimeout))

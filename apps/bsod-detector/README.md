@@ -39,7 +39,7 @@ By default, each pipeline run writes under `/mnt/persistent-bsod-evidence/`; `BS
 
 | File | Typical Size | Phase | Produced by | Description |
 |---|---|---|---|---|
-| `recovery-metadata.json` | ~1.3 KB | Pre-BSOD | `preflight-rhov.sh` | VM name, namespace, PVC names, storage class, recovery image digest, armed epoch |
+| `recovery-metadata.json` | ~1.3 KB | Pre-BSOD | `preflight-rhov.sh` | VM name, namespace, PVC names, storage class, armed epoch |
 | `watcher-ready` | 42 B | Pre-BSOD | `watch-crash.sh` | Arming marker — written when watcher begins polling |
 | `bsod-screenshot.png` | ~37 KB | At BSOD (VM frozen) | `watch-crash.sh` → `virtctl vnc screenshot` | VNC screenshot of the Windows blue screen |
 | `vm-memory.elf.tar.gz` | ~1.5 GB | At BSOD (VM frozen) | `watch-crash.sh` → `virtctl memory-dump get` + `virtctl vmexport download --format gzip` | **Primary memory artifact when capture succeeds.** KubeVirt exports physical RAM in ELF ET_CORE format independently of guest disk/pagefile state; API, PVC, export, or download failures are recorded and validated. Run `elf2dmp` offline to convert for WinDbg / Volatility |
@@ -83,7 +83,6 @@ This section explains what each artifact contains and how to use it, with exampl
   "node": "integrity-gs04.sys.eng.rdu2.dc.redhat.com",
   "memoryDumpPvc": "win2022-vm-hjoshi1-memdump",
   "snapshotClass": "ocs-storagecluster-rbdplugin-snapclass",
-  "recoveryImage": "image-registry.../bsod-recovery:latest@sha256:4f46...",
   "armedEpoch": 1791875063
 }
 ```
@@ -91,8 +90,8 @@ This section explains what each artifact contains and how to use it, with exampl
 **Use cases**:
 - Verify target VM and namespace correctness
 - Find exact launcher pod for manual debugging
-- Confirm recovery image version (for reproducibility)
 - Track infrastructure (node, storage class, snapshot class)
+- Guestfs helper image selection remains independent via `BSOD_DET__GUEST_FS__CTR_IMG`
 
 #### `watcher-ready` (42 B)
 **What it contains**: Run ID; written when crash detection polling begins.
@@ -732,10 +731,8 @@ Lifecycle tests mock virtctl and oc; they do not prove scheduling, KVM availabil
 export BSOD_DET__VM__NAME=<your-vm-name>
 export BSOD_DET__NAMESPACE=<your-namespace>
 export BSOD_DET__CONFIRM_TARGET=<your-vm-name>
-export BSOD_DET__RECOVERY__IMAGE="quay.io/konveyor/oadp-vmfr-access:latest@sha256:<digest>"
-
-# Get current digest:
-# skopeo inspect docker://quay.io/konveyor/oadp-vmfr-access:latest | jq -r '.Digest'
+# Optional extraction helper image (defaults inside extract--guest-os--crash-info.sh):
+# export BSOD_DET__GUEST_FS__CTR_IMG=quay.io/konveyor/oadp-vmfr-access:latest
 
 bash src/scripts/crash-injector/trigger-bsod-intentional.sh 0x01
 ```
@@ -788,7 +785,7 @@ The pipeline attempts to write the following artifacts under a timestamped direc
 
 | File | Size | Phase | Description |
 |---|---|---|---|
-| `recovery-metadata.json` | ~1.2 KB | Pre-BSOD | VM name, namespace, PVC names, storage class, recovery image digest, armed epoch |
+| `recovery-metadata.json` | ~1.2 KB | Pre-BSOD | VM name, namespace, PVC names, storage class, armed epoch |
 | `watcher-ready` | 42 B | Pre-BSOD | Arming marker — written when watcher begins polling |
 | `vmi-spec.json` | ~13 KB | Pre-BSOD | KubeVirt VMI spec via `oc get vmi -o json` — available even when virt-launcher pod is Failed |
 | `domain.xml` | ~13 KB | Pre-BSOD | Pre-crash domain XML backup captured before injection |
@@ -904,4 +901,3 @@ apps/bsod-detector/
 | `BSOD_DET__READY__TIMEOUT` | No | `300` | Watcher readiness timeout |
 | `BSOD_DET__PREFLIGHT__TIMEOUT` | No | `300` | Positive-integer validation only; trigger currently uses a fixed 1800s preflight timeout |
 | `BSOD_DET__GUEST_FS__CTR_IMG` | No | Pinned nightly tag | `virtctl guestfs` image; no legacy fallback |
-| `BSOD_RECOVERY_IMAGE` | No | — | Digest-pinned recovery image |

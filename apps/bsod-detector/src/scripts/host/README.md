@@ -85,7 +85,7 @@ These scripts manage the full BSOD detection and artifact extraction pipeline or
 | `BSOD_DET__MEMORY__DUMP_PVC` | No | Memory dump PVC name |
 | `BSOD_DET__READY__TIMEOUT` | No | Watcher readiness timeout (default: 300s) |
 | `BSOD_DET__PREFLIGHT__TIMEOUT` | No | Preflight timeout (default: 300s) |
-| `BSOD_DET__RECOVERY__IMAGE` | No | Digest-pinned guestfs image |
+| `BSOD_DET__GUEST_FS__CTR_IMG` | No | Guestfs helper image used by extraction (not validated by preflight) |
 
 **Example**:
 ```bash
@@ -151,7 +151,7 @@ evidence-summary.json        (final pipeline verdict)
 
 ### `preflight-rhov.sh`
 
-**Purpose**: Fail-closed pre-run validation. Every check is a hard `Die` — no partial arming allowed.
+**Purpose**: Fail-closed pre-run validation. Every check fails closed — no partial arming allowed.
 
 **All checks performed (in order)**:
 
@@ -159,14 +159,13 @@ evidence-summary.json        (final pipeline verdict)
 - `--ns`, `--vm`, `--out`, `--metadata`, `--run-id` all required
 - `runId` must match DNS label pattern `^[a-zA-Z0-9][a-zA-Z0-9._-]{5,80}$`
 - `ns`, `vm`, `snapClass`, `memoryPvc` must be valid Kubernetes DNS labels
-- Recovery image must be digest-pinned (`@sha256:[64 hex chars]`)
 - Evidence volume kind must be `pvc`, `network`, or `csi` (hostPath/emptyDir forbidden)
 - Evidence storage ID must be stable (alphanumeric + safe chars)
 - Snapshot class required; memory dump PVC is **auto-created if missing**
-- `BSOD_DET__COMMAND__TIMEOUT` must be a positive integer
+- No `--recovery-image` — extraction selects `BSOD_DET__GUEST_FS__CTR_IMG` independently
 
 **2. Helper scripts present**
-- All pipeline helpers must exist and be readable: `guest-agent.py`, `reliability.py`, `extract--guest-os--crash-info.sh`, `collect-host-signals.sh`, `parse-dump-header.sh`
+- Active pipeline helpers must exist and be readable: `guest-agent.py`, `reliability.py`, `extract--guest-os--crash-info.sh`, `collect-host-signals.sh`
 - Guest config inputs must exist: `configure-dumps.ps1`, `crash-control.json`
 
 **3. Evidence mount validation**
@@ -188,37 +187,34 @@ evidence-summary.json        (final pipeline verdict)
   - Access mode: `ReadWriteOnce`, `Filesystem` mode
   - Waits up to 120 seconds for the new PVC to bind before continuing
 - Snapshot class driver must match the guest PVC provisioner
+- RBAC and VolumeSnapshot API availability
 
-**5. Recovery image capability probe**
-- Creates a temporary pod from the recovery image
-- Runs `bash -c 'guestfish --version'` to verify the image has the `bash+guestfish-v1` contract
-- Pod must complete with `Succeeded` — die if `Failed` or timeout
-
-**6. QGA liveness**
+**5. QGA liveness**
 - QGA ping via `guest-agent.py ping` — 5 retries × 3s sleep
-- Die if all retries fail (VM not ready for crash injection)
+- Optional qemu-ga MSI bootstrap when pings fail, then re-ping
+- Fail if all retries fail (VM not ready for crash injection)
 
-**7. Guest crash dump configuration**
+**6. Guest crash dump configuration**
 - Upload `configure-dumps.ps1` + `crash-control.json` to VM via guest-agent
 - Run `configure-dumps.ps1 -DataFile crash-control.json`
-- Die if output fails any of:
+- Fail if output fails any of:
   - `ok == true` — script ran successfully
   - `matchesRecommended == true` — all registry values match expected
   - `current.AutoReboot == 0` — VM will stay frozen after BSOD
   - `pageFile.adequate == true` — DedicatedDumpFile or pagefile is adequate
   - `rebootRequired == false` — no pending reboot needed; if true, do `virtctl stop && virtctl start`
 
-**8. Guest path verification**
+**7. Guest path verification**
 - `C:\Windows` exists
 - `C:\Windows\Minidump` exists
 - If `--require-trigger`: `C:\Temp\nmf\notmyfaultc64.exe` exists (NotMyFault binary)
 
-**9. Pre-crash dump inventory**
+**8. Pre-crash dump inventory**
 - Records all existing dump files (`MEMORY.DMP`, `Minidump\*.dmp`) with path/size/mtime
 - Stored in `recovery-metadata.json` as `preCrashInventory` for post-crash comparison
 
-**10. Generate recovery-metadata.json**
-Writes all collected VM/storage/config data needed by downstream scripts.
+**9. Generate recovery-metadata.json**
+Writes collected VM/storage/config data needed by downstream scripts. Does not write `recoveryImage` or `recoveryImageContract`.
 
 **Environment Variables**:
 
@@ -226,10 +222,9 @@ Writes all collected VM/storage/config data needed by downstream scripts.
 |---|---|
 | `BSOD_DET__MEMORY__DUMP_PVC` | Memory dump PVC name |
 | `BSOD_DET__SNAPSHOT__CLASS` | Storage snapshot class |
-| `BSOD_DET__COMMAND__TIMEOUT` | Command timeout (default: 30s) |
-| `BSOD_DET__PREFLIGHT__TIMEOUT` | Positive-integer validation only; trigger script currently uses a fixed 1800s preflight timeout |
+| `BSOD_DET__PREFLIGHT__TIMEOUT` | Watcher/trigger outer timeout around preflight (default: 300s) |
 
-**Output**: `recovery-metadata.json` — VM name, namespace, pod, domain, PVC names, storage class, storage size, volume mode, recovery image digest, armed epoch, pre-crash dump inventory, evidence mount details
+**Output**: `recovery-metadata.json` — VM name, namespace, pod, domain, PVC names, storage class, storage size, volume mode, armed epoch, pre-crash dump inventory, evidence mount details
 
 ---
 
@@ -501,30 +496,28 @@ All variables follow Red Hat Chaos Team naming: `BSOD_DET__[<COMPONENT>__]<NAME>
 
 | Function | Purpose |
 |----------|---------|
-| `Die()` | Print fatal error to stderr and exit with code 1 |
-| `RequireCommand()` | Check if command exists in PATH; die if missing |
 | `ValidName()` | Validate Kubernetes DNS label format (alphanum, hyphens, lowercase) |
 | `RunTimed()` | Execute command with timeout; TERM after N seconds, KILL after 5 more |
-| `Oc()` | Wrapper around kubectl/oc with automatic command and request timeouts |
-| `Cleanup()` | Exit trap: delete temporary probe pod, clean temp directory |
+| `Cleanup()` | Exit trap: remove temporary directory only |
 | `OnSignal()` | Signal trap: exit with proper signal code on INT/TERM |
+| `EnsureMemoryDumpPVC()` / `EnsureEvidencePVC()` | Create and wait for Bound PVCs when missing |
+| `BootstrapQGA()` | Optional qemu-ga MSI bootstrap when QGA pings fail |
 
 #### Validation Sections
 
-1. **Input validation** (lines 107–147): DNS labels, run ID format, recovery image digest-pinning
-2. **Helper scripts present** (lines 149–151): Verify all pipeline helpers exist (guest-agent.py, reliability.py, etc.)
-3. **Evidence mount validation** (lines 153–198): Filesystem type, durability proof, run directory uniqueness
-4. **VM and VMI state** (lines 162–172): runStrategy=Manual, VMI phase=Running, PVC modes
-5. **Recovery image capability probe** (lines 169–172): Temporary pod validates bash + guestfish contract
-6. **QGA liveness** (lines 174–176): Ping guest via QEMU Guest Agent (5 retries)
-7. **Guest crash dump configuration** (lines 178–186): Upload configure-dumps.ps1, verify settings effective (not pending reboot)
-8. **Guest path verification** (lines 188–191): Verify C:\Windows, C:\Windows\Minidump exist; NotMyFault binary if required
-9. **Pre-crash dump inventory** (lines 193–195): Record baseline dumps for post-crash comparison
-10. **Generate recovery-metadata.json** (lines 197–210): Write all validated state for downstream scripts
+1. **Input validation**: DNS labels, run ID format, evidence kind/id, snapshot/memory PVC requirements
+2. **Helper scripts present**: Active pipeline helpers (guest-agent.py, reliability.py, extractor, collect-host-signals)
+3. **Evidence mount validation**: Filesystem type, durability proof, run directory uniqueness
+4. **VM and VMI state**: runStrategy=Manual, VMI phase=Running, PVC modes, RBAC, snapshot class match
+5. **QGA liveness**: Ping guest via QEMU Guest Agent (5 retries, optional bootstrap)
+6. **Guest crash dump configuration**: Upload configure-dumps.ps1, verify settings effective (not pending reboot)
+7. **Guest path verification**: Verify C:\Windows, C:\Windows\Minidump exist; NotMyFault binary if required
+8. **Pre-crash dump inventory**: Record baseline dumps for post-crash comparison
+9. **Generate recovery-metadata.json**: Write validated state without recoveryImage fields
 
 #### Output
 
-- `recovery-metadata.json`: JSON file with VM/cluster identifiers, storage config, recovery image digest, pre-crash dump inventory
+- `recovery-metadata.json`: JSON file with VM/cluster identifiers, storage config, pre-crash dump inventory
 
 ---
 

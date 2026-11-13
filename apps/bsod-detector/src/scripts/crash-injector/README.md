@@ -36,7 +36,7 @@ BSOD_DET__CONFIRM_TARGET="win2022-vm-hjoshi1" \
 | `BSOD_DET__EVIDENCE__DIR` | No | Evidence root (default: `/mnt/persistent-bsod-evidence`) |
 | `BSOD_DET__SNAPSHOT__CLASS` | No | Storage snapshot class |
 | `BSOD_DET__MEMORY__DUMP_PVC` | No | Memory dump PVC name |
-| `BSOD_DET__RECOVERY__IMAGE` | No | Digest-pinned guestfs recovery image |
+| `BSOD_DET__GUEST_FS__CTR_IMG` | No | Guestfs helper image for extraction (optional; extractor default applies) |
 | `BSOD_DET__READY__TIMEOUT` | No | Watcher readiness timeout in seconds (default: 300) |
 | `BSOD_DET__PREFLIGHT__TIMEOUT` | No | Currently validated as a positive integer; the preflight invocation uses a fixed 1800-second timeout |
 
@@ -69,7 +69,7 @@ The table below shows what each file is, who writes it, and at which pipeline ph
 | File | Size (typical) | Phase | Written by | What it contains |
 |---|---|---|---|---|
 | `watcher-ready` | 42 B | Pre-BSOD | `watch-crash.sh` | Run ID marker — written when watcher is armed and watching |
-| `recovery-metadata.json` | ~1.3 KB | Pre-BSOD | `preflight-rhov.sh` | VM name, namespace, PVC names, storage class, snapshot class, recovery image digest, armed epoch, pre-crash dump inventory |
+| `recovery-metadata.json` | ~1.3 KB | Pre-BSOD | `preflight-rhov.sh` | VM name, namespace, PVC names, storage class, snapshot class, armed epoch, pre-crash dump inventory |
 | `bsod-screenshot.png` | ~37 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `virtctl vnc` | VNC screenshot of the Windows blue screen at crash moment |
 | `vm-memory.elf.tar.gz` | ~800 MB–2.3 GB | At BSOD (VM still frozen) | `watch-crash.sh` → `virtctl memory-dump` | **Primary dump artifact.** Full physical RAM snapshot in ELF ET_CORE format, streamed from KubeVirt via HTTP export. Contains full Windows memory: kernel, drivers, user processes, page tables. Developer converts offline with `elf2dmp` for WinDbg/Volatility |
 | `domain-bsod.xml` | ~14 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `virsh dumpxml` | libvirt domain XML captured **at crash detection time** (state=crashed/paused). Primary XML artifact for forensics. |
