@@ -799,7 +799,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIn("trap 'exit 130' INT", source)
         self.assertNotIn("trap 'exit 143' TERM", source)
         self.assertEqual(re.findall(r'^trap .*$', source, re.MULTILINE), [(
-            'trap \'Cleanup "$?" "${guestfsPid}" "${guestfsStdIn}" '
+            'trap \'Cleanup $? ${guestfsPid} ${guestfsStdIn} '
             '"${hlprPod}"\' EXIT')])
         cleanup = re.search(r'^function Cleanup \(\) \{\n.*?^\}', source, re.MULTILINE | re.DOTALL).group()
         self.assertNotIn('timeout --', cleanup)
@@ -1267,7 +1267,7 @@ class ArchiveRecoveryTests(unittest.TestCase):
         self.assertFalse(any(call[0] == 'cp' for call in self.Calls()))
         for call in self.Calls():
             if call[0] == 'exec':
-                self.assertEqual(call[3].removeprefix('pod/'),
+                self.assertEqual(call[3].split('/', 1)[-1],
                                  'libguestfs-tools-rootdisk')
                 self.assertEqual(call[call.index('-c') + 1], 'libguestfs')
         self.assertFalse((self.out / 'extraction-summary.json').exists())

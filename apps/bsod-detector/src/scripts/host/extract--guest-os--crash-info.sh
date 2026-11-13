@@ -122,7 +122,7 @@ typeset helperPodCtr='libguestfs'
 typeset defCtrImg='quay.io/kubevirt/libguestfs-tools:20261112_5c3989e66e'
 typeset podRef=''
 typeset -i guestfsPid=0 guestfsStdIn=0
-trap 'Cleanup "$?" "${guestfsPid}" "${guestfsStdIn}" "${hlprPod}"' EXIT
+trap 'Cleanup $? ${guestfsPid} ${guestfsStdIn} "${hlprPod}"' EXIT
 
 jq -es '
     ((length == 1) and (.[0].status.printableStatus == "Stopped"))
@@ -145,7 +145,7 @@ coproc guestfsProc {
         1>&2
 }
 # shellcheck disable=SC2154 # Set by the `coproc` builtin.
-guestfsPid="${guestfsProc_PID}"
+guestfsPid=${guestfsProc_PID}
 # When the `coproc` process is terminated and reaped, Bash also closes the
 # parent's write end of its STDIN pipe, `${guestfsProc[1]}`, freeing that FD
 # for reuse. If only the FD number was stored in another variable, that
@@ -163,7 +163,7 @@ oc -n "${ns}" wait "pod/${hlprPod}" \
 oc -n "${ns}" wait "pod/${hlprPod}" \
     --for=condition=Ready \
     --timeout=180s 1> /dev/null
-kill -0 "${guestfsPid}" # Ensure the `virtctl guestfs` process is alive.
+kill -0 ${guestfsPid} # Ensure the `virtctl guestfs` process is alive.
 
 typeset -A fileArr=(
     [/pagefile.sys]='/MEMORY.DMP'
@@ -178,7 +178,7 @@ while IFS= read -r ntfsPart; do
     typeset src='' dst=''
 
     {
-        oc -n "${ns}" exec "pod/${hlprPod}" \
+        oc -n "${ns}" exec "Pod/${hlprPod}" \
             -c "${helperPodCtr}" \
             -- \
             guestfish \
@@ -198,7 +198,7 @@ while IFS= read -r ntfsPart; do
         dst="${podTmp}${dst}"
         while [[ "${dst}" == */ ]]; do dst="${dst%/}"; done
         {
-            oc -n "${ns}" exec "pod/${hlprPod}" \
+            oc -n "${ns}" exec "Pod/${hlprPod}" \
                 -c "${helperPodCtr}" \
                 -- \
                 bash -o pipefail -O inherit_errexit -euxc '
@@ -230,7 +230,7 @@ while IFS= read -r ntfsPart; do
             -- \
             test -d "${podTmp}/" &&
         {
-            oc -n "${ns}" exec "pod/${hlprPod}" \
+            oc -n "${ns}" exec "Pod/${hlprPod}" \
                 -c "${helperPodCtr}" \
                 -- \
                 tar zc -C "${podTmp}/" ./ \
@@ -239,7 +239,7 @@ while IFS= read -r ntfsPart; do
         }
     }
 done 0< <(FindNTFS "${hlprPod}" "${helperPodCtr}")
-kill -0 "${guestfsPid}" # Ensure the `virtctl guestfs` process is alive.
+kill -0 ${guestfsPid} # Ensure the `virtctl guestfs` process is alive.
 
 # Python Code to parse MEMORY.DMP
 # Revisit summary validation when reliability.py is refactored.
