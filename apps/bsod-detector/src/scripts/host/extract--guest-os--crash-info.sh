@@ -225,7 +225,7 @@ while IFS= read -r ntfsPart; do
     done
     {
         oc -n "${ns}" exec \
-            "pod/${hlprPod}" \
+            "Pod/${hlprPod}" \
             -c "${helperPodCtr}" \
             -- \
             test -d "${podTmp}/" &&
