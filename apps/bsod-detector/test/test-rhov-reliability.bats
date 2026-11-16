@@ -422,5 +422,5 @@ run_watcher() {
   grep -q 'virtctl vnc screenshot' "$HOST_DIR/watch-crash.sh"
   grep -q 'virtctl memory-dump get' "$HOST_DIR/watch-crash.sh"
   grep -q 'extract--guest-os--crash-info.sh' "$HOST_DIR/watch-crash.sh"
-  grep -q 'exec-crash' "$REPO_ROOT/src/scripts/crash-injector/trigger-bsod-intentional.sh"
+  grep -q 'exec-crash' "$REPO_ROOT/src/scripts/bsod-pipeline/bsod-runner.sh"
 }
