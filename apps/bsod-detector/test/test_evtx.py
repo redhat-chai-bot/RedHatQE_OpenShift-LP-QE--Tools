@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 
-HOST = Path(__file__).resolve().parents[1] / "archieve" / "src" / "scripts" / "host"
+HOST = Path(__file__).resolve().parents[1] / "src" / "scripts" / "host"
 APP = Path(__file__).resolve().parents[1]
 
 

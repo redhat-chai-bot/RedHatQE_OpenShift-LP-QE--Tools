@@ -51,10 +51,21 @@ class ContainerContractTests(unittest.TestCase):
 
     def test_one_image_name_and_repository_root_context(self):
         makefile = (IMAGE / "Makefile").read_text(encoding="utf-8")
-        wrapper = (ROOT / "apps" / "bsod-detector" / "archieve" / "host-tools" / "run.sh").read_text(encoding="utf-8")
         self.assertIn("IMAGE_NAME ?= bsod-detector", makefile)
-        self.assertIn("quay.io/redhatqe/bsod-detector:latest", wrapper)
+        for default in ("IMAGE_REGISTRY ?= quay.io", "IMAGE_NAMESPACE ?= redhatqe", "IMAGE_TAG ?= latest"):
+            self.assertIn(default, makefile)
+        self.assertIn("IMAGE_FULL = $(IMAGE_REGISTRY)/$(IMAGE_NAMESPACE)/$(IMAGE_NAME):$(IMAGE_TAG)", makefile)
         self.assertRegex(makefile, r"(?m)^\s*['\"]?\.\./\.\./\.\.['\"]?;? \\?$|['\"]\.\./\.\./\.\.['\"]")
+
+    def test_extract_mode_installs_offline_extractor(self):
+        name = "extract-dump.sh"
+        extractor = ROOT / "apps/bsod-detector/src/scripts/host" / name
+        self.assertTrue(extractor.is_file())
+        self.assertTrue(extractor.stat().st_mode & 0o111)
+        self.assertIn(f'exec /usr/local/bin/{name} "$@"', (IMAGE / "entrypoint.sh").read_text(encoding="utf-8"))
+        logical = (IMAGE / "Dockerfile").read_text(encoding="utf-8").replace("\\\n", " ")
+        self.assertRegex(logical, rf"(?m)^COPY apps/bsod-detector/src/scripts/host/{name}\s+/usr/local/bin/{name}$")
+        self.assertRegex(logical, rf"(?m)^RUN chmod \+x .*/usr/local/bin/{name}\b")
 
 
 if __name__ == "__main__":
