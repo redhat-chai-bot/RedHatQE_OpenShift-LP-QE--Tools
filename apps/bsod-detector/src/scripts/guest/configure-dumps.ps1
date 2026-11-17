@@ -5,9 +5,10 @@
 
 .DESCRIPTION
     Applies the recommended CrashControl values from crash-control.json under
-    HKLM\SYSTEM\CurrentControlSet\Control\CrashControl, removes any DedicatedDumpFile
-    value (dumps go through the page file only) and stages NotMyFault for the trigger
-    step. With -VerifyOnly it only reads and reports; nothing is written or downloaded.
+    HKLM\SYSTEM\CurrentControlSet\Control\CrashControl and removes any DedicatedDumpFile
+    value (dumps go through the page file only). Only with -StageNotMyFault, for an
+    intentional crash run, does it also stage NotMyFault. With -VerifyOnly it only reads and
+    reports; nothing is written or downloaded, even if -StageNotMyFault is given.
 
     Runs on the guest VM. Applying requires Administrator. Pagefile sizing belongs to
     golden-image-pre-reboot.ps1 (a fixed C:\pagefile.sys of RAM + 257 MB); this script
@@ -19,6 +20,11 @@
 
 .PARAMETER VerifyOnly
     Report the current settings without changing anything.
+
+.PARAMETER StageNotMyFault
+    Apply mode only: download NotMyFault to C:\Temp\nmf if notmyfaultc64.exe is missing. The host
+    preflight passes it only for an intentional trigger (preflight-rhov.sh --require-trigger);
+    without it (watch runs, default apply, -VerifyOnly) nothing is downloaded.
 
 .PARAMETER DataFile
     Path to crash-control.json. Required when the script is staged outside its
@@ -48,6 +54,7 @@
 param(
     [string]$DumpType,
     [switch]$VerifyOnly,
+    [switch]$StageNotMyFault,
     [string]$DataFile
 )
 Set-StrictMode -Version Latest
@@ -98,6 +105,36 @@ function Test-RebootRequired ($CurrentCrashDumpEnabled, [int]$DesiredCrashDumpEn
     $HadDedicatedDumpFile -or "${CurrentCrashDumpEnabled}" -ne "${DesiredCrashDumpEnabled}"
 }
 
+# Downloads the Sysinternals NotMyFault archive with the system TLS settings plus TLS 1.2.
+function Save-NotMyFaultArchive ([string]$Path) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    (New-Object System.Net.WebClient).DownloadFile('https://download.sysinternals.com/files/NotMyFault.zip', $Path)
+}
+
+# Stages NotMyFault for an intentional crash run and returns what happened. It downloads only in
+# apply mode, only when -StageNotMyFault was given and only when the binary is missing.
+# C:\Temp\nmf is a fixed contract shared with the host preflight and pipeline scripts, which
+# check that exact path through the guest agent (a per-user $env:TEMP would differ).
+function Invoke-NotMyFaultStaging ([bool]$IsVerifyOnly, [bool]$IsStageRequested) {
+    $nmfDir = 'C:\Temp\nmf'
+    $nmfPath = "${nmfDir}\notmyfaultc64.exe"
+    if ($IsVerifyOnly) { return 'skipped: -VerifyOnly is read-only' }
+    if (-not $IsStageRequested) { return 'skipped: not requested' }
+    if (Test-Path -LiteralPath $nmfPath) { return 'present' }
+    try {
+        New-Item -ItemType Directory -Force -Path $nmfDir | Out-Null
+        $zip = "${nmfDir}\NotMyFault.zip"
+        Save-NotMyFaultArchive $zip
+        Expand-Archive -Path $zip -DestinationPath $nmfDir -Force
+        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+        Unblock-File -Path $nmfPath -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $nmfPath)) { return "failed: ${nmfPath} missing after extraction" }
+        'staged'
+    } catch {
+        "failed: $($_.Exception.Message)"
+    }
+}
+
 # Default to the repository copy: <app>\src\data\crash-control.json.
 if (-not $DataFile) {
     $appDir = Join-Path $PSScriptRoot '..\..\..'
@@ -144,27 +181,13 @@ if (-not $VerifyOnly) {
     }
     $action = 'applied'
     $applied = $desired
+}
 
-    # The trigger step needs NotMyFault. C:\Temp\nmf is a fixed contract shared with the host
-    # preflight and pipeline scripts, which check that exact path through the guest agent; a
-    # per-user $env:TEMP would differ between the SYSTEM account used here and other accounts.
-    # Staging stays best effort, but a failure is reported on stderr (stdout carries the JSON).
-    $nmfDir = 'C:\Temp\nmf'
-    $nmfPath = "${nmfDir}\notmyfaultc64.exe"
-    if (-not (Test-Path $nmfPath)) {
-        try {
-            New-Item -ItemType Directory -Force -Path $nmfDir | Out-Null
-            $zip = "${nmfDir}\NotMyFault.zip"
-            # Add TLS 1.2 to the protocols this process already allows instead of replacing them.
-            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-            (New-Object System.Net.WebClient).DownloadFile('https://download.sysinternals.com/files/NotMyFault.zip', $zip)
-            Expand-Archive -Path $zip -DestinationPath $nmfDir -Force
-            Remove-Item $zip -Force
-            Unblock-File -Path $nmfPath -ErrorAction SilentlyContinue
-        } catch {
-            [Console]::Error.WriteLine("configure-dumps.ps1: WARN: NotMyFault staging to ${nmfPath} failed: $($_.Exception.Message)")
-        }
-    }
+# A failed staging is reported on stderr (stdout carries the JSON); with --require-trigger the host
+# preflight then rejects the run because the binary is missing.
+$nmfStatus = Invoke-NotMyFaultStaging ([bool]$VerifyOnly) ([bool]$StageNotMyFault)
+if ($nmfStatus -like 'failed*') {
+    [Console]::Error.WriteLine("configure-dumps.ps1: WARN: NotMyFault staging to C:\Temp\nmf ${nmfStatus}")
 }
 
 $current = [ordered]@{}

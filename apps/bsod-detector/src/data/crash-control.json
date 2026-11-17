@@ -4,7 +4,7 @@
   "registryPath": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\CrashControl",
   "crashDumpTypes": {
     "none":      { "CrashDumpEnabled": 0, "description": "No dump written." },
-    "complete":  { "CrashDumpEnabled": 1, "description": "Complete memory dump: entire physical memory. Requires page file >= RAM size (+1MB) or a dedicated dump file." },
+    "complete":  { "CrashDumpEnabled": 1, "description": "Complete memory dump: entire physical memory. Requires a page file >= RAM size (+1MB); this project does not use a dedicated dump file." },
     "kernel":    { "CrashDumpEnabled": 2, "description": "Kernel memory dump: kernel-mode read/write pages only. Good default for driver crashes." },
     "small":     { "CrashDumpEnabled": 3, "description": "Small (mini) dump, 64KB-ish, written to %SystemRoot%\\Minidump. Minimum useful dump." },
     "automatic": { "CrashDumpEnabled": 7, "description": "Automatic memory dump (Win8+): like kernel dump but lets the OS manage page-file sizing." },
