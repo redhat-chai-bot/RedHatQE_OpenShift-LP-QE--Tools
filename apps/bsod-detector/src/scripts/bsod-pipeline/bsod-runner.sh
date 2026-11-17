@@ -41,6 +41,8 @@ typeset evidenceId="${BSOD_DET__EVIDENCE__STORAGE_ID:-shared-bsod-evidence}"
 typeset memoryPvc="${BSOD_DET__MEMORY__DUMP_PVC:-${vm}-memdump}"
 typeset snapClass="${BSOD_DET__SNAPSHOT__CLASS:-ocs-storagecluster-rbdplugin-snapclass}"
 typeset recoveryImage="${BSOD_DET__RECOVERY__IMAGE:-}"
+# Strip digest pin (@sha256:...) — always use the tag so a stale digest doesn't block the pipeline.
+recoveryImage="${recoveryImage%%@*}"
 typeset readyTimeout="${BSOD_DET__READY__TIMEOUT:-300}"
 typeset preflightTimeout="${BSOD_DET__PREFLIGHT__TIMEOUT:-1800}"
 typeset nmfGuest='C:\Temp\nmf\notmyfaultc64.exe'
@@ -160,7 +162,7 @@ fi
 
 typeset -a watchArgArr=("${commonArgArr[@]}" --ready-file "${readyFile}" --no-restart)
 [ "${mode}" = watch ] || watchArgArr+=(--intentional)
-bash "${hostDir}/watch-crash.sh" "${watchArgArr[@]}" &
+bash "${hostDir}/bsod-watcher.sh" "${watchArgArr[@]}" &
 watcherPid=$!
 
 typeset -i es=0 readyDeadline=$((SECONDS + readyTimeout))
