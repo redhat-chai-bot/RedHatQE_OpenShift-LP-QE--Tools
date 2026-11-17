@@ -2,6 +2,8 @@
 # Afterwards run golden-image-post-reboot.ps1 and seal only if it passes.
 # Both VirtIO storage drivers are staged so the image boots on a virtio (viostor),
 # scsi (vioscsi) or sata (storahci, inbox) disk bus.
+# The page file is sized from this VM's RAM (RAM + 257 MB). configure-dumps.ps1 checks it against
+# the RAM of the VM it runs on, so VMs cloned from this image must not have more RAM than this VM.
 
 # Fixed pagefile size in MB: physical RAM plus 257 MB, rounded once to a whole MB.
 # golden-image-post-reboot.ps1 checks the active pagefile against the same calculation.
@@ -39,25 +41,62 @@ function Set-FixedPagefile ([int64]$SizeMB) {
     Write-Host "OK: PagingFiles set to '${entry}' (RAM + 257 MB), active after reboot"
 }
 
+# Adds TLS 1.2 to the protocols this process already allows instead of replacing them.
+function Enable-TLS12 {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+}
+
+# Returns the server's Last-Modified time (UTC), or nothing when the response has no such header:
+# HttpWebResponse.LastModified would report the current time then and force a download each run.
+function Get-RemoteLastModifiedUTC ([string]$URL) {
+    $req = [System.Net.HttpWebRequest]::Create($URL)
+    $req.Method = 'HEAD'
+    $resp = $req.GetResponse()
+    try {
+        $header = $resp.Headers['Last-Modified']
+        if ($header) {
+            [datetime]::Parse($header, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AssumeUniversal, AdjustToUniversal')
+        }
+    } finally {
+        $resp.Close()
+    }
+}
+
+# Downloads the ISO to the given (temporary) path.
+function Save-ISOdownload ([string]$URL, [string]$Path) {
+    (New-Object System.Net.WebClient).DownloadFile($URL, $Path)
+}
+
+# The memory size is read before any change: an unreadable, missing or non-positive size stops the
+# script before the ISO download, installations, registry writes, page file change or reboot.
+try {
+    $ramBytes = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory -as [int64]
+} catch {
+    Write-Error "FAIL: cannot read the physical memory size: $($_.Exception.Message)"
+    exit 1
+}
+if (-not ($ramBytes -gt 0)) {
+    Write-Error "FAIL: physical memory size is missing or not positive (TotalPhysicalMemory = '${ramBytes}')"
+    exit 1
+}
+$pagefileSizeMB = Get-PagefileSizeMB $ramBytes
+Write-Host "OK: physical memory read; the page file will be ${pagefileSizeMB} MB (RAM + 257 MB)"
+
 # C:\Temp is a fixed location on purpose: the ISO cache must survive the reboot and be found by
 # golden-image-post-reboot.ps1, which may run under another account (per-user $env:TEMP differs).
 New-Item -ItemType Directory -Force -Path 'C:\Temp' | Out-Null
-# Add TLS 1.2 to the protocols this process already allows instead of replacing them.
-[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+Enable-TLS12
 $isoURL  = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso'
 $isoPath = 'C:\Temp\virtio-win.iso'
 
 $remoteLastModified = $null
 try {
-    $req = [System.Net.HttpWebRequest]::Create($isoURL)
-    $req.Method = 'HEAD'
-    $resp = $req.GetResponse()
-    try {
-        $remoteLastModified = $resp.LastModified.ToUniversalTime()
-    } finally {
-        $resp.Close()
+    $remoteLastModified = Get-RemoteLastModifiedUTC $isoURL
+    if ($remoteLastModified) {
+        Write-Host "Remote ISO Last-Modified (UTC): ${remoteLastModified}"
+    } else {
+        Write-Host 'WARN: the server sent no Last-Modified header; a cached ISO is kept'
     }
-    Write-Host "Remote ISO Last-Modified (UTC): ${remoteLastModified}"
 } catch {
     Write-Host "WARN: cannot read the remote ISO timestamp: $($_.Exception.Message)"
 }
@@ -70,7 +109,7 @@ if (Test-ISOdownloadNeeded $localLastWrite $remoteLastModified) {
     $isoTmpPath = "${isoPath}.download"
     try {
         Write-Host 'Downloading virtio-win ISO...'
-        (New-Object System.Net.WebClient).DownloadFile($isoURL, $isoTmpPath)
+        Save-ISOdownload $isoURL $isoTmpPath
         Move-Item -Path $isoTmpPath -Destination $isoPath -Force -ErrorAction Stop
         Write-Host "OK: Downloaded $([math]::Round((Get-Item $isoPath).Length / 1MB, 0)) MB"
     } catch {
@@ -85,8 +124,21 @@ if (Test-ISOdownloadNeeded $localLastWrite $remoteLastModified) {
     Write-Host "OK: using cached virtio-win ISO (local=${localLastWrite}, remote=$(if ($remoteLastModified) { $remoteLastModified } else { 'unknown' }))"
 }
 
-$iso   = Mount-DiskImage -ImagePath $isoPath -PassThru
-$drive = ($iso | Get-Volume).DriveLetter
+# An ISO left mounted by an interrupted run is reused. A failed mount or a missing drive letter
+# stops the script before anything is installed.
+$drive = $null
+try {
+    $iso = Get-DiskImage -ImagePath $isoPath -ErrorAction Stop
+    if (-not $iso.Attached) { $iso = Mount-DiskImage -ImagePath $isoPath -PassThru -ErrorAction Stop }
+    $drive = ($iso | Get-Volume -ErrorAction Stop).DriveLetter
+} catch {
+    Write-Error "FAIL: cannot mount ${isoPath}: $($_.Exception.Message)"
+    exit 1
+}
+if (-not $drive) {
+    Write-Error "FAIL: ${isoPath} is mounted without a drive letter"
+    exit 1
+}
 Write-Host "OK: ISO mounted at ${drive}:\"
 
 Write-Host "`n--- Installing QEMU Guest Agent ---"
@@ -107,7 +159,7 @@ foreach ($drv in $storageDrivers) {
     $inf = Get-Item "${drive}:\$($drv.Inf)" -ErrorAction SilentlyContinue
     if (-not $inf) {
         Write-Host "WARN: $($drv.Name) inf not found at ${drive}:\$($drv.Inf) - trying recursive search"
-        $inf = Get-ChildItem "${drive}:\" -Recurse -Filter $drv.Inf.Split('\')[-1] -ErrorAction SilentlyContinue |
+        $inf = Get-ChildItem "${drive}:\" -Recurse -Filter ($drv.Inf -split '\\')[-1] -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -like '*amd64*' } | Select-Object -First 1
     }
     if ($inf) {
@@ -127,9 +179,12 @@ Write-Host 'NOTE: storahci.sys (SATA) is an inbox Windows driver - no installati
 # one). The pipeline entry script attempts, best effort and non-fatal, to hot-add the pvpanic
 # device to the running VM through the QEMU monitor
 # (`virsh qemu-monitor-command --hmp 'device_add pvpanic,id=pvpanic0'`):
-# src/scripts/crash-injector/trigger-bsod-intentional.sh, or src/scripts/bsod-pipeline/bsod-runner.sh
-# after the pipeline rename. Whether the KubeVirt Panicked event is raised without a guest driver
-# has not been verified.
+# src/scripts/crash-injector/trigger-bsod-intentional.sh (a separately proposed pipeline runner may
+# take over that step). Whether the KubeVirt Panicked event is raised without a guest driver has
+# not been verified.
+# Windows boot-recovery settings (boot-status policy, automatic recovery, recovery environment) are
+# intentionally left at their Windows defaults for disposable test VMs. This has not been verified
+# on a VM restarted after a crash, which src/scripts/host/watch-crash.sh does unless --no-restart.
 
 # The ISO stays on disk for the version check if this script is re-run; golden-image-post-reboot.ps1
 # removes it once every check has passed.
@@ -147,43 +202,44 @@ if ($svc.Status -ne 'Running') {
     Write-Host 'QEMU-GA is stopped - starting...'
     Start-Service QEMU-GA -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 3
-    $svc.Refresh()
+    $svc = Get-Service QEMU-GA -ErrorAction SilentlyContinue
 }
-if ($svc.Status -ne 'Running') {
-    Write-Error "FAIL: QEMU-GA could not be started (Status: $($svc.Status)) - abort"
+if (-not $svc -or $svc.Status -ne 'Running') {
+    Write-Error "FAIL: QEMU-GA could not be started (Status: $(if ($svc) { $svc.Status } else { 'not installed' })) - abort"
     exit 1
 }
 Write-Host 'OK: QEMU-GA is Running and set to Automatic'
 
 # CrashDumpEnabled=7 is the Automatic memory dump. DedicatedDumpFile must be absent
-# (golden-image policy, see virtio-win issue #1629).
+# (golden-image policy, see virtio-win issue #1629). A failed write stops the script before the
+# page file change and the reboot; an absent DedicatedDumpFile value is left alone.
 Write-Host "`n--- Setting crash dump registry ---"
 $cc = 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl'
-Set-ItemProperty -Path $cc -Name CrashDumpEnabled     -Value 7                         -Type DWord
-Set-ItemProperty -Path $cc -Name AutoReboot           -Value 0                         -Type DWord
-Set-ItemProperty -Path $cc -Name AlwaysKeepMemoryDump -Value 1                         -Type DWord
-Set-ItemProperty -Path $cc -Name Overwrite            -Value 1                         -Type DWord
-Set-ItemProperty -Path $cc -Name LogEvent             -Value 1                         -Type DWord
-Set-ItemProperty -Path $cc -Name DumpFile             -Value '%SystemRoot%\MEMORY.DMP' -Type ExpandString
-Set-ItemProperty -Path $cc -Name MinidumpDir          -Value '%SystemRoot%\Minidump'   -Type ExpandString
-Remove-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction SilentlyContinue
-Write-Host 'OK: Crash dump registry set (CrashDumpEnabled=7, no DedicatedDumpFile)'
-
-# Fixed-size C:\pagefile.sys of RAM + 257 MB with automatic management off, active after
-# the reboot; golden-image-post-reboot.ps1 checks this size. An unreadable, missing or
-# non-positive memory size stops the script before any page file change or reboot.
-Write-Host "`n--- Configuring pagefile.sys ---"
 try {
-    $ramBytes = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory
+    Set-ItemProperty -Path $cc -Name CrashDumpEnabled     -Value 7                         -Type DWord        -ErrorAction Stop
+    Set-ItemProperty -Path $cc -Name AutoReboot           -Value 0                         -Type DWord        -ErrorAction Stop
+    Set-ItemProperty -Path $cc -Name AlwaysKeepMemoryDump -Value 1                         -Type DWord        -ErrorAction Stop
+    Set-ItemProperty -Path $cc -Name Overwrite            -Value 1                         -Type DWord        -ErrorAction Stop
+    Set-ItemProperty -Path $cc -Name LogEvent             -Value 1                         -Type DWord        -ErrorAction Stop
+    Set-ItemProperty -Path $cc -Name DumpFile             -Value '%SystemRoot%\MEMORY.DMP' -Type ExpandString -ErrorAction Stop
+    Set-ItemProperty -Path $cc -Name MinidumpDir          -Value '%SystemRoot%\Minidump'   -Type ExpandString -ErrorAction Stop
+    if (Get-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction SilentlyContinue) {
+        Remove-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction Stop
+    }
 } catch {
-    Write-Error "FAIL: cannot read the physical memory size: $($_.Exception.Message)"
+    Write-Error "FAIL: crash dump registry write failed: $($_.Exception.Message)"
     exit 1
 }
-if (-not ($ramBytes -gt 0)) {
-    Write-Error "FAIL: physical memory size is missing or not positive (TotalPhysicalMemory = '${ramBytes}')"
-    exit 1
+Write-Host 'OK: Crash dump registry set (CrashDumpEnabled=7, no DedicatedDumpFile)'
+# A dedicated dump file from an older preparation is no longer used. It is not deleted here;
+# golden-image-post-reboot.ps1 refuses to seal while it exists.
+if (Test-Path -LiteralPath 'C:\DedicatedDump.sys') {
+    Write-Host 'WARN: C:\DedicatedDump.sys from an older preparation is no longer used - delete it before sealing'
 }
-$pagefileSizeMB = Get-PagefileSizeMB $ramBytes
+
+# Fixed-size C:\pagefile.sys of RAM + 257 MB (computed above) with automatic management off,
+# active after the reboot; golden-image-post-reboot.ps1 checks this size.
+Write-Host "`n--- Configuring pagefile.sys ---"
 try {
     Set-FixedPagefile $pagefileSizeMB
 } catch {
