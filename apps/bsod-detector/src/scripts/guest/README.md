@@ -40,7 +40,7 @@ Part 1 of golden-image preparation. It has no declared parameters. Run it as Adm
 
 ### Actions, in order
 
-1. Creates `C:\Temp` if needed and selects TLS 1.2 for downloads.
+1. Creates `C:\Temp` if needed and adds TLS 1.2 to the protocols the process allows. `C:\Temp` is fixed on purpose: the ISO cache must survive the reboot and be found by the post-reboot script, which may run under another account than this one (a per-user `$env:TEMP` would differ).
 2. Sends an HTTP HEAD request to the VirtIO ISO endpoint:
    `https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso`.
    If the request fails, it prints a warning and treats the remote timestamp as unknown.
@@ -82,14 +82,15 @@ Registry path: `HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl`.
 
 ### Pagefile configuration
 
-Registry path: `HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management`.
+Dumps are written through the page file only (no `DedicatedDumpFile`). Any system-managed or other page file configuration is replaced by one fixed page file:
 
-- Writes `AutomaticManagedPagefile=0` as a DWORD.
 - Reads physical RAM through `Win32_ComputerSystem.TotalPhysicalMemory`.
-- Calculates the size once with `Get-PagefileSizeMB`: `Round((RAM bytes + 257MB) / 1MB, 0)`. The post-reboot script uses the identical function, so its minimum always equals the configured size.
-- Replaces `PagingFiles` with one MultiString entry: `C:\pagefile.sys <sizeMB> <sizeMB>`.
-- Uses equal initial and maximum sizes. This replaces the configured list rather than preserving additional pagefile entries.
-- Does not create the active pagefile directly: Windows applies the configuration on reboot. The post-reboot script checks the running system.
+- Calculates the size once with `Get-PagefileSizeMB`: `Round((RAM bytes + 257MB) / 1MB, 0)`. The post-reboot script and `configure-dumps.ps1` use the identical function, so the post-reboot minimum and the reported requirement always equal the configured size.
+- If Windows manages the page file automatically, turns that off through the documented read/write `Win32_ComputerSystem.AutomaticManagedPagefile` property (`Set-CimInstance`).
+- Replaces `PagingFiles` under `HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management` with exactly one MultiString entry, `C:\pagefile.sys <sizeMB> <sizeMB>`, dropping any other entries.
+- Uses equal initial and maximum sizes.
+- Does not delete or create page files directly: Windows applies the configuration on reboot. The post-reboot script checks the running system.
+- If either step fails, the script reports `FAIL` and exits with code 1 before the reboot.
 
 ### Settings not managed by these scripts
 
@@ -115,7 +116,7 @@ This is primarily a verification script. It also requests Automatic startup for 
 2. **Storage drivers:** Checks the online driver store for entries whose original filenames contain `viostor` and `vioscsi`. Checks whether the inbox SATA driver exists. Missing drivers generate `WARN` messages rather than marking failure. The warnings note that the matching disk bus may not boot without its driver; a warning is not assurance that every disk bus is supported.
 3. **CrashControl DWORDs:** Compares these five values against the golden-image expectations: `CrashDumpEnabled=7`, `AutoReboot=0`, `AlwaysKeepMemoryDump=1`, `Overwrite=1`, and `LogEvent=1`. Any mismatch marks failure.
 4. **Dedicated dump setting:** Reads `DedicatedDumpFile`. A nonempty value marks failure; a missing or empty value follows the success branch. The stated golden-image policy is for the value to be absent.
-5. **Pagefile management:** Reads `Win32_ComputerSystem.AutomaticManagedPagefile`. Automatic management still enabled marks failure. This checks CIM state, not just the registry value written before reboot.
+5. **Pagefile management:** Reads `Win32_ComputerSystem.AutomaticManagedPagefile`. Automatic management still enabled marks failure. This reads the same CIM property the pre-reboot script sets.
 6. **Active pagefile:** Reads `Win32_PageFileUsage` for C: entries and checks that `AllocatedBaseSize` is at least `Get-PagefileSizeMB` of the RAM — the same `Round((RAM bytes + 257MB) / 1MB, 0)` the pre-reboot script configured. Reports allocation and current usage on success. An undersized or missing active pagefile marks failure.
 
 ### Result, cleanup and sealing
@@ -181,25 +182,25 @@ Run apply mode from an elevated PowerShell session. These examples use a placeho
 1. Reads and parses the configuration and validates the selected dump-type name.
 2. Builds the desired registry values from `recommended.values`, replacing `CrashDumpEnabled` with the selected type's numeric value.
 3. Requires an Administrator token; otherwise emits failure JSON and exits with code 3.
-4. Sets `rebootRequired` according to whether the current `CrashDumpEnabled` differs from the selected value before writing.
+4. Sets `rebootRequired` when the current `CrashDumpEnabled` differs from the selected value or a `DedicatedDumpFile` value is present; both take effect only after a reboot.
 5. Creates the configured registry path if needed.
-6. Removes any existing `DedicatedDumpFile` value, then writes all desired values. Strings use ExpandString and numeric values use DWORD. **If the recommendation includes `DedicatedDumpFile`, the write loop recreates it.** Keep the recommendation aligned with the golden-image policy if the post-reboot checks must pass.
-7. If `C:\Temp\nmf\notmyfaultc64.exe` is missing, attempts to download the Sysinternals NotMyFault archive using TLS 1.2, extract it, delete the archive, and unblock the executable. Errors in this staging block are swallowed by design. The script does not execute NotMyFault or trigger a crash.
+6. Removes any existing `DedicatedDumpFile` value (dumps go through the page file only; `crash-control.json` no longer recommends it), then writes all desired values. Strings use ExpandString and numeric values use DWORD.
+7. If `C:\Temp\nmf\notmyfaultc64.exe` is missing, attempts to download the Sysinternals NotMyFault archive (adding TLS 1.2 to the allowed protocols), extract it, delete the archive, and unblock the executable. `C:\Temp\nmf` is the fixed path the host preflight and pipeline scripts check through the guest agent. Staging stays best effort: a failure is written to stderr as a `WARN` line and does not change the JSON on stdout. The script does not execute NotMyFault or trigger a crash.
 8. Reads the desired registry values back, compares them, reports pagefile configuration, and emits JSON.
 
 ### Verify-only mode
 
 - Still requires the configuration and validates the dump-type name.
 - Does not perform the Administrator check used by apply mode.
-- Does not modify registry settings or stage NotMyFault.
+- Does not modify registry settings, download anything, or stage NotMyFault.
 - Sets `action` to `verified`, `applied` to `null`, and `rebootRequired` to `false`.
 - Compares the live values against the selected desired configuration. Environment variables are expanded on both sides before comparison; missing values do not match.
 
 ### Pagefile reporting and reboot behavior
 
-The script reads pagefile registry entries from the configured location and joins them with `; ` for reporting. For entries containing at least two numeric size fields, it keeps the last parsed maximum size. `pageFile.adequate` is true only when that maximum is greater than zero.
+The script reads pagefile registry entries from the configured location and joins them with `; ` for reporting. It reads physical RAM (read-only) and computes `pageFile.requiredMB` with `Get-PagefileSizeMB`, the golden-image size. `pageFile.adequate` is true only when an entry on `C:` has initial and maximum sizes of at least `requiredMB` (a dump is written into the space allocated at boot); system-managed (`?:\pagefile.sys` or `0 0` sizes), missing, smaller or other-drive page files, and an unreadable RAM size, report `false` (never `null`; the host preflight requires `true`). `requiredMB` follows the RAM of the VM being checked, so a VM with more RAM than the golden image was prepared with reports `false`.
 
-**This is not the golden-image size check.** It does not compare pagefile capacity to RAM plus 257 MB, check active kernel allocation, resize the pagefile, or verify free disk space. It does not reboot. `rebootRequired` tracks a change to `CrashDumpEnabled` in apply mode, not every change that could require a reboot; verify-only mode does not infer whether an earlier reboot is pending.
+The script does not resize the pagefile (that belongs to `golden-image-pre-reboot.ps1`), check active kernel allocation, or verify free disk space. It does not reboot. Verify-only mode reports `rebootRequired` as `false` and does not infer whether an earlier reboot is pending.
 
 ### JSON output and errors
 
@@ -213,10 +214,11 @@ The normal output is one JSON object with:
 | `applied` | Desired values written in apply mode; `null` in verify-only mode. |
 | `current` | Live registry values for the desired keys. |
 | `matchesRecommended` | Whether all desired keys match, including the selected dump-type override. |
-| `rebootRequired` | Whether apply mode detected a different `CrashDumpEnabled` before writing. |
+| `rebootRequired` | Whether apply mode detected a different `CrashDumpEnabled` or removed a `DedicatedDumpFile` value. |
 | `pageFile.configured` | Configured pagefile entries joined by `; `, or `null`. |
-| `pageFile.adequate` | Whether the pagefile parsing rule above found a positive maximum size. |
+| `pageFile.adequate` | Boolean: a `C:` entry with initial and maximum sizes of at least `requiredMB` is configured (see above). |
+| `pageFile.requiredMB` | RAM + 257 MB in MB (`Get-PagefileSizeMB`), or `null` when RAM cannot be read. |
 
 An unknown dump type emits `{ "ok": false, "error": "...", "script": "configure-dumps.ps1" }` and exits with code 2. A non-elevated apply attempt emits the same failure shape and exits with code 3. A missing configuration is a terminating error; other uncaught parsing or registry errors are not wrapped by the explicit failure-JSON helper.
 
-A settings mismatch or inadequate pagefile does not itself cause an explicit failure exit: inspect `matchesRecommended` and `pageFile.adequate`, not only `ok`. Likewise, successful normal output does not establish that the best-effort NotMyFault staging succeeded.
+A settings mismatch or inadequate pagefile does not itself cause an explicit failure exit: inspect `matchesRecommended` and `pageFile.adequate`, not only `ok`. Likewise, successful normal output does not establish that the best-effort NotMyFault staging succeeded; check stderr for its `WARN` line.
