@@ -33,6 +33,9 @@ function Remove-SetupCacheFile ([string[]]$Paths) {
     $failures
 }
 
+# FAIL lines use Write-Error. Keep the default preference so a caller's Stop preference cannot end
+# the script at the first FAIL and skip the remaining checks.
+$ErrorActionPreference = 'Continue'
 $hasFailure = $false
 
 # Also (re)sets the startup type to Automatic.
@@ -69,9 +72,9 @@ if (Test-Path 'C:\Windows\System32\drivers\storahci.sys') {
 # not install one). The pipeline entry script attempts, best effort and non-fatal, to hot-add the
 # pvpanic device to the running VM through the QEMU monitor
 # (`virsh qemu-monitor-command --hmp 'device_add pvpanic,id=pvpanic0'`):
-# src/scripts/crash-injector/trigger-bsod-intentional.sh, or src/scripts/bsod-pipeline/bsod-runner.sh
-# after the pipeline rename. Whether the KubeVirt Panicked event is raised without a guest driver
-# has not been verified.
+# src/scripts/crash-injector/trigger-bsod-intentional.sh (a separately proposed pipeline runner may
+# take over that step). Whether the KubeVirt Panicked event is raised without a guest driver has
+# not been verified.
 
 # The DWORD values golden-image-pre-reboot.ps1 writes; DedicatedDumpFile must be absent.
 Write-Host "`n--- Checking crash dump registry ---"
@@ -98,6 +101,13 @@ if ($dedicatedDump) {
     $hasFailure = $true
 } else {
     Write-Host 'OK: DedicatedDumpFile = (not set) - pagefile.sys used via normal I/O'
+}
+# A dedicated dump file left by an older preparation is unused but would be sealed into the image.
+# It is not deleted automatically: remove it manually once DedicatedDumpFile is unset and the VM has
+# rebooted (Windows can hold the file open until then), then re-run this script.
+if (Test-Path -LiteralPath 'C:\DedicatedDump.sys') {
+    Write-Error 'FAIL: C:\DedicatedDump.sys from an older preparation still exists - delete it manually once DedicatedDumpFile is unset and the VM has rebooted, then re-run this script'
+    $hasFailure = $true
 }
 
 # Both pagefile checks need the memory size: a failed query or a missing or non-positive
@@ -141,7 +151,7 @@ if (-not $hasMemorySize) {
 
 Write-Host ''
 if ($hasFailure) {
-    Write-Error '=== One or more checks FAILED - DO NOT SEAL. Fix issues and re-run Script 1. ==='
+    Write-Error '=== One or more checks FAILED - DO NOT SEAL. Fix the issues (re-run golden-image-pre-reboot.ps1 if needed), then re-run this script. ==='
     exit 1
 }
 
@@ -158,4 +168,4 @@ Write-Host 'OK: virtio-win ISO cache files removed or already absent'
 
 Write-Host ''
 Write-Host '=== All checks passed - safe to seal the golden image. ===' -ForegroundColor Green
-Write-Host '=== Seal the image with: sysprep /generalize /oobe /shutdown /quiet ===' -ForegroundColor Green
+Write-Host '=== Seal the image with: C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /quiet ===' -ForegroundColor Green
