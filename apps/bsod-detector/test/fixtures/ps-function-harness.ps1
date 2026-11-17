@@ -3,11 +3,14 @@
 # function definition, extracted from the syntax tree, in a runspace with an empty
 # InitialSessionState (no cmdlets, providers or applications). Functions that invoke any
 # command, or any .NET member other than static [math] members, are refused before running.
+# `mockcall` mode additionally defines test-supplied mock functions in that runspace and only
+# allows the function to call those mocks, so no real cmdlet or file operation is reachable.
 param(
-    [Parameter(Mandatory)][ValidateSet('parse', 'definition', 'call', 'isolation')][string]$Mode,
+    [Parameter(Mandatory)][ValidateSet('parse', 'definition', 'call', 'mockcall', 'isolation')][string]$Mode,
     [Parameter(Mandatory)][string]$ScriptPath,
     [string]$FunctionName = '',
-    [string]$CallsJson = '[]'
+    [string]$CallsJson = '[]',
+    [string]$MocksPath = ''
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -33,14 +36,19 @@ function Find-Function ($ScriptAST, [string]$Name) {
 
 # Refuses function bodies that could reach outside the runspace: command calls, and member
 # access other than static [math] members (e.g. [System.IO.File]::Exists or $x.Method()).
-function Assert-PureFunction ($FunctionAST) {
+# With -AllowedCommands (mock names) and -AllowInstanceProperties, mock-backed functions may call
+# only those mocks and read properties of the objects they return; method calls stay refused.
+function Assert-PureFunction ($FunctionAST, [string[]]$AllowedCommands = @(), [switch]$AllowInstanceProperties) {
     $commands = @($FunctionAST.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true))
-    if ($commands.Count) { throw "refused: $($FunctionAST.Name) invokes commands: $($commands[0].Extent.Text)" }
+    foreach ($command in $commands) {
+        if ($command.GetCommandName() -notin $AllowedCommands) { throw "refused: $($FunctionAST.Name) invokes commands: $($command.Extent.Text)" }
+    }
     $members = @($FunctionAST.FindAll({ param($node) $node -is [System.Management.Automation.Language.MemberExpressionAst] }, $true))
     foreach ($member in $members) {
         $isMath = $member.Static -and $member.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
             $member.Expression.TypeName.FullName -in @('math', 'System.Math')
-        if (-not $isMath) { throw "refused: $($FunctionAST.Name) accesses a member outside [math]: $($member.Extent.Text)" }
+        $isProperty = $AllowInstanceProperties -and -not $member.Static -and $member -isnot [System.Management.Automation.Language.InvokeMemberExpressionAst]
+        if (-not ($isMath -or $isProperty)) { throw "refused: $($FunctionAST.Name) accesses a member outside [math]: $($member.Extent.Text)" }
     }
 }
 
@@ -79,9 +87,9 @@ switch ($Mode) {
         [ordered]@{ found = ($null -ne $fn); text = $(if ($fn) { $fn.Extent.Text } else { '' }) } | ConvertTo-Json -Compress
     }
     'call' {
-        if ($parsed.Errors.Count) { throw "parse errors in $ScriptPath" }
+        if ($parsed.Errors.Count) { throw "parse errors in ${ScriptPath}" }
         $fn = Find-Function $parsed.AST $FunctionName
-        if (-not $fn) { throw "function $FunctionName not found in $ScriptPath" }
+        if (-not $fn) { throw "function ${FunctionName} not found in ${ScriptPath}" }
         Assert-PureFunction $fn
         $shell = New-IsolatedShell
         [void]$shell.AddScript($fn.Extent.Text, $false).Invoke()
@@ -96,6 +104,34 @@ switch ($Mode) {
             $results.Add($out[0])
         }
         ConvertTo-Json -InputObject $results.ToArray() -Compress
+    }
+    'mockcall' {
+        if ($parsed.Errors.Count) { throw "parse errors in ${ScriptPath}" }
+        $fn = Find-Function $parsed.AST $FunctionName
+        if (-not $fn) { throw "function ${FunctionName} not found in ${ScriptPath}" }
+        $mocks = Get-ScriptAST $MocksPath 'utf-8'
+        $mockNames = @($mocks.AST.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
+        Assert-PureFunction $fn -AllowedCommands $mockNames -AllowInstanceProperties
+        $shell = New-IsolatedShell
+        [void]$shell.AddScript($mocks.AST.Extent.Text, $false).Invoke()
+        $shell.Commands.Clear()
+        [void]$shell.AddScript($fn.Extent.Text, $false).Invoke()
+        $results = [System.Collections.Generic.List[object]]::new()
+        foreach ($call in (ConvertFrom-Json $CallsJson -NoEnumerate)) {
+            $state = @{}
+            foreach ($property in $call.state.PSObject.Properties) { $state[$property.Name] = [string[]]@($property.Value) }
+            $log = [System.Collections.Generic.List[string]]::new()
+            $shell.Runspace.SessionStateProxy.SetVariable('MockState', $state)
+            $shell.Runspace.SessionStateProxy.SetVariable('MockLog', $log)
+            $shell.Commands.Clear()
+            $shell.Streams.Error.Clear()
+            [void]$shell.AddCommand($FunctionName)
+            foreach ($value in $call.args) { [void]$shell.AddArgument([string[]]@($value)) }
+            $out = @($shell.Invoke())
+            if ($shell.Streams.Error.Count) { throw $shell.Streams.Error[0].Exception }
+            $results.Add([ordered]@{ output = @($out | ForEach-Object { "$_" }); log = @($log) })
+        }
+        ConvertTo-Json -InputObject $results.ToArray() -Compress -Depth 4
     }
     'isolation' {
         $shell = New-IsolatedShell
