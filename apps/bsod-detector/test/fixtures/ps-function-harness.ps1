@@ -1,12 +1,17 @@
 # Test harness for the guest PowerShell scripts; used by test_golden_image_*_reboot.py and
 # test_configure_dumps.py.
 # It never runs a guest script. It parses the script, and in `call` mode runs only one
-# function definition, extracted from the syntax tree, in a runspace with an empty
-# InitialSessionState (no cmdlets, providers or applications). Functions that invoke any
-# command or method, or a static .NET member other than [math], are refused before running;
-# reading properties of the values passed in (for example $array.Count) is allowed.
+# function definition, extracted from the syntax tree, in a runspace with an otherwise empty
+# InitialSessionState (no providers or applications; its only cmdlet is Set-StrictMode, see
+# below). Functions that invoke any other command or a method, or a static .NET member other
+# than [math], are refused before running; reading properties of the values passed in (for
+# example $array.Count) is allowed.
 # `mockcall` mode additionally defines test-supplied mock functions in that runspace and only
-# allows the function to call those mocks, so no real cmdlet or file operation is reachable.
+# allows the function to call those mocks, so no file, registry or network operation is reachable.
+# Set-StrictMode is provided because it only changes how the runspace evaluates code (no I/O). A
+# function may call it, and when the script under test enables strict mode at its top level the
+# same mode is applied before its functions run, as they inherit it on the guest. Mocks (written
+# by the tests) may not replace it.
 param(
     [Parameter(Mandatory)][ValidateSet('parse', 'definition', 'call', 'mockcall', 'isolation')][string]$Mode,
     [Parameter(Mandatory)][string]$ScriptPath,
@@ -16,6 +21,9 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Cmdlets the isolated runspace provides itself; functions may call them in every mode.
+$runspaceCmdlets = @{ 'Set-StrictMode' = [Microsoft.PowerShell.Commands.SetStrictModeCommand] }
 
 # Token kinds that only PowerShell 7 understands; the guest runs Windows PowerShell 5.1.
 $ps7OnlyTokenKinds = @('QuestionQuestion', 'QuestionQuestionEquals', 'QuestionDot', 'QuestionLBracket', 'AndAnd', 'OrOr', 'QuestionMark')
@@ -36,14 +44,16 @@ function Find-Function ($ScriptAST, [string]$Name) {
     $ScriptAST.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name }, $true)
 }
 
-# Refuses function bodies that could reach outside the runspace: command calls, and member
+# Refuses function bodies that could reach outside the runspace: calls of commands other than the
+# runspace cmdlets, and member
 # access other than static [math] members (e.g. [System.IO.File]::Exists or $x.Method()).
 # With -AllowedCommands (mock names) and -AllowInstanceProperties, mock-backed functions may call
 # only those mocks and read properties of the objects they return; method calls stay refused.
 function Assert-PureFunction ($FunctionAST, [string[]]$AllowedCommands = @(), [switch]$AllowInstanceProperties) {
     $commands = @($FunctionAST.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true))
+    $allowed = @($AllowedCommands) + @($runspaceCmdlets.Keys)
     foreach ($command in $commands) {
-        if ($command.GetCommandName() -notin $AllowedCommands) { throw "refused: $($FunctionAST.Name) invokes commands: $($command.Extent.Text)" }
+        if ($command.GetCommandName() -notin $allowed) { throw "refused: $($FunctionAST.Name) invokes commands: $($command.Extent.Text)" }
     }
     $members = @($FunctionAST.FindAll({ param($node) $node -is [System.Management.Automation.Language.MemberExpressionAst] }, $true))
     foreach ($member in $members) {
@@ -56,12 +66,37 @@ function Assert-PureFunction ($FunctionAST, [string[]]$AllowedCommands = @(), [s
 
 function New-IsolatedShell {
     $iss = [System.Management.Automation.Runspaces.InitialSessionState]::Create()
+    foreach ($name in $runspaceCmdlets.Keys) {
+        $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateCmdletEntry]::new($name, $runspaceCmdlets[$name], $null))
+    }
     $iss.LanguageMode = [System.Management.Automation.PSLanguageMode]::FullLanguage
     $runspace = [runspacefactory]::CreateRunspace($iss)
     $runspace.Open()
     $shell = [powershell]::Create()
     $shell.Runspace = $runspace
     $shell
+}
+
+# The script's top-level (outside any function) Set-StrictMode statement as a canonical command, or
+# nothing. Only `Set-StrictMode -Version Latest` or `-Version <number>` is accepted.
+function Get-TopLevelStrictMode ($ScriptAST) {
+    $commands = @($ScriptAST.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Set-StrictMode' }, $true))
+    foreach ($command in $commands) {
+        $parent = $command.Parent
+        while ($parent -and $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $parent = $parent.Parent }
+        if ($parent) { continue }
+        if ($command.Extent.Text -notmatch '^Set-StrictMode\s+-Version\s+(Latest|\d+(\.\d+)?)$') { throw "refused: unsupported top-level strict mode: $($command.Extent.Text)" }
+        return "Set-StrictMode -Version $($Matches[1])"
+    }
+}
+
+# Applies the script's top-level strict mode in the runspace, so its functions run as on the guest.
+function Set-ScriptStrictMode ($Shell, $ScriptAST) {
+    $strictMode = Get-TopLevelStrictMode $ScriptAST
+    if ($strictMode) {
+        [void]$Shell.AddScript($strictMode, $false).Invoke()
+        $Shell.Commands.Clear()
+    }
 }
 
 function ConvertTo-Argument ($Value) {
@@ -96,6 +131,7 @@ switch ($Mode) {
         if (-not $fn) { throw "function ${FunctionName} not found in ${ScriptPath}" }
         Assert-PureFunction $fn -AllowInstanceProperties
         $shell = New-IsolatedShell
+        Set-ScriptStrictMode $shell $parsed.AST
         [void]$shell.AddScript($fn.Extent.Text, $false).Invoke()
         $results = [System.Collections.Generic.List[object]]::new()
         foreach ($call in (ConvertFrom-Json $CallsJson -NoEnumerate)) {
@@ -115,8 +151,11 @@ switch ($Mode) {
         if (-not $fn) { throw "function ${FunctionName} not found in ${ScriptPath}" }
         $mocks = Get-ScriptAST $MocksPath 'utf-8'
         $mockNames = @($mocks.AST.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
+        $shadowed = @($mockNames | Where-Object { $runspaceCmdlets.ContainsKey($_) })
+        if ($shadowed.Count) { throw "refused: mocks must not replace $($shadowed -join ', ')" }
         Assert-PureFunction $fn -AllowedCommands $mockNames -AllowInstanceProperties
         $shell = New-IsolatedShell
+        Set-ScriptStrictMode $shell $parsed.AST
         [void]$shell.AddScript($mocks.AST.Extent.Text, $false).Invoke()
         $shell.Commands.Clear()
         [void]$shell.AddScript($fn.Extent.Text, $false).Invoke()
