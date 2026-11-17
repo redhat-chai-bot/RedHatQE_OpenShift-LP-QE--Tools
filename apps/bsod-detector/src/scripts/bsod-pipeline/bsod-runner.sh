@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 typeset useMsg=''; read -rd '' useMsg 0<<'useMsg-EOF'
 RHOV BSOD pipeline for an explicitly disposable test VM:
-preflight -> [intentional: stage NotMyFault, clear old dumps] -> watcher armed -> [intentional: inject] -> offline extraction.
+preflight -> [intentional: check NotMyFault, clear old dumps] -> watcher armed -> [intentional: inject] -> offline extraction.
 The watcher runs with `--no-restart`, so a successful run leaves the VM Stopped. This script never starts it.
 
 Usage:
@@ -9,7 +9,9 @@ Usage:
     bsod-runner.sh --mode watch
 
 Where:
-    --mode      intentional  Crash the VM on purpose with NotMyFault <crashType>.
+    --mode      intentional  Crash the VM on purpose with NotMyFault <crashType>. Preflight runs with
+                             --require-trigger and requires NotMyFault on the guest, staging it first
+                             when preflight and configure-dumps.ps1 support -StageNotMyFault.
                 watch        Wait for a natural crash. NotMyFault is not staged or run and existing
                              guest crash dumps are not deleted.
                 Prompted for when omitted on a terminal. Required otherwise.
@@ -17,10 +19,11 @@ Where:
 
 Environment:
     BSOD_DET__NAMESPACE, BSOD_DET__VM__NAME  Target VM (required).
+    BSOD_DET__RECOVERY__IMAGE                Recovery image, digest-pinned <image>@sha256:<64 hex> (required).
     BSOD_DET__CONFIRM_TARGET                 Must equal BSOD_DET__VM__NAME (intentional mode only).
     BSOD_DET__EVIDENCE__DIR                  Evidence mount (default: /mnt/persistent-bsod-evidence).
     BSOD_EVIDENCE_VOLUME_KIND, BSOD_DET__EVIDENCE__STORAGE_ID, BSOD_DET__MEMORY__DUMP_PVC,
-    BSOD_DET__SNAPSHOT__CLASS, BSOD_DET__RECOVERY__IMAGE,
+    BSOD_DET__SNAPSHOT__CLASS,
     BSOD_DET__READY__TIMEOUT (300), BSOD_DET__PREFLIGHT__TIMEOUT (1800)  Optional overrides.
     The watcher's own settings (e.g. BSOD_DET__ARMED__TIMEOUT, default 3600) still apply.
 useMsg-EOF
@@ -37,29 +40,18 @@ typeset evidenceKind="${BSOD_EVIDENCE_VOLUME_KIND:-pvc}"
 typeset evidenceId="${BSOD_DET__EVIDENCE__STORAGE_ID:-shared-bsod-evidence}"
 typeset memoryPvc="${BSOD_DET__MEMORY__DUMP_PVC:-${vm}-memdump}"
 typeset snapClass="${BSOD_DET__SNAPSHOT__CLASS:-ocs-storagecluster-rbdplugin-snapclass}"
-typeset recoveryImage="${BSOD_DET__RECOVERY__IMAGE:-quay.io/konveyor/oadp-vmfr-access:latest}"
+typeset recoveryImage="${BSOD_DET__RECOVERY__IMAGE:-}"
 typeset readyTimeout="${BSOD_DET__READY__TIMEOUT:-300}"
 typeset preflightTimeout="${BSOD_DET__PREFLIGHT__TIMEOUT:-1800}"
 typeset nmfGuest='C:\Temp\nmf\notmyfaultc64.exe'
-typeset -a guestAgent=(python3 "${hostDir}/guest-agent.py")
-[ -z "${BSOD_DET__GUEST_AGENT__BIN:-}" ] || guestAgent=("${BSOD_DET__GUEST_AGENT__BIN}")
+typeset -a guestAgentArr=(python3 "${hostDir}/guest-agent.py")
+[ -z "${BSOD_DET__GUEST_AGENT__BIN:-}" ] || guestAgentArr=("${BSOD_DET__GUEST_AGENT__BIN}")
 
 # `set +x` keeps xtrace from printing the usage text a second time.
 function Usage () { set +x; echo "${scrName%.sh}: ${1:?}" 1>&2; echo "${useMsg}" 1>&2; exit 2; }
 function Die () { echo "${scrName%.sh}: ERROR: ${1:?}" 1>&2; exit "${2:-1}"; }
 function RunTimed () { typeset sec="${1:?}"; shift; timeout --signal=TERM --kill-after=5 "${sec}" "$@"; }
-function GuestPs () { typeset sec="${1:?}"; shift; RunTimed "${sec}" "${guestAgent[@]}" exec powershell.exe -NoProfile -Command "$@"; }
-
-# Lower-case SHA-256 of the guest's NotMyFault copy; empty when it is absent or the guest agent fails.
-function GuestNmfHash () {
-    typeset hash=''
-    hash="$(GuestPs 30 "(Get-FileHash -Algorithm SHA256 -LiteralPath '${nmfGuest}' -ErrorAction SilentlyContinue).Hash")" ||
-        hash=''
-    hash="${hash//[[:space:]]/}"
-    echo "${hash,,}"
-
-    true
-}
+function GuestPs () { typeset sec="${1:?}"; shift; RunTimed "${sec}" "${guestAgentArr[@]}" exec powershell.exe -NoProfile -Command "$@"; }
 
 # Stops a still-running watcher (it removes only its own temporary state). Never deletes evidence.
 function Cleanup () {
@@ -102,25 +94,29 @@ esac
 [[ -n "${vm}" && -n "${ns}" ]] || Die 'BSOD_DET__VM__NAME and BSOD_DET__NAMESPACE must identify the disposable RHOV test VM'
 [[ "${readyTimeout}" =~ ^[1-9][0-9]*$ && "${preflightTimeout}" =~ ^[1-9][0-9]*$ ]] ||
     Die 'BSOD_DET__READY__TIMEOUT and BSOD_DET__PREFLIGHT__TIMEOUT must be positive integers'
-if [ "${mode}" = intentional ]; then
-    # The target location is not authorization: the operator must name the VM again.
-    [ "${BSOD_DET__CONFIRM_TARGET:-}" = "${vm}" ] ||
-        Die "BSOD_DET__CONFIRM_TARGET must be set to '${vm}' to authorize crashing this VM (got: '${BSOD_DET__CONFIRM_TARGET:-<unset>}')"
-    # notmyfaultc64.exe is downloaded on the guest by configure-dumps.ps1 — no local copy required.
+# Same rule as preflight-rhov.sh, checked here so nothing is created before it fails.
+[[ "${recoveryImage}" =~ @sha256:[0-9a-fA-F]{64}$ ]] ||
+    Die "BSOD_DET__RECOVERY__IMAGE must be a digest-pinned image (<image>@sha256:<64 hex>), got: '${recoveryImage:-<unset>}'"
+# The target location is not authorization: the operator must name the VM again.
+if [ "${mode}" = intentional ] && [ "${BSOD_DET__CONFIRM_TARGET:-}" != "${vm}" ]; then
+    Die "BSOD_DET__CONFIRM_TARGET must be set to '${vm}' to authorize crashing this VM (got: '${BSOD_DET__CONFIRM_TARGET:-<unset>}')"
 fi
 
 typeset runId=''; runId="$(date -u +%Y%m%dT%H%M%SZ)-${mode}-$$-${RANDOM}"
 typeset outDir="${evidenceRoot}/${runId}"
 typeset metadataFile="${outDir}/recovery-metadata.json" readyFile="${outDir}/watcher-ready"
-typeset -a commonArgs=(
+typeset -a commonArgArr=(
     --ns "${ns}" --vm "${vm}" --out "${outDir}" --metadata "${metadataFile}" --run-id "${runId}"
     --evidence-mount "${evidenceRoot}" --evidence-volume-kind "${evidenceKind}" --evidence-storage-id "${evidenceId}"
     --snap-class "${snapClass}" --recovery-image "${recoveryImage}" --memory-dump-pvc "${memoryPvc}"
 )
 mkdir "${outDir}" || Die "cannot create unique run directory ${outDir}"
 
-# Same preflight for both modes. No `--require-trigger`: it checks for NotMyFault, which intentional mode stages below.
-RunTimed "${preflightTimeout}" "${hostDir}/preflight-rhov.sh" "${commonArgs[@]}"
+# Only an intentional run asks preflight for the trigger: it requires NotMyFault on the guest and, with
+# helpers that support configure-dumps.ps1 -StageNotMyFault, stages it first. Watch runs never stage it.
+typeset -a preflightArgArr=("${commonArgArr[@]}")
+[ "${mode}" = watch ] || preflightArgArr+=(--require-trigger)
+RunTimed "${preflightTimeout}" "${hostDir}/preflight-rhov.sh" "${preflightArgArr[@]}"
 typeset pod='' dom=''
 pod="$(jq -er .launcherPod "${metadataFile}")"
 dom="$(jq -er .domain "${metadataFile}")"
@@ -136,7 +132,8 @@ RunTimed 30 oc --request-timeout=25s -n "${ns}" exec "${pod}" -- bash -o pipefai
         virsh define /tmp/dom-patch.xml 1> /dev/null; } || es=1
     rm -f /tmp/dom-patch.xml
     exit "${es}"
-' '' "${dom}" || : 'WARN: domain crash-behaviour patch failed (non-fatal, evidence capture may be limited)'
+' '' "${dom}" ||
+    echo "${scrName%.sh}: WARN: domain crash-behaviour patch failed (non-fatal, evidence capture may be limited)" 1>&2
 
 # Pre-crash fallback copies; the VMI spec stays readable even if the launcher Pod fails after the BSOD.
 RunTimed 30 oc --request-timeout=25s -n "${ns}" exec "${pod}" -- virsh dumpxml "${dom}" 1> "${outDir}/domain.xml" ||
@@ -145,8 +142,13 @@ RunTimed 15 oc --request-timeout=10s -n "${ns}" get "vmi/${vm}" -o json 1> "${ou
     rm -f "${outDir}/vmi-spec.json"
 
 if [ "${mode}" = intentional ]; then
-    # Verify notmyfaultc64.exe is present on the guest (downloaded by configure-dumps.ps1 during preflight).
-    [ -n "$(GuestNmfHash)" ] || Die "notmyfaultc64.exe not found on guest — configure-dumps.ps1 download may have failed"
+    # NotMyFault must exist and be readable on the guest; any other answer, including a guest-agent
+    # failure, stops the run. This is an availability check, not an integrity check.
+    typeset nmfState=''
+    nmfState="$(GuestPs 30 "try { \$s = [IO.File]::OpenRead('${nmfGuest}'); \$s.Close(); 'readable' } catch { 'unavailable' }")" ||
+        nmfState='unavailable'
+    nmfState="${nmfState//[[:space:]]/}"
+    [ "${nmfState}" = readable ] || Die "NotMyFault ${nmfGuest} is not available and readable on the guest (got: '${nmfState}')"
 
     # Clear old dumps so any dump found after the crash belongs to this run, then prove the guest is clean.
     typeset cleanState=''
@@ -156,9 +158,9 @@ if [ "${mode}" = intentional ]; then
         Die "guest dump cleanup could not be proven: ${cleanState}"
 fi
 
-typeset -a watchArgs=("${commonArgs[@]}" --ready-file "${readyFile}" --no-restart)
-[ "${mode}" = watch ] || watchArgs+=(--intentional)
-bash "${hostDir}/watch-crash.sh" "${watchArgs[@]}" &
+typeset -a watchArgArr=("${commonArgArr[@]}" --ready-file "${readyFile}" --no-restart)
+[ "${mode}" = watch ] || watchArgArr+=(--intentional)
+bash "${hostDir}/watch-crash.sh" "${watchArgArr[@]}" &
 watcherPid=$!
 
 typeset -i es=0 readyDeadline=$((SECONDS + readyTimeout))
@@ -176,7 +178,7 @@ printf '%s: watcher armed for %s/%s (run %s).\n' "${scrName%.sh}" "${ns}" "${vm}
 if [ "${mode}" = intentional ]; then
     printf 'Triggering NotMyFault crash %s.\n' "${crashType}"
     # Returns once the guest agent confirms the process started or the guest disconnects.
-    RunTimed 90 "${guestAgent[@]}" exec-crash "${nmfGuest}" /accepteula /crash "${crashType}" 1> /dev/null ||
+    RunTimed 90 "${guestAgentArr[@]}" exec-crash "${nmfGuest}" /accepteula /crash "${crashType}" 1> /dev/null ||
         Die 'intentional guest crash command exited nonzero or did not disconnect as expected' $?
 else
     printf '%s\n' 'Trigger the BSOD in the VM now. Evidence is captured automatically if it happens' \
