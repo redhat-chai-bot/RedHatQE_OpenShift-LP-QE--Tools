@@ -1,11 +1,36 @@
 # Golden-image setup, part 2 of 2. Run as Administrator AFTER the reboot triggered by
 # golden-image-pre-reboot.ps1 and BEFORE sealing. Any FAIL exits 1 (do not seal);
-# WARN lines are informational.
+# WARN lines are informational. When every check passes, the ISO cache files left by
+# golden-image-pre-reboot.ps1 are removed so they are not sealed into the image.
 
 # Fixed pagefile size in MB: physical RAM plus 257 MB, rounded once to a whole MB. This must
 # match the size golden-image-pre-reboot.ps1 configures, so the check below can pass exactly.
 function Get-PagefileSizeMB ([int64]$MemoryBytes) {
     [int64][math]::Round(($MemoryBytes + 257MB) / 1MB, 0)
+}
+
+# Removes the given cache files and outputs one message per file that could not be removed.
+# A missing file is already clean. A mounted ISO is left in place and reported, and any
+# removal error (for example a file in use) is reported instead of being ignored.
+function Remove-SetupCacheFile ([string[]]$Paths) {
+    $failures = @()
+    foreach ($path in $Paths) {
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        if ($path -like '*.iso') {
+            $image = Get-DiskImage -ImagePath $path -ErrorAction SilentlyContinue
+            if ($image -and $image.Attached) {
+                $failures += "${path} is still mounted"
+                continue
+            }
+        }
+        try {
+            Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+            Write-Host "OK: removed ${path}"
+        } catch {
+            $failures += "${path} could not be removed: $($_.Exception.Message)"
+        }
+    }
+    $failures
 }
 
 $hasFailure = $false
@@ -40,32 +65,13 @@ if (Test-Path 'C:\Windows\System32\drivers\storahci.sys') {
     Write-Host 'WARN: storahci.sys not found - unexpected (inbox driver should always be present)'
 }
 
-# pvpanic driver check is disabled together with the install in golden-image-pre-reboot.ps1. The
-# pipeline watches the KubeVirt Panicked event, and its entry script (not preflight-rhov.sh)
-# hot-adds the pvpanic device at runtime with `virsh qemu-monitor-command --hmp device_add`.
-# Whether that event is raised without the guest driver has not been verified.
-# Write-Host "`n--- Checking pvpanic driver ---"
-# $pvpanicStart = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\pvpanic' -Name Start -ErrorAction SilentlyContinue).Start
-# if ("$pvpanicStart" -eq '3') {
-#     Write-Host 'OK: pvpanic service key present (Start=3) - driver will load when QEMU presents the device'
-# } else {
-#     Write-Host "WARN: pvpanic service key missing or incorrect (Start='$pvpanicStart') - pipeline adds device via QMP at runtime (non-fatal)"
-# }
-
-# Disabled together with the recovery step in golden-image-pre-reboot.ps1.
-#Write-Host "`n--- Checking recovery settings ---"
-#$bootStatus  = bcdedit /enum '{default}' | Select-String "bootstatuspolicy"
-#$recoveryEna = bcdedit /enum '{default}' | Select-String "recoveryenabled"
-#if ($bootStatus -match "IgnoreAllFailures") {
-#    Write-Host "OK: bootstatuspolicy = IgnoreAllFailures"
-#} else {
-#    Write-Error "FAIL: bootstatuspolicy not set to IgnoreAllFailures"; $hasFailure = $true
-#}
-#if ($recoveryEna -match "No") {
-#    Write-Host "OK: recoveryenabled = No"
-#} else {
-#    Write-Error "FAIL: recoveryenabled not set to No"; $hasFailure = $true
-#}
+# pvpanic: this script does not check a guest pvpanic driver (golden-image-pre-reboot.ps1 does
+# not install one). The pipeline entry script attempts, best effort and non-fatal, to hot-add the
+# pvpanic device to the running VM through the QEMU monitor
+# (`virsh qemu-monitor-command --hmp 'device_add pvpanic,id=pvpanic0'`):
+# src/scripts/crash-injector/trigger-bsod-intentional.sh, or src/scripts/bsod-pipeline/bsod-runner.sh
+# after the pipeline rename. Whether the KubeVirt Panicked event is raised without a guest driver
+# has not been verified.
 
 # The DWORD values golden-image-pre-reboot.ps1 writes; DedicatedDumpFile must be absent.
 Write-Host "`n--- Checking crash dump registry ---"
@@ -79,16 +85,16 @@ $expected = [ordered]@{
 }
 foreach ($name in $expected.Keys) {
     $actual = (Get-ItemProperty -Path $cc -Name $name -ErrorAction SilentlyContinue).$name
-    if ("$actual" -eq "$($expected[$name])") {
-        Write-Host "OK: $name = $actual"
+    if ("${actual}" -eq "$($expected[$name])") {
+        Write-Host "OK: ${name} = ${actual}"
     } else {
-        Write-Error "FAIL: $name = '$actual' (expected '$($expected[$name])')"
+        Write-Error "FAIL: ${name} = '${actual}' (expected '$($expected[$name])')"
         $hasFailure = $true
     }
 }
 $dedicatedDump = (Get-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction SilentlyContinue).DedicatedDumpFile
 if ($dedicatedDump) {
-    Write-Error "FAIL: DedicatedDumpFile = '$dedicatedDump' (must be absent - forces StorPort miniport, fails on VirtIO)"
+    Write-Error "FAIL: DedicatedDumpFile = '${dedicatedDump}' (must be absent - forces StorPort miniport, fails on VirtIO)"
     $hasFailure = $true
 } else {
     Write-Host 'OK: DedicatedDumpFile = (not set) - pagefile.sys used via normal I/O'
@@ -118,26 +124,23 @@ if ($pf -and $pf.AllocatedBaseSize -ge $expectedMinMB) {
     $hasFailure = $true
 }
 
-# golden-image-pre-reboot.ps1 keeps its ISO download (and, after an interrupted transfer, a
-# partial .download file) for re-runs. Neither should be sealed into the image. They are only
-# reported, and the deletion command is printed with the sealing steps; nothing is deleted here.
-Write-Host "`n--- Checking leftover setup files ---"
-$leftoverPaths = @(@('C:\Temp\virtio-win.iso', 'C:\Temp\virtio-win.iso.download') | Where-Object { Test-Path $_ })
-foreach ($path in $leftoverPaths) {
-    Write-Host "WARN: $path is still present - delete it before sealing so it is not captured in the image"
-}
-if (-not $leftoverPaths) { Write-Host 'OK: no leftover setup files in C:\Temp' }
-
 Write-Host ''
 if ($hasFailure) {
     Write-Error '=== One or more checks FAILED - DO NOT SEAL. Fix issues and re-run Script 1. ==='
     exit 1
 }
-if ($leftoverPaths) {
-    $removeCommand = 'Remove-Item -Force ' + (($leftoverPaths | ForEach-Object { "'$_'" }) -join ', ')
-    Write-Host '=== All checks passed - delete the leftover setup files, then seal the golden image. ===' -ForegroundColor Green
-    Write-Host "=== Delete them with: $removeCommand ===" -ForegroundColor Green
-} else {
-    Write-Host '=== All checks passed - safe to seal the golden image. ===' -ForegroundColor Green
+
+# Only after every check passed: golden-image-pre-reboot.ps1 keeps its ISO download (and, after an
+# interrupted transfer, a partial .download file) for re-runs, but neither belongs in the image.
+Write-Host "`n--- Removing stale setup files ---"
+$cleanupFailures = @(Remove-SetupCacheFile @('C:\Temp\virtio-win.iso', 'C:\Temp\virtio-win.iso.download'))
+if ($cleanupFailures.Count) {
+    foreach ($failure in $cleanupFailures) { Write-Error "FAIL: ${failure}" }
+    Write-Error '=== Stale setup files remain - DO NOT SEAL. Unmount or close them, remove them and re-run this script. ==='
+    exit 1
 }
+Write-Host 'OK: virtio-win ISO cache files removed or already absent'
+
+Write-Host ''
+Write-Host '=== All checks passed - safe to seal the golden image. ===' -ForegroundColor Green
 Write-Host '=== Seal the image with: sysprep /generalize /oobe /shutdown /quiet ===' -ForegroundColor Green
