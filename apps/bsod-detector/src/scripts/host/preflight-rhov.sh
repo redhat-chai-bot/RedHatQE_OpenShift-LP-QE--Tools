@@ -75,7 +75,6 @@ for helper in guest-agent.py reliability.py extract--guest-os--crash-info.sh col
   [[ -r "${scriptDir}/${helper}" ]] || Die "required helper missing: ${scriptDir}/${helper}"
 done
 [[ -r "${configureScript}" && -r "${crashControlFile}" ]] || Die 'guest configuration inputs are missing'
-RunTimed 10 python3 -c 'import Evtx.Evtx' || Die 'python-evtx is missing or cannot be imported'
 RunTimed 10 python3 -c 'import volatility3' || Die 'volatility3 is missing — install with: pip install volatility3'
 RunTimed 10 virtctl memory-dump get --help >/dev/null || Die 'virtctl does not provide memory-dump get'
 RunTimed 10 virtctl memory-dump download --help >/dev/null || Die 'virtctl does not provide memory-dump download'

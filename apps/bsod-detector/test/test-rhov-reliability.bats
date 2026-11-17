@@ -16,7 +16,6 @@ teardown() { teardown_temp; }
 make_python_and_findmnt_mocks() {
   cat > "$BATS_TMPDIR/mockbin/python3" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${1:-}" == -c && "${2:-}" == 'import Evtx.Evtx' ]]; then exit 0; fi
 exec "$REAL_PYTHON" "$@"
 EOF
   cat > "$BATS_TMPDIR/mockbin/findmnt" <<'EOF'
