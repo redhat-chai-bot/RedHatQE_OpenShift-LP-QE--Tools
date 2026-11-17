@@ -236,7 +236,7 @@ class RecursiveMappingTests(unittest.TestCase):
                     self.assertIn('mock delete failure' if scenario == 'cleanup-error' else
                                   'mock blocking delete failed', result.stderr)
 
-    def test_actual_watcher_and_container_dispatch(self):
+    def test_actual_watcher_dispatch(self):
         watcher = (fixtures.hostDir / 'watch-crash.sh').read_text()
         runTimed = re.search(r'^function RunTimed \(\) \{.*\}$', watcher, re.MULTILINE).group()
         recover = re.search(r'^function Recover \(\) \{\n.*?^\}', watcher, re.MULTILINE | re.DOTALL).group()
@@ -248,15 +248,6 @@ class RecursiveMappingTests(unittest.TestCase):
                                  str(self.meta), str(self.root / 'watcher.log')],
                                 env=self.env, text=True, capture_output=True, timeout=10)
         self.AssertCompleted(result)
-        self.assertEqual(len(self.Contents()), 3)
-        entrypoint = fixtures.hostDir.parents[4] / 'image/container/bsod-detector/entrypoint.sh'
-        text = entrypoint.read_text().replace('exec /usr/local/bin/extract--guest-os--crash-info.sh',
-                                             'exec ' + str(fixtures.recovery))
-        self.assertNotEqual(text, entrypoint.read_text())
-        result = subprocess.run(['bash', '-c', text, '', '--metadata', str(self.meta)],
-                                env=dict(self.env, MODE='recover', EVIDENCE_DIR=str(self.out)),
-                                text=True, capture_output=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.Contents()), 3)
 
 

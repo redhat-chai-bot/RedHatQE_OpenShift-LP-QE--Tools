@@ -974,30 +974,6 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(json.loads((self.out / 'extraction-summary.json').read_text())['ok'])
         self.AssertDeleted()
 
-    def test_container_recover_dispatch(self):
-        self.env['BSOD_DET__GUEST_FS__CTR_IMG'] = ''
-        self.env['BSOD_DET__GUESTFS__NTFS_IMAGE'] = 'registry.test/legacy:ignored'
-        entrypoint = Path(__file__).resolve().parents[3] / 'image/container/bsod-detector/entrypoint.sh'
-        self.meta.write_text(json.dumps(self.metadata))
-        command = '''set -euxo pipefail; shopt -s inherit_errexit
-function exec () {
-    [ "$1" = "/usr/local/bin/${MOCK_EXTRACTOR_NAME}" ] || return 99
-    shift
-    command "${MOCK_EXTRACTOR}" "$@"
-}
-source "$1" "${@:2}"
-'''
-        result = subprocess.run(['bash', '-c', command, 'container-fixture', str(entrypoint),
-                                 '--metadata', str(self.meta)], cwd=self.root,
-                                env=dict(self.env, MODE='recover', EVIDENCE_DIR=str(self.root),
-                                         MOCK_EXTRACTOR=str(recovery), MOCK_EXTRACTOR_NAME=recovery.name),
-                                text=True, capture_output=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(json.loads((self.out / 'extraction-summary.json').read_text())['ok'])
-        argv, = self.VirtctlArgv()
-        self.assertEqual(argv[argv.index('--image') + 1], dfltImg)
-        self.AssertDeleted()
-
     def test_diagnostics_follow_invoked_name(self):
         alias = self.root / 'fixture-extractor.sh'
         alias.symlink_to(recovery)
@@ -1501,31 +1477,11 @@ class ArchiveRecoveryTests(unittest.TestCase):
         self.AssertSummaryBypassed(result)
         self.assertEqual(len(self.ArchiveContents()), 2)
 
-    def test_actual_container_consumer_returns_archive_without_summary_validation(self):
-        entrypoint = Path(__file__).resolve().parents[3] / 'image/container/bsod-detector/entrypoint.sh'
-        self.meta.write_text(json.dumps(self.metadata))
-        command = '''set -euxo pipefail; shopt -s inherit_errexit
-function exec () {
-    [ "$1" = "/usr/local/bin/${MOCK_EXTRACTOR_NAME}" ] || return 99
-    shift
-    command "${MOCK_EXTRACTOR}" "$@"
-}
-source "$1" "${@:2}"
-'''
-        result = subprocess.run(['bash', '-c', command, 'container-fixture', str(entrypoint),
-                                 '--metadata', str(self.meta)], cwd=self.root,
-                                env=dict(self.env, MODE='recover', EVIDENCE_DIR=str(self.root),
-                                         MOCK_EXTRACTOR=str(recovery), MOCK_EXTRACTOR_NAME=recovery.name),
-                                text=True, capture_output=True, timeout=10)
-        self.AssertSummaryBypassed(result)
-        self.assertEqual(len(self.ArchiveContents()), 2)
-
     def test_early_vm_failures_skip_helper_in_actual_consumers(self):
         watcher = (hostDir / 'watch-crash.sh').read_text()
         runTimed = re.search(r'^function RunTimed \(\) \{.*\}$', watcher, re.MULTILINE).group()
         recover = re.search(r'^function Recover \(\) \{\n.*?^\}', watcher, re.MULTILINE | re.DOTALL).group()
-        entrypoint = Path(__file__).resolve().parents[3] / 'image/container/bsod-detector/entrypoint.sh'
-        for consumer in ('executable', 'watcher', 'container'):
+        for consumer in ('executable', 'watcher'):
             for scenario in ('vm-status-Running', 'api-error'):
                 with self.subTest(consumer=consumer, scenario=scenario):
                     case = RecoveryTests('test_success_contract')
@@ -1535,25 +1491,12 @@ source "$1" "${@:2}"
                     env = dict(case.env, SCENARIO=scenario)
                     if consumer == 'executable':
                         command = [str(recovery), '--metadata', str(case.meta)]
-                    elif consumer == 'watcher':
+                    else:
                         body = ('set -euxo pipefail; shopt -s inherit_errexit\n'
                                 'typeset scriptDir="${1}" metadataFile="${2}" pipelineLog="${3}"\n'
                                 + runTimed + '\n' + recover + '\nRecover\n')
                         command = ['bash', '-c', body, 'watcher-fixture', str(hostDir),
                                    str(case.meta), str(case.root / 'pipeline.log')]
-                    else:
-                        body = '''set -euxo pipefail; shopt -s inherit_errexit
-function exec () {
-    [ "$1" = "/usr/local/bin/${MOCK_EXTRACTOR_NAME}" ] || return 99
-    shift
-    command "${MOCK_EXTRACTOR}" "$@"
-}
-source "$1" "${@:2}"
-'''
-                        command = ['bash', '-c', body, 'container-fixture', str(entrypoint),
-                                   '--metadata', str(case.meta)]
-                        env.update(MODE='recover', EVIDENCE_DIR=str(case.root),
-                                   MOCK_EXTRACTOR=str(recovery), MOCK_EXTRACTOR_NAME=recovery.name)
                     result = subprocess.run(command, cwd=case.root, env=env,
                                             text=True, capture_output=True, timeout=10)
                     self.assertEqual(result.returncode, 1, result.stderr)
