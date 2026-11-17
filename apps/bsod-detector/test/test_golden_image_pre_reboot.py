@@ -86,6 +86,60 @@ def RunHarness(testCase, mode, functionName='', calls=None, scriptPath=SCRIPT, e
     return json.loads(result.stdout)
 
 
+def WriteMainFlowFiles(testCase, tmpDir, helperNames, mocks, startLine=None):
+    """Writes the script's top-level statements as one function, plus mocks and its own helpers.
+
+    The statements run unchanged inside Invoke-MainFlow in the harness's empty runspace. The
+    script's helper functions are loaded next to the mocks, and each top-level `exit N` becomes
+    `Exit-Script N; return`, which records the status and leaves at the same point.
+    """
+    scriptText = SCRIPT.read_text(encoding='ascii')
+    helperTexts = []
+    for helperName in helperNames:
+        definition = RunHarness(testCase, 'definition', helperName)
+        testCase.assertTrue(definition['found'], helperName)
+        testCase.assertEqual(scriptText.count(definition['text']), 1, helperName)
+        scriptText = scriptText.replace(definition['text'], '')
+        helperTexts.append(definition['text'])
+    if startLine is not None:
+        scriptText = scriptText[scriptText.index(startLine):]
+    mainFlow, exitCount = re.subn(r'(?mi)^(\s*)exit (\d+)[ \t]*$', r'\1Exit-Script \2; return', scriptText)
+    codeLines = [line for line in (mainFlow + '\n' + '\n'.join(helperTexts)).splitlines() if not line.lstrip().startswith('#')]
+    testCase.assertGreater(exitCount, 0)
+    testCase.assertFalse([line for line in codeLines if re.search(r'(^|[;{])\s*exit\b(?!-)', line, re.IGNORECASE)])
+    flowPath = Path(tmpDir) / 'main-flow.ps1'
+    mocksPath = Path(tmpDir) / 'main-flow-mocks.ps1'
+    flowPath.write_text('function Invoke-MainFlow {\n' + mainFlow + '\n}\n', encoding='ascii')
+    mocksPath.write_text(mocks + '\n' + '\n'.join(helperTexts) + '\n', encoding='ascii')
+    return flowPath, mocksPath
+
+
+# Mocks for the main-flow tests. 'memory' is error, null or a byte count; on error only the
+# first Win32_ComputerSystem read fails (throwing with -ErrorAction Stop, else returning nothing).
+preMainFlowMocks = r'''
+function Get-CimInstance ([string]$ClassName, $ErrorAction) {
+    $isFirstRead = -not ($global:MockLog -like 'Get-CimInstance *')
+    $global:MockLog.Add("Get-CimInstance ${ClassName} ErrorAction=${ErrorAction}")
+    $memory = $global:MockState['memory'][0]
+    if ($memory -eq 'error' -and $isFirstRead) {
+        if ("${ErrorAction}" -eq 'Stop') { throw 'simulated CIM failure' }
+        return
+    }
+    $totalMemory = if ($memory -in 'error', 'null') { $null } else { [int64]$memory }
+    [pscustomobject]@{ AutomaticManagedPagefile = $true; TotalPhysicalMemory = $totalMemory }
+}
+function Set-CimInstance ($InputObject, [hashtable]$Property, $ErrorAction) { $global:MockLog.Add('Set-CimInstance') }
+function Set-ItemProperty ([string]$Path, [string]$Name, [string]$Type, [string[]]$Value, $ErrorAction) {
+    $global:MockLog.Add("Set-ItemProperty ${Name} [$($Value -join '|')]")
+}
+function Write-Host ($Object) { $global:MockLog.Add("Write-Host ${Object}") }
+function Write-Error ($Message) { $global:MockLog.Add("Write-Error ${Message}") }
+function Start-Sleep ($Seconds) { $global:MockLog.Add("Start-Sleep ${Seconds}") }
+function Restart-Computer ([switch]$Force) { $global:MockLog.Add('Restart-Computer') }
+function Exit-Script ([int]$Code) { $global:MockLog.Add("exit ${Code}") }
+'''
+
+
 class PreRebootStaticTests(unittest.TestCase):
     def setUp(self):
         self.source = SCRIPT.read_bytes()
@@ -204,6 +258,41 @@ class PreRebootPowerShellTests(unittest.TestCase):
             for name in ('Get-WithCommand', 'Get-WithDotNet'):
                 output = RunHarness(self, 'call', name, [[]], scriptPath=probe, expectSuccess=False)
                 self.assertIn('refused', output)
+
+
+class PreRebootMainFlowTests(unittest.TestCase):
+    """The page file section through Restart-Computer, run as the script runs it, fully mocked.
+
+    The earlier download and installer steps use .NET network calls that the harness refuses by
+    design, so these tests start at the page file section.
+    """
+
+    def RunPagefileSection(self, memoryValues):
+        with tempfile.TemporaryDirectory() as tmpDir:
+            flowPath, mocksPath = WriteMainFlowFiles(
+                self, tmpDir, ['Get-PagefileSizeMB', 'Set-FixedPagefile'], preMainFlowMocks,
+                startLine='Write-Host "`n--- Configuring pagefile.sys ---"')
+            self.assertIn('Restart-Computer -Force', flowPath.read_text(encoding='ascii'))
+            calls = [{'state': {'memory': [memory]}, 'args': []} for memory in memoryValues]
+            return [result['log'] for result in RunHarness(self, 'mockcall', 'Invoke-MainFlow', calls,
+                                                           scriptPath=flowPath, mocksPath=mocksPath)]
+
+    def testUnreadableOrNonPositiveMemoryStopsBeforePagefileChangesAndReboot(self):
+        memoryValues = ['error', 'null', '0', '-1073741824']
+        for memory, log in zip(memoryValues, self.RunPagefileSection(memoryValues)):
+            with self.subTest(memory=memory):
+                self.assertEqual(log[-1], 'exit 1', log)
+                self.assertTrue([line for line in log if line.startswith('Write-Error FAIL:')], log)
+                effects = [line for line in log if line.startswith(('Set-ItemProperty', 'Set-CimInstance', 'Start-Sleep', 'Restart-Computer'))
+                           or 'OK: PagingFiles' in line]
+                self.assertEqual(effects, [])
+
+    def testValidMemoryConfiguresThePagefileThenReboots(self):
+        log = self.RunPagefileSection(['17179869184'])[0]
+        self.assertIn('Set-CimInstance', log)
+        self.assertIn('Set-ItemProperty PagingFiles [C:\\pagefile.sys 16641 16641]', log)
+        self.assertNotIn('exit 1', log)
+        self.assertEqual(log[-1], 'Restart-Computer')
 
 
 if __name__ == '__main__':
