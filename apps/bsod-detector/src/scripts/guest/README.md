@@ -14,7 +14,7 @@ The descriptions below document what the scripts in this directory do; they do n
 - Applying settings with `configure-dumps.ps1` also requires Administrator privileges. Its `-VerifyOnly` mode does not enforce elevation.
 - The pre-reboot script uses Windows disk-image, driver-management, service, registry, and CIM operations. Its preferred VirtIO driver paths are for Windows 11 AMD64; it falls back to a recursive AMD64 INF search.
 - The pre-reboot script needs network access to download the VirtIO ISO unless a cached copy is already present in `C:\Temp`. It stops with exit code 1, before installing anything or changing registry settings, if no ISO can be obtained.
-- `configure-dumps.ps1` requires a readable configuration JSON file. In apply mode it also attempts a network download of NotMyFault if the executable is missing; that download is best effort.
+- `configure-dumps.ps1` requires a readable configuration JSON file. It downloads NotMyFault (network access, best effort) only in apply mode with `-StageNotMyFault` and only if the executable is missing; watch runs, default apply and `-VerifyOnly` never download.
 - The pre-reboot script configures a pagefile sized to guest RAM plus 257 MB. Ensure the guest's C: volume has room for it; the script does not check free disk space.
 - These scripts prepare the golden image for disposable test VMs: each pytest run tears down its VM, so a VM is not reused after a crash.
 
@@ -157,7 +157,8 @@ Unlike the golden-image pair, its registry path, recommended values, dump-type m
 | Parameter | Meaning |
 |---|---|
 | `-DumpType <string>` | Selects a key from the configuration's `crashDumpTypes`. Defaults to `recommended.crashDumpType`. Valid names depend on the supplied configuration; they are not hard-coded in the script. |
-| `-VerifyOnly` | Reads and compares current settings without registry changes or NotMyFault staging. |
+| `-VerifyOnly` | Reads and compares current settings without registry changes or NotMyFault staging, even with `-StageNotMyFault`. |
+| `-StageNotMyFault` | Apply mode only: stage NotMyFault in `C:\Temp\nmf` for an intentional crash run. Off by default. |
 | `-DataFile <string>` | Path to the required configuration JSON. Supply it when running outside the expected repository layout. |
 
 **Configuration dependency:** The script expects `crash-control.json`. Without `-DataFile`, it resolves three levels above its script directory and looks for `src\data\crash-control.json`. The configuration supplies `registryPath`, `recommended.crashDumpType`, `recommended.values`, `crashDumpTypes.<selected type>.CrashDumpEnabled`, and `pageFile.path` / `pageFile.value`. The configuration file is [`src/data/crash-control.json`](../../data/crash-control.json); it is data, not an additional script.
@@ -185,7 +186,9 @@ Run apply mode from an elevated PowerShell session. These examples use a placeho
 4. Sets `rebootRequired` when the current `CrashDumpEnabled` differs from the selected value or a `DedicatedDumpFile` value is present; both take effect only after a reboot.
 5. Creates the configured registry path if needed.
 6. Removes any existing `DedicatedDumpFile` value (dumps go through the page file only; `crash-control.json` no longer recommends it), then writes all desired values. Strings use ExpandString and numeric values use DWORD.
-7. If `C:\Temp\nmf\notmyfaultc64.exe` is missing, attempts to download the Sysinternals NotMyFault archive (adding TLS 1.2 to the allowed protocols), extract it, delete the archive, and unblock the executable. `C:\Temp\nmf` is the fixed path the host preflight and pipeline scripts check through the guest agent. Staging stays best effort: a failure is written to stderr as a `WARN` line and does not change the JSON on stdout. The script does not execute NotMyFault or trigger a crash.
+7. Only with `-StageNotMyFault`: if `C:\Temp\nmf\notmyfaultc64.exe` is missing, downloads the Sysinternals NotMyFault archive (adding TLS 1.2 to the allowed protocols), extracts it, deletes the archive, and unblocks the executable. `C:\Temp\nmf` is the fixed path the host preflight and pipeline scripts check through the guest agent. A failure is written to stderr as a `WARN` line and does not change the JSON on stdout. Without the switch nothing is downloaded. The script does not execute NotMyFault or trigger a crash.
+
+   The host `preflight-rhov.sh` passes `-StageNotMyFault` only when it runs with `--require-trigger`, and then requires the binary to exist, so a failed staging stops an intentional run. An intentional run must therefore call preflight with `--require-trigger`; the new pipeline runner (`src/scripts/bsod-pipeline/bsod-runner.sh`) does not pass it yet, and its update is pending. Watch runs do not pass it, so nothing is staged.
 8. Reads the desired registry values back, compares them, reports pagefile configuration, and emits JSON.
 
 ### Verify-only mode
