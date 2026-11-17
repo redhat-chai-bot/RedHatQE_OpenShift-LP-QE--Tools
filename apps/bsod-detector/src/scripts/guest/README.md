@@ -14,11 +14,11 @@ The descriptions below document what the scripts in this directory do; they do n
 - Applying settings with `configure-dumps.ps1` also requires Administrator privileges. Its `-VerifyOnly` mode does not enforce elevation.
 - The pre-reboot script uses Windows disk-image, driver-management, service, registry, and CIM operations. Its preferred VirtIO driver paths are for Windows 11 AMD64; it falls back to a recursive AMD64 INF search.
 - The pre-reboot script reads the guest's physical memory size first and stops with exit code 1, before any change, if it cannot be read or is not positive.
-- The pre-reboot script needs network access to download the VirtIO ISO unless a cached copy is already present in `C:\Temp`. It stops with exit code 1, before installing anything or changing registry settings, if no ISO can be obtained.
+- The pre-reboot script needs network access to download the pinned VirtIO ISO unless a cached copy with the pinned SHA-256 is already present in `C:\Temp`. It stops with exit code 1, before installing anything or changing registry settings, if no ISO matching the pinned SHA-256 can be obtained.
 - `configure-dumps.ps1` requires a readable configuration JSON file. It downloads NotMyFault (network access, best effort) only in apply mode with `-StageNotMyFault` and only if no trusted copy is present; watch runs, default apply and `-VerifyOnly` never download.
 - The pre-reboot script configures a pagefile sized to the RAM of the VM it runs on plus 257 MB. Ensure the guest's C: volume has room for it; the script does not check free disk space.
 - VMs cloned from the golden image must not have more RAM than the VM that prepared it: `configure-dumps.ps1` computes the requirement from the RAM of the VM it runs on and then reports the page file as not adequate, which the host preflight rejects. Images prepared by older versions of these scripts (a 4096 MB page file and a `DedicatedDumpFile`) are not adequate either and must be rebuilt.
-- The golden image is meant for test VMs that are disposable. That is an assumption about the consumer of these images and is not enforced in this repository: `src/scripts/host/watch-crash.sh` starts the VM again after extracting evidence unless it runs with `--no-restart`.
+- The intended test flow does not restart a VM after a simulated crash, so the golden image is meant for disposable test VMs. The current `src/scripts/host/watch-crash.sh` still starts the VM again after extracting evidence unless it runs with `--no-restart`; aligning the watcher with the intended flow is a separate, planned change.
 
 ```powershell
 # Step 1: Run as Administrator. This script forces a reboot at the end.
@@ -44,16 +44,11 @@ Part 1 of golden-image preparation. It has no declared parameters. Run it as Adm
 
 1. Reads physical RAM through `Win32_ComputerSystem.TotalPhysicalMemory` and computes the page file size. A failed query or a missing, non-numeric or non-positive size reports `FAIL` and exits with code 1 before any of the following steps.
 2. Creates `C:\Temp` if needed and adds TLS 1.2 to the protocols the process allows. `C:\Temp` is fixed on purpose: the ISO cache must survive the reboot and be found by the post-reboot script, which may run under another account than this one (a per-user `$env:TEMP` would differ).
-3. Sends an HTTP HEAD request to the VirtIO ISO endpoint:
-   `https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso`.
-   If the request fails, or the response has no `Last-Modified` header, it prints a warning and treats the remote timestamp as unknown.
-4. Decides whether to download, using the cached `C:\Temp\virtio-win.iso`:
-   - no cached copy: download;
-   - remote `Last-Modified` newer than the cached copy: download;
-   - cached copy at least as recent, or remote timestamp unknown: reuse the cache.
-
-   This is a timestamp comparison, not a checksum or driver-version check.
-5. Downloads with `System.Net.WebClient` to `C:\Temp\virtio-win.iso.download` and moves it over the cache only after a complete transfer. On a failed download, deletion of the partial file is attempted; the script then continues with the existing cache (warning) or, without a cache, exits with code 1 before any further change.
+3. Uses one pinned virtio-win build, 0.1.302-1:
+   `https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-0.1.302.iso`
+   with SHA-256 `303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d` (see "Pinned virtio-win ISO" below).
+4. Reuses the cached `C:\Temp\virtio-win.iso` only if its SHA-256 matches the pinned digest. A missing or mismatching cache (for example an ISO left by an older version of this script) is replaced by a verified download.
+5. Downloads with `System.Net.WebClient` to `C:\Temp\virtio-win.iso.download`, checks its SHA-256, and only then moves it over the cache. A cached ISO that is still mounted from an interrupted run is dismounted before it is replaced. A failed download, a mismatching digest or a failed move attempts to delete the downloaded file and exits with code 1 before anything is installed; the script never falls back to an unverified copy.
 6. Mounts the ISO (an ISO still mounted by an interrupted run is reused); a failed mount or a missing drive letter reports `FAIL` and exits with code 1 before anything is installed. Runs the x86_64 QEMU Guest Agent MSI quietly, waiting for completion and requesting no installer-initiated restart. Exit codes 0, 1641 and 3010 are reported as success; any other code (or none) is reported as a warning, and the guest-agent service check in step 10 decides.
 7. Attempts to install both VirtIO storage drivers with `pnputil /add-driver ... /install`:
    - VirtIO block: preferred relative path `viostor\w11\amd64\viostor.inf`.
@@ -62,7 +57,7 @@ Part 1 of golden-image preparation. It has no declared parameters. Run it as Adm
    - Exit codes 0, 1641 and 3010 are accepted as success (pnputil normally returns 0 or 3010); other codes are reported as warnings (the post-reboot script checks the driver store).
    - If no INF is found, prints a warning and skips that driver.
 8. Notes that SATA uses the Windows inbox `storahci` driver; it does not install it.
-9. Unmounts the ISO and keeps it in `C:\Temp` for the timestamp check if the script is re-run. The post-reboot script removes it once all of its checks pass.
+9. Unmounts the ISO and keeps it in `C:\Temp` for re-runs, where it is reused only while its SHA-256 still matches. The post-reboot script removes it once all of its checks pass.
 10. Checks for the `QEMU-GA` service, requests Automatic startup, and attempts to start it if it is not Running. After a start attempt, waits three seconds and queries the service again. A missing service or a service still not Running causes an explicit exit with code 1.
 11. Writes the CrashControl settings listed below and removes the `DedicatedDumpFile` registry value if present (an absent value is left alone). A failed write reports `FAIL` and exits with code 1 before the page file change and the reboot. If an old `C:\DedicatedDump.sys` file exists, prints a warning without deleting it; the post-reboot script refuses to seal while it exists.
 12. Writes the pagefile registry configuration listed below.
@@ -95,10 +90,16 @@ Dumps are written through the page file only (no `DedicatedDumpFile`). Any syste
 - Does not delete or create page files directly: Windows applies the configuration on reboot. The post-reboot script checks the running system.
 - If the CIM change or the registry write fails, the script reports `FAIL` and exits with code 1 before the reboot.
 
+### Pinned virtio-win ISO
+
+The pre-reboot script pins virtio-win 0.1.302-1, the build that both `stable-virtio` and `latest-virtio` pointed to on 2026-11-17 (CHANGELOG: "Update to virtio-win-prewhql-0.1-302"), and checks its SHA-256 before use. The virtio-win download site publishes no detached signature or signed digest for the ISO: its `CHECKSUM` file lists only MD5 sums of the RPMs, the yum repository uses `gpgcheck=0`, and the 0.1.302-1 RPM carries no signature. The pinned digest is the SHA-256 that the official `virtio-win-0.1.302-1.noarch.rpm` records for `virtio-win-0.1.302.iso` in its header (its MD5 matches the published `CHECKSUM`); the ISO extracted from that RPM and the direct download hash to the same value. Authenticity therefore rests on HTTPS to fedorapeople.org, and the versioned archive URL is used because the unversioned links redirect to plain HTTP. The digest is checked before the ISO is mounted; the script assumes a single trusted operator on the guest during preparation (`C:\Temp` is writable by local users).
+
+To move to another build, update the URL and the digest together after verifying the new digest the same way.
+
 ### Settings not managed by these scripts
 
 - **pvpanic:** no guest pvpanic driver is installed or checked by the golden-image scripts. The pipeline entry script attempts, best effort and non-fatal, to hot-add the pvpanic device to the running VM through the QEMU monitor (`virsh qemu-monitor-command --hmp 'device_add pvpanic,id=pvpanic0'`): `src/scripts/crash-injector/trigger-bsod-intentional.sh` (a separately proposed pipeline runner may take over that step). Adding the device does not install a guest driver, and whether the KubeVirt Panicked event is raised without one has not been verified.
-- **Boot recovery settings:** earlier proof-of-concept versions changed Windows boot recovery behavior (`bcdedit` boot-status policy, recovery and boot-menu options, `reagentc /disable`) and checked it after reboot. The scripts no longer change or check them, leaving the Windows defaults, on the assumption that test VMs are disposable and are not booted back into Windows after a crash. That assumption is not enforced in this repository (`src/scripts/host/watch-crash.sh` starts the VM again after extracting evidence unless it runs with `--no-restart`), and how a restarted VM behaves without these settings has not been verified.
+- **Boot recovery settings:** earlier proof-of-concept versions changed Windows boot recovery behavior (`bcdedit` boot-status policy, recovery and boot-menu options, `reagentc /disable`) and checked it after reboot. The scripts no longer change or check them and intentionally leave the Windows defaults, because the intended test flow does not restart a VM after a simulated crash. The current `src/scripts/host/watch-crash.sh` still starts the VM again after extracting evidence unless it runs with `--no-restart` (a watcher change is planned separately), and how a restarted VM behaves without these settings has not been verified.
 
 ### Validation limits
 
