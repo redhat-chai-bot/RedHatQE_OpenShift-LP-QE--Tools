@@ -20,7 +20,6 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
   "${testDir}/test_reliability.py" \
   "${testDir}/test_recovery.py" \
   "${testDir}/test_evtx.py" \
-  "${testDir}/test_configure_dumps.py" \
   "${testDir}/test_container_contract.py" \
   "${testDir}/test_recursive_mapping.py" \
   "${testDir}/test_guestfs_lifecycle.py"

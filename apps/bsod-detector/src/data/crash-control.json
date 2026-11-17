@@ -4,7 +4,7 @@
   "registryPath": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\CrashControl",
   "crashDumpTypes": {
     "none":      { "CrashDumpEnabled": 0, "description": "No dump written." },
-    "complete":  { "CrashDumpEnabled": 1, "description": "Complete memory dump: entire physical memory. Requires a page file >= RAM size (+1MB); this project does not use a dedicated dump file." },
+    "complete":  { "CrashDumpEnabled": 1, "description": "Complete memory dump: entire physical memory. Requires page file >= RAM size (+1MB) or a dedicated dump file." },
     "kernel":    { "CrashDumpEnabled": 2, "description": "Kernel memory dump: kernel-mode read/write pages only. Good default for driver crashes." },
     "small":     { "CrashDumpEnabled": 3, "description": "Small (mini) dump, 64KB-ish, written to %SystemRoot%\\Minidump. Minimum useful dump." },
     "automatic": { "CrashDumpEnabled": 7, "description": "Automatic memory dump (Win8+): like kernel dump but lets the OS manage page-file sizing." },
@@ -19,13 +19,14 @@
       "LogEvent": 1,
       "AutoReboot": 0,
       "MinidumpDir": "%SystemRoot%\\Minidump",
-      "DumpFile": "%SystemRoot%\\MEMORY.DMP"
+      "DumpFile": "%SystemRoot%\\MEMORY.DMP",
+      "DedicatedDumpFile": "C:\\DedicatedDump.sys"
     },
-    "notes": "CrashDumpEnabled=7 (Automatic). AutoReboot=0 keeps the VM frozen. Dumps are written through the page file only: golden-image-pre-reboot.ps1 configures a fixed C:\\pagefile.sys of RAM + 257 MB, and configure-dumps.ps1 removes any DedicatedDumpFile value. KubeVirt vm-memory.elf.tar.gz additionally captures full physical memory."
+    "notes": "CrashDumpEnabled=7 (Automatic). pagefile.sys cannot be created on KVM with VirtIO Balloon; full physical memory captured via KubeVirt vm-memory.elf.tar.gz. AutoReboot=0 keeps VM frozen. Minidump and on-disk MEMORY.DMP are blocked on this platform."
   },
   "pageFile": {
     "path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management",
     "value": "PagingFiles",
-    "notes": "Adequate when PagingFiles holds an entry on C: (\"<path> <initialMB> <maxMB>\") whose initial and maximum sizes are both at least physical RAM + 257 MB, the size golden-image-pre-reboot.ps1 configures. System-managed or missing page files are not adequate; DedicatedDumpFile is not used."
+    "notes": "A complete dump needs a system-managed or fixed page file on the system drive at least as large as physical RAM (+1MB). Kernel/automatic dumps need less but still require a page file on the system volume, or a DedicatedDumpFile configured under CrashControl."
   }
 }

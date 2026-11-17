@@ -200,18 +200,18 @@ evidence-summary.json        (final pipeline verdict)
 
 **7. Guest crash dump configuration**
 - Upload `configure-dumps.ps1` + `crash-control.json` to VM via guest-agent
-- Run `configure-dumps.ps1 -DataFile crash-control.json`, adding `-StageNotMyFault` only with `--require-trigger` (intentional runs; watch runs never stage NotMyFault)
+- Run `configure-dumps.ps1 -DataFile crash-control.json`
 - Die if output fails any of:
   - `ok == true` — script ran successfully
   - `matchesRecommended == true` — all registry values match expected
   - `current.AutoReboot == 0` — VM will stay frozen after BSOD
-  - `pageFile.adequate == true` — a fixed pagefile of at least RAM + 257 MB is configured
+  - `pageFile.adequate == true` — DedicatedDumpFile or pagefile is adequate
   - `rebootRequired == false` — no pending reboot needed; if true, do `virtctl stop && virtctl start`
 
 **8. Guest path verification**
 - `C:\Windows` exists
 - `C:\Windows\Minidump` exists
-- If `--require-trigger`: configure-dumps.ps1 runs with `-StageNotMyFault` (stages NotMyFault if missing), then `C:\Temp\nmf\notmyfaultc64.exe` must exist. Without the flag (watch runs) nothing is staged.
+- If `--require-trigger`: `C:\Temp\nmf\notmyfaultc64.exe` exists (NotMyFault binary)
 
 **9. Pre-crash dump inventory**
 - Records all existing dump files (`MEMORY.DMP`, `Minidump\*.dmp`) with path/size/mtime
