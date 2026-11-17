@@ -356,20 +356,22 @@ class GuestAgentCLItestCase(unittest.TestCase):
         ocShim.chmod(0o755)
         self.Script()
 
-    def Script(self, get: dict[str, typing.Any] | None = None, **agentReplies: list[dict[str, typing.Any]]) -> None:
-        '''Set the fake cluster replies: `get` maps 'vmi'/'pod' to a reply; keywords map QMP commands (with _ for -) to replies.
+    def Script(self, get: dict[str, typing.Any] | None = None,
+               agent: dict[str, list[dict[str, typing.Any]]] | None = None) -> None:
+        '''Set the fake cluster replies: `get` maps 'vmi'/'pod' to a reply; `agent` maps QMP command names to replies.
 
         A reply is {'return': payload}, {'stdout': rawText} or {'fail': stdErrText} (exit 1).
         '''
-        scenario = {'get': get or {}, 'agent': {command.replace('_', '-'): replies for command, replies in agentReplies.items()}}
+        scenario = {'get': get or {}, 'agent': agent or {}}
         (self.workDir / 'scenario.json').write_text(json.dumps(scenario))
 
-    def ScriptUploads(self, get: dict[str, typing.Any] | None = None, **agentReplies: list[dict[str, typing.Any]]) -> None:
-        '''Script successful guest file open/write/close replies (handle guestFileHandle); keywords add or override replies.'''
+    def ScriptUploads(self, get: dict[str, typing.Any] | None = None,
+                      agent: dict[str, list[dict[str, typing.Any]]] | None = None) -> None:
+        '''Script successful guest file open/write/close replies (handle guestFileHandle); `agent` adds or overrides replies.'''
         uploadReplies: dict[str, list[dict[str, typing.Any]]] = {
-            'guest_file_open': [{'return': guestFileHandle}], 'guest_file_write': [{'return': {}}],
-            'guest_file_close': [{'return': {}}]}
-        self.Script(get, **{**uploadReplies, **agentReplies})
+            'guest-file-open': [{'return': guestFileHandle}], 'guest-file-write': [{'return': {}}],
+            'guest-file-close': [{'return': {}}]}
+        self.Script(get, agent={**uploadReplies, **(agent or {})})
 
     def RunCLI(self, *cliArgs: str, environ: dict[str, str] | None = None) -> CLIresult:
         '''Run guest-agent.py isolated (-I) with `environ` (no BSOD_* variables are inherited) and return its CLIresult.
@@ -428,7 +430,7 @@ class GuestAgentCLItargetTests(GuestAgentCLItestCase):
     vmiQuery = ('-o', 'jsonpath={range .items[*]}{.metadata.namespace} {.metadata.name}{"\\n"}{end}')
 
     def testExplicitTargetIsUsedWithoutDiscovery(self) -> None:
-        self.Script(guest_ping=[{'return': {}}])
+        self.Script(agent={'guest-ping': [{'return': {}}]})
         cliResult = self.RunCLI('ping', environ=explicitTargetEnv)
         self.assertEqual(cliResult[:3], (0, '{}\n', ''))
         self.assertEqual(cliResult.ocCalls, [[
@@ -436,13 +438,13 @@ class GuestAgentCLItargetTests(GuestAgentCLItestCase):
             'virsh', 'qemu-agent-command', '--timeout', '10', 'ns_vm', '{"execute": "guest-ping"}']])
 
     def testDomainSuppliesNamespaceAndVM(self) -> None:
-        self.Script(guest_ping=[{'return': {}}])
+        self.Script(agent={'guest-ping': [{'return': {}}]})
         cliResult = self.RunCLI('ping', environ={'BSOD_DET__DOMAIN__NAME': 'ns-a_vm-a', 'BSOD_DET__POD__NAME': 'pod-a'})
         self.assertEqual(cliResult.status, 0)
         self.assertEqual((self.ExecTargets(cliResult), len(cliResult.ocCalls)), ([('ns-a', 'pod-a', 'ns-a_vm-a')], 1))
 
     def testExplicitValuesTakePrecedenceOverDomain(self) -> None:
-        self.Script(guest_ping=[{'return': {}}])
+        self.Script(agent={'guest-ping': [{'return': {}}]})
         cliResult = self.RunCLI('ping', environ={'BSOD_DET__NAMESPACE': 'explicit', 'BSOD_DET__POD__NAME': 'pod',
                                                  'BSOD_DET__DOMAIN__NAME': 'ns_vm'})
         self.assertEqual(cliResult.status, 0)
@@ -450,7 +452,7 @@ class GuestAgentCLItargetTests(GuestAgentCLItestCase):
 
     def testSingleVMIisDiscovered(self) -> None:
         self.Script(get={'vmi': {'stdout': 'ns-1 vm-1\n'}, 'pod': {'stdout': 'pod/other\npod/virt-launcher-vm-1-xyz\n'}},
-                    guest_ping=[{'return': {}}])
+                    agent={'guest-ping': [{'return': {}}]})
         cliResult = self.RunCLI('ping')
         self.assertEqual(cliResult.status, 0)
         self.assertEqual(cliResult.ocCalls[:2], [['--request-timeout=20s', 'get', 'vmi', '-A', *self.vmiQuery],
@@ -460,7 +462,7 @@ class GuestAgentCLItargetTests(GuestAgentCLItestCase):
 
     def testNamespaceScopedDiscoveryKeepsNamespace(self) -> None:
         self.Script(get={'vmi': {'stdout': 'other vm-1'}, 'pod': {'stdout': 'pod/virt-launcher-vm-1-xyz'}},
-                    guest_ping=[{'return': {}}])
+                    agent={'guest-ping': [{'return': {}}]})
         cliResult = self.RunCLI('ping', environ={'BSOD_DET__NAMESPACE': 'ns-1'})
         self.assertEqual(cliResult.status, 0)
         self.assertEqual(cliResult.ocCalls[:2], [['--request-timeout=20s', 'get', 'vmi', '-n', 'ns-1', *self.vmiQuery],
@@ -502,7 +504,7 @@ class GuestAgentCLIcommandTests(GuestAgentCLItestCase):
                 ({'stdout': 'not json'}, 'invalid response from virsh'),
                 ({'stdout': '{"error": {}}'}, 'invalid response from virsh')):
             with self.subTest(expectedText=expectedText):
-                self.Script(guest_ping=[pingReply])
+                self.Script(agent={'guest-ping': [pingReply]})
                 cliResult = self.RunCLI('ping', environ=explicitTargetEnv)
                 self.assertEqual((cliResult.status, cliResult.stdOut), (1, ''))
                 self.assertIn(expectedText, cliResult.stdErr)
@@ -511,8 +513,8 @@ class GuestAgentCLIcommandTests(GuestAgentCLItestCase):
         self.assertIn('oc exec failed', cliResult.stdErr)
 
     def testExecRetriesTransientStatusErrors(self) -> None:
-        self.Script(guest_exec=[{'return': {'pid': 3}}],
-                    guest_exec_status=[{'fail': 'error: blip'}, self.Exited(0, stdOut=b'ok')])
+        self.Script(agent={'guest-exec': [{'return': {'pid': 3}}],
+                           'guest-exec-status': [{'fail': 'error: blip'}, self.Exited(0, stdOut=b'ok')]})
         cliResult = self.RunCLI('exec', 'fixture.exe', environ=explicitTargetEnv)
         self.assertEqual(cliResult[:3], (0, 'ok\n', ''))
         self.assertEqual([qmpCommand['execute'] for qmpCommand, _ in self.AgentCalls(cliResult)],
@@ -534,7 +536,7 @@ class GuestAgentCLIcommandTests(GuestAgentCLItestCase):
 
     def testPutClosesHandleWhenWriteFails(self) -> None:
         (self.workDir / 'payload.bin').write_bytes(b'data')
-        self.ScriptUploads(guest_file_write=[{'fail': 'error: write failed'}])
+        self.ScriptUploads(agent={'guest-file-write': [{'fail': 'error: write failed'}]})
         cliResult = self.RunCLI('put', 'payload.bin', r'C:\Temp\payload.bin', environ=explicitTargetEnv)
         self.assertEqual((cliResult.status, cliResult.stdOut), (1, ''))
         self.assertIn('write failed', cliResult.stdErr)
@@ -548,13 +550,13 @@ class GuestAgentCLIexitTests(GuestAgentCLItestCase):
     def testGuestExitCodeIsRelayed(self) -> None:
         for guestExitCode, expectedStatus in ((7, 7), (0xC0000005, 5)):  # An NTSTATUS keeps its low 8 bits.
             with self.subTest(guestExitCode=guestExitCode):
-                self.Script(guest_exec=[{'return': {'pid': 1}}],
-                            guest_exec_status=[self.Exited(guestExitCode, stdOut=b'out', stdErr=b'err')])
+                self.Script(agent={'guest-exec': [{'return': {'pid': 1}}],
+                                   'guest-exec-status': [self.Exited(guestExitCode, stdOut=b'out', stdErr=b'err')]})
                 cliResult = self.RunCLI('exec', 'fixture.exe', environ=explicitTargetEnv)
                 self.assertEqual(cliResult[:3], (expectedStatus, 'out\n', 'err\n'))
 
     def testExecSendsProgramArguments(self) -> None:
-        self.Script(guest_exec=[{'return': {'pid': 1}}], guest_exec_status=[self.Exited(0)])
+        self.Script(agent={'guest-exec': [{'return': {'pid': 1}}], 'guest-exec-status': [self.Exited(0)]})
         cliResult = self.RunCLI('exec', 'cmd.exe', '/c', 'ver', environ=explicitTargetEnv)
         self.assertEqual(cliResult.status, 0)
         self.assertEqual(self.AgentCalls(cliResult), [
@@ -562,7 +564,8 @@ class GuestAgentCLIexitTests(GuestAgentCLItestCase):
             ({'execute': 'guest-exec-status', 'arguments': {'pid': 1}}, 300)])
 
     def testExecTimeoutReturns124(self) -> None:
-        self.Script(guest_exec=[{'return': {'pid': 1}}], guest_exec_status=[{'return': {'exited': False}}])
+        self.Script(agent={'guest-exec': [{'return': {'pid': 1}}],
+                           'guest-exec-status': [{'return': {'exited': False}}]})
         cliResult = self.RunCLI('exec', 'fixture.exe', environ=explicitTargetEnv)
         self.assertEqual((cliResult.status, cliResult.stdOut), (124, ''))
         self.assertIn('waited 600s without exit', cliResult.stdErr)
@@ -570,25 +573,26 @@ class GuestAgentCLIexitTests(GuestAgentCLItestCase):
         self.assertEqual(len(self.AgentCalls(cliResult)), 1 + 200)
 
     def testMissingExitCodeReturns125(self) -> None:
-        self.Script(guest_exec=[{'return': {'pid': 1}}], guest_exec_status=[self.Exited(None)])
+        self.Script(agent={'guest-exec': [{'return': {'pid': 1}}], 'guest-exec-status': [self.Exited(None)]})
         cliResult = self.RunCLI('exec', 'fixture.exe', environ=explicitTargetEnv)
         self.assertEqual((cliResult.status, cliResult.stdOut), (125, ''))
         self.assertIn('did not report an exit code', cliResult.stdErr)
 
     def testExecLaunchFailureExitsOne(self) -> None:
-        self.Script(guest_exec=[{'fail': 'error: Guest agent is not responding'}])
+        self.Script(agent={'guest-exec': [{'fail': 'error: Guest agent is not responding'}]})
         cliResult = self.RunCLI('exec', 'fixture.exe', environ=explicitTargetEnv)
         self.assertEqual((cliResult.status, cliResult.stdOut), (1, ''))
         self.assertIn('virsh failed (timeout=300): error: Guest agent is not responding', cliResult.stdErr)
         self.assertEqual(len(self.AgentCalls(cliResult)), 1)
 
     def testCrashCommandImmediateExitIsPropagated(self) -> None:
-        self.Script(guest_exec=[{'return': {'pid': 42}}], guest_exec_status=[self.Exited(9, stdErr=b'failed')])
+        self.Script(agent={'guest-exec': [{'return': {'pid': 42}}],
+                           'guest-exec-status': [self.Exited(9, stdErr=b'failed')]})
         cliResult = self.RunCLI('exec-crash', 'fixture.exe', environ=dict(explicitTargetEnv, BSOD_TRIGGER_CONFIRM_TIMEOUT='2'))
         self.assertEqual(cliResult[:3], (9, '', 'failed\n'))
 
     def testCrashCommandConfirmedLaunchThenDisconnectSucceeds(self) -> None:
-        self.Script(guest_exec=[{'return': {'pid': 42}}], guest_exec_status=[{'fail': 'transport lost'}])
+        self.Script(agent={'guest-exec': [{'return': {'pid': 42}}], 'guest-exec-status': [{'fail': 'transport lost'}]})
         cliResult = self.RunCLI('exec-crash', 'nmf.exe', '/crash', 'stack',
                                 environ=dict(explicitTargetEnv, BSOD_TRIGGER_CONFIRM_TIMEOUT='2'))
         self.assertEqual(cliResult.status, 0)
@@ -599,14 +603,15 @@ class GuestAgentCLIexitTests(GuestAgentCLItestCase):
             ({'execute': 'guest-exec-status', 'arguments': {'pid': 42}}, 5)])
 
     def testCrashLaunchFailureIsNotReportedAsDisconnect(self) -> None:
-        self.Script(guest_exec=[{'fail': 'error: Guest agent is not responding'}])
+        self.Script(agent={'guest-exec': [{'fail': 'error: Guest agent is not responding'}]})
         cliResult = self.RunCLI('exec-crash', 'nmf.exe', environ=explicitTargetEnv)
         self.assertEqual((cliResult.status, cliResult.stdOut), (1, ''))
         self.assertIn('virsh failed (timeout=20)', cliResult.stdErr)
         self.assertEqual([qmpCommand['execute'] for qmpCommand, _ in self.AgentCalls(cliResult)], ['guest-exec'])
 
     def testCrashCommandStillRunningTimesOut(self) -> None:
-        self.Script(guest_exec=[{'return': {'pid': 42}}], guest_exec_status=[{'return': {'exited': False}}])
+        self.Script(agent={'guest-exec': [{'return': {'pid': 42}}],
+                           'guest-exec-status': [{'return': {'exited': False}}]})
         cliResult = self.RunCLI('exec-crash', 'fixture.exe', environ=dict(explicitTargetEnv, BSOD_TRIGGER_CONFIRM_TIMEOUT='1'))
         self.assertEqual((cliResult.status, cliResult.stdOut), (124, ''))
         self.assertIn('remained observable for 1s', cliResult.stdErr)
@@ -614,7 +619,8 @@ class GuestAgentCLIexitTests(GuestAgentCLItestCase):
                          ['guest-exec', 'guest-exec-status'])
 
     def testCrashConfirmationWindowComesFromEnvironment(self) -> None:
-        self.Script(guest_exec=[{'return': {'pid': 1}}], guest_exec_status=[{'return': {'exited': False}}])
+        self.Script(agent={'guest-exec': [{'return': {'pid': 1}}],
+                           'guest-exec-status': [{'return': {'exited': False}}]})
         for crashEnv, expectedWindow in (({}, 45), ({'BSOD_TRIGGER_CONFIRM_TIMEOUT': '7'}, 7)):
             with self.subTest(expectedWindow=expectedWindow):
                 cliResult = self.RunCLI('exec-crash', 'fixture.exe', environ=dict(explicitTargetEnv, **crashEnv))
@@ -649,7 +655,7 @@ class GuestAgentCLIpsfileTests(GuestAgentCLItestCase):
 
     def ScriptPSfileRun(self) -> None:
         '''Script replies for uploads followed by a successful PowerShell run.'''
-        self.ScriptUploads(guest_exec=[{'return': {'pid': 1}}], guest_exec_status=[self.Exited(0)])
+        self.ScriptUploads(agent={'guest-exec': [{'return': {'pid': 1}}], 'guest-exec-status': [self.Exited(0)]})
 
     def testPSfileUploadsCompanionsThenRunsScript(self) -> None:
         (self.workDir / 'dir').mkdir()
