@@ -2,7 +2,7 @@
 
 PowerShell scripts that run **inside Windows VMs** via the qemu-guest-agent tunnel.
 
-These scripts configure Windows crash dump settings and clean up pre-test state.
+These scripts configure Windows crash dump settings and prepare the golden image.
 
 ## Script Overview
 
@@ -42,29 +42,6 @@ These scripts configure Windows crash dump settings and clean up pre-test state.
 ```
 
 **Pagefile note**: Preflight requires `pageFile.adequate=true`. With `DedicatedDumpFile` configured this is satisfied without `pagefile.sys`. The pagefile block was removed from configure-dumps.ps1 because `pagefile.sys` cannot be reliably created on KVM with VirtIO Balloon (Windows Server 2022 lazy pagefile allocation defers creation until memory pressure — which rarely occurs on VMs with ≥16GB RAM).
-
----
-
-### `clear-dumps.ps1`
-
-**Purpose**: Remove stale crash artifacts from the guest before a new test run.
-
-**Called by**: `trigger-bsod-intentional.sh` (Phase 3 — guest cleanup)
-
-**What it clears**:
-- `C:\Windows\MEMORY.DMP`
-- `C:\Windows\Minidump\*.dmp`
-
-**What it preserves**:
-- `CrashControl` registry settings (do not reset)
-- `C:\DedicatedDump.sys` (pre-allocated file — keep it)
-- All other system state
-
-**Output JSON** (verified by trigger script):
-```json
-{ "memory": false, "minidumpCount": 0 }
-```
-Pipeline fails if `memory=true` or `minidumpCount>0` — ensures clean state before injection.
 
 ---
 
