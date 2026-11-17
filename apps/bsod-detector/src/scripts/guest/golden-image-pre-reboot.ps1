@@ -11,12 +11,10 @@ function Get-PagefileSizeMB ([int64]$MemoryBytes) {
     [int64][math]::Round(($MemoryBytes + 257MB) / 1MB, 0)
 }
 
-# The cached ISO is replaced only when the server reports a newer copy. An unknown remote
-# timestamp (failed HEAD request) keeps an existing cache instead of forcing a download.
-function Test-ISOdownloadNeeded ($LocalLastWriteUTC, $RemoteLastModifiedUTC) {
-    if ($null -eq $LocalLastWriteUTC) { return $true }
-    if ($null -eq $RemoteLastModifiedUTC) { return $false }
-    $LocalLastWriteUTC -lt $RemoteLastModifiedUTC
+# True only when the file exists and its SHA-256 equals the pinned digest (case-insensitive).
+function Test-ISOhash ([string]$Path, [string]$ExpectedSHA256) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -eq $ExpectedSHA256
 }
 
 # Windows Installer success codes: 0, 1641 (restart initiated) and 3010 (restart required);
@@ -46,22 +44,6 @@ function Enable-TLS12 {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 }
 
-# Returns the server's Last-Modified time (UTC), or nothing when the response has no such header:
-# HttpWebResponse.LastModified would report the current time then and force a download each run.
-function Get-RemoteLastModifiedUTC ([string]$URL) {
-    $req = [System.Net.HttpWebRequest]::Create($URL)
-    $req.Method = 'HEAD'
-    $resp = $req.GetResponse()
-    try {
-        $header = $resp.Headers['Last-Modified']
-        if ($header) {
-            [datetime]::Parse($header, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AssumeUniversal, AdjustToUniversal')
-        }
-    } finally {
-        $resp.Close()
-    }
-}
-
 # Downloads the ISO to the given (temporary) path.
 function Save-ISOdownload ([string]$URL, [string]$Path) {
     (New-Object System.Net.WebClient).DownloadFile($URL, $Path)
@@ -86,42 +68,40 @@ Write-Host "OK: physical memory read; the page file will be ${pagefileSizeMB} MB
 # golden-image-post-reboot.ps1, which may run under another account (per-user $env:TEMP differs).
 New-Item -ItemType Directory -Force -Path 'C:\Temp' | Out-Null
 Enable-TLS12
-$isoURL  = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso'
+# virtio-win is pinned to the published build 0.1.302-1 (what stable-virtio and latest-virtio
+# pointed to on 2026-11-17) and used only when its SHA-256 matches. No detached signature is
+# published: the digest is the one recorded for this ISO in the official
+# virtio-win-0.1.302-1.noarch.rpm header, and the ISO inside that RPM and the direct download
+# hash to the same value. To move to another build, update the version and digest together.
+$isoURL    = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-0.1.302.iso'
+$isoSHA256 = '303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d'
 $isoPath = 'C:\Temp\virtio-win.iso'
 
-$remoteLastModified = $null
-try {
-    $remoteLastModified = Get-RemoteLastModifiedUTC $isoURL
-    if ($remoteLastModified) {
-        Write-Host "Remote ISO Last-Modified (UTC): ${remoteLastModified}"
-    } else {
-        Write-Host 'WARN: the server sent no Last-Modified header; a cached ISO is kept'
+# A cached ISO is reused only if it matches the pinned digest. Otherwise the ISO is downloaded to a
+# temporary name, verified and only then moved over the cache; a failed or mismatching download
+# stops the script before anything is installed, without falling back to an unverified copy.
+if (Test-ISOhash $isoPath $isoSHA256) {
+    Write-Host "OK: cached virtio-win ISO matches the pinned SHA-256 ${isoSHA256}"
+} else {
+    if (Test-Path -LiteralPath $isoPath) {
+        Write-Host 'WARN: the cached virtio-win ISO does not match the pinned SHA-256 - replacing it'
     }
-} catch {
-    Write-Host "WARN: cannot read the remote ISO timestamp: $($_.Exception.Message)"
-}
-
-$localLastWrite = $null
-if (Test-Path $isoPath) { $localLastWrite = (Get-Item $isoPath).LastWriteTimeUtc }
-if (Test-ISOdownloadNeeded $localLastWrite $remoteLastModified) {
-    # Download to a temporary name first: a failed transfer must neither replace the cache
-    # nor leave a partial file that a later run would treat as the latest ISO.
     $isoTmpPath = "${isoPath}.download"
     try {
-        Write-Host 'Downloading virtio-win ISO...'
+        Write-Host "Downloading ${isoURL} ..."
         Save-ISOdownload $isoURL $isoTmpPath
+        if (-not (Test-ISOhash $isoTmpPath $isoSHA256)) { throw "the download does not match the pinned SHA-256 ${isoSHA256}" }
+        # A mismatching cache can still be mounted by an interrupted earlier run; detach it first.
+        if ((Test-Path -LiteralPath $isoPath) -and (Get-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue).Attached) {
+            Dismount-DiskImage -ImagePath $isoPath -ErrorAction Stop | Out-Null
+        }
         Move-Item -Path $isoTmpPath -Destination $isoPath -Force -ErrorAction Stop
-        Write-Host "OK: Downloaded $([math]::Round((Get-Item $isoPath).Length / 1MB, 0)) MB"
+        Write-Host "OK: downloaded and verified virtio-win 0.1.302 ($([math]::Round((Get-Item $isoPath).Length / 1MB, 0)) MB)"
     } catch {
         Remove-Item -Path $isoTmpPath -Force -ErrorAction SilentlyContinue
-        if ($null -eq $localLastWrite) {
-            Write-Error "FAIL: virtio-win ISO download failed and no cached copy exists: $($_.Exception.Message)"
-            exit 1
-        }
-        Write-Host "WARN: virtio-win ISO download failed, using the cached copy: $($_.Exception.Message)"
+        Write-Error "FAIL: no virtio-win ISO matching the pinned SHA-256 is available: $($_.Exception.Message)"
+        exit 1
     }
-} else {
-    Write-Host "OK: using cached virtio-win ISO (local=${localLastWrite}, remote=$(if ($remoteLastModified) { $remoteLastModified } else { 'unknown' }))"
 }
 
 # An ISO left mounted by an interrupted run is reused. A failed mount or a missing drive letter
@@ -183,10 +163,11 @@ Write-Host 'NOTE: storahci.sys (SATA) is an inbox Windows driver - no installati
 # take over that step). Whether the KubeVirt Panicked event is raised without a guest driver has
 # not been verified.
 # Windows boot-recovery settings (boot-status policy, automatic recovery, recovery environment) are
-# intentionally left at their Windows defaults for disposable test VMs. This has not been verified
-# on a VM restarted after a crash, which src/scripts/host/watch-crash.sh does unless --no-restart.
+# intentionally left at their Windows defaults: the intended flow does not restart a VM after a
+# simulated crash. The current src/scripts/host/watch-crash.sh still starts the VM again unless it
+# runs with --no-restart (a watcher change is planned separately); a restarted VM is not verified.
 
-# The ISO stays on disk for the version check if this script is re-run; golden-image-post-reboot.ps1
+# The ISO stays on disk for re-runs (reused only while its SHA-256 matches); golden-image-post-reboot.ps1
 # removes it once every check has passed.
 Dismount-DiskImage -ImagePath $isoPath
 Write-Host "OK: ISO unmounted (kept on disk at ${isoPath} until golden-image-post-reboot.ps1 passes)"
