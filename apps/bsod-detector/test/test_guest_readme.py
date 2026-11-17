@@ -50,6 +50,9 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn('Win32_ComputerSystem.AutomaticManagedPagefile', self.readme)
         self.assertIn('pageFile.requiredMB', self.readme)
         self.assertIn('initial and maximum sizes of at least `requiredMB`', self.readme)
+        self.assertIn('| `-StageNotMyFault` |', self.readme)
+        self.assertIn('watch runs, default apply and `-VerifyOnly` never download', self.readme)
+        self.assertIn('passes `-StageNotMyFault` only when it runs with `--require-trigger`', self.readme)
         self.assertNotIn('If the recommendation includes `DedicatedDumpFile`', self.readme)
 
     def test_readme_matches_scripts_when_companion_changes_are_present(self):
@@ -77,6 +80,10 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn('requiredMB = $requiredMB', script)
         self.assertIn('[Console]::Error.WriteLine', script)
         self.assertIn('no longer recommends it', self.readme)
+        self.assertIn('[switch]$StageNotMyFault', script)
+        self.assertIn("if ($IsVerifyOnly) { return 'skipped: -VerifyOnly is read-only' }", script)
+        preflight = (APP_DIR / 'src' / 'scripts' / 'host' / 'preflight-rhov.sh').read_text(encoding='utf-8')
+        self.assertIn('((isTriggerRequired == 0)) || argArr+=(-StageNotMyFault)', preflight)
 
 
 if __name__ == '__main__':
