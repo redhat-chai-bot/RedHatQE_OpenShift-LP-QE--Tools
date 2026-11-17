@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 '''Behavioural tests for src/scripts/bsod-pipeline/bsod-runner.sh with mocked helpers.
 
-The real runner is copied into a temporary tree next to mock preflight-rhov.sh and watch-crash.sh
-scripts, a mock guest agent (BSOD_DET__GUEST_AGENT__BIN) and a mock `oc` on PATH. kubectl, virtctl
-and virsh are guard stubs that fail and are recorded, and KUBECONFIG points nowhere, so no guest,
-VM, cluster, network or crash operation can run. The pinned digest below is synthetic test data.
+The real runner is copied into a temporary tree next to mock preflight-rhov.sh and bsod-watcher.sh
+scripts, a mock guest agent (BSOD_DET__GUEST_AGENT__BIN) and a mock `oc` on PATH. kubectl, virtctl,
+virsh and the old host/watch-crash.sh path are guard stubs that fail and are recorded, and
+KUBECONFIG points nowhere, so no guest, VM, cluster, network or crash operation can run. The digest
+below is synthetic test data; the runner drops any digest pin and uses the image name or tag.
 
-Naming follows the team guide (camelCase variables, PascalCase helpers) with two technical
-exceptions: unittest only discovers methods starting with `test` and calls the `setUp` hook, and
-environment variable names are the runner's external, upper-case interface.
+Naming follows the team guide: camelCase variables, PascalCase helpers and upper-case environment
+variables namespaced with a prefix: BSOD_DET__* is the runner's interface and BSOD_RUNNER_TEST__*
+holds the test-private mock controls (PATH, HOME and KUBECONFIG are standard variables). The one
+technical exception is unittest's: it only discovers methods starting with `test` and calls the
+`setUp` hook.
 '''
 
 import os
@@ -23,14 +26,16 @@ from pathlib import Path
 
 appDir = Path(__file__).resolve().parents[1]
 runnerSource = appDir / 'src' / 'scripts' / 'bsod-pipeline' / 'bsod-runner.sh'
-validImage = 'quay.io/konveyor/oadp-vmfr-access@sha256:' + 'e26c74ce' * 8
+untaggedImage = 'quay.io/konveyor/oadp-vmfr-access'
+taggedImage = untaggedImage + ':test'
+syntheticDigest = '@sha256:' + 'e26c74ce' * 8
 nmfGuest = r'C:\Temp\nmf\notmyfaultc64.exe'
 
 # Records its arguments and writes the launcher Pod/domain metadata the runner reads.
 mockPreflight = r'''#!/usr/bin/env bash
 set -euxo pipefail; shopt -s inherit_errexit
-echo "preflight $*" >> "${CALL_LOG}"
-[ "${MOCK_PREFLIGHT_FAIL:-0}" = 0 ] || exit 7
+echo "preflight $*" >> "${BSOD_RUNNER_TEST__CALL_LOG}"
+[ "${BSOD_RUNNER_TEST__PREFLIGHT_FAIL:-0}" = 0 ] || exit 7
 typeset metadata=''
 while (($#)); do
   case "${1}" in
@@ -46,10 +51,10 @@ true
 # injected crash in intentional mode and writes the evidence summary.
 mockWatcher = r'''#!/usr/bin/env bash
 set -euxo pipefail; shopt -s inherit_errexit
-echo "watcher $*" >> "${CALL_LOG}"
-echo "$$" > "${WATCHER_PID_FILE}"
+echo "watcher $*" >> "${BSOD_RUNNER_TEST__CALL_LOG}"
+echo "$$" > "${BSOD_RUNNER_TEST__WATCHER_PID_FILE}"
 # A normal exit removes the pid file; `exec sleep` below keeps it for the hanging cases.
-trap 'rm -f -- "${WATCHER_PID_FILE}"' EXIT
+trap 'rm -f -- "${BSOD_RUNNER_TEST__WATCHER_PID_FILE}"' EXIT
 typeset ready='' runID='' outDir=''; typeset -i isIntentional=0
 while (($#)); do
   case "${1}" in
@@ -63,40 +68,40 @@ while (($#)); do
     *) echo "mock watcher: unknown argument ${1}" >&2; exit 64;;
   esac
 done
-case "${MOCK_WATCHER:-normal}" in
+case "${BSOD_RUNNER_TEST__WATCHER:-normal}" in
   exit-early) exit 5;;
   wrong-ready) echo 'another-run' > "${ready}"; exec sleep 30;;
   hang) exec sleep 30;;
 esac
-echo "watcher-ready ${runID}" >> "${CALL_LOG}"
+echo "watcher-ready ${runID}" >> "${BSOD_RUNNER_TEST__CALL_LOG}"
 echo "${runID}" > "${ready}"
 if ((isIntentional)); then
   for _ in $(seq 1 100); do
-    [ ! -f "${CRASH_MARKER}" ] || break
+    [ ! -f "${BSOD_RUNNER_TEST__CRASH_MARKER}" ] || break
     sleep 0.1
   done
 fi
 typeset isOk=true
-[ "${MOCK_SUMMARY:-ok}" != failed ] || isOk=false
+[ "${BSOD_RUNNER_TEST__SUMMARY:-ok}" != failed ] || isOk=false
 typeset summaryRun="${runID}"
-[ "${MOCK_SUMMARY:-ok}" != other-run ] || summaryRun='another-run'
+[ "${BSOD_RUNNER_TEST__SUMMARY:-ok}" != other-run ] || summaryRun='another-run'
 printf '{"ok":%s,"runId":"%s"}\n' "${isOk}" "${summaryRun}" > "${outDir}/evidence-summary.json"
-exit "${MOCK_WATCHER_STATUS:-0}"
+exit "${BSOD_RUNNER_TEST__WATCHER_STATUS:-0}"
 '''
 
 # Answers the runner's guest commands; exec-crash only drops a marker file.
 mockGuestAgent = r'''#!/usr/bin/env bash
 set -euxo pipefail; shopt -s inherit_errexit
-echo "guest-agent $*" >> "${CALL_LOG}"
+echo "guest-agent $*" >> "${BSOD_RUNNER_TEST__CALL_LOG}"
 case "${1}" in
   exec)
     typeset guestCmd="${*: -1}"
     case "${guestCmd}" in
-      *OpenRead*) printf '%s\r\n' "${MOCK_NMF_STATE:-readable}"; exit "${MOCK_NMF_EXIT:-0}";;
+      *OpenRead*) printf '%s\r\n' "${BSOD_RUNNER_TEST__NMF_STATE:-readable}"; exit "${BSOD_RUNNER_TEST__NMF_EXIT:-0}";;
       *Remove-Item*) echo '{"memory":false,"minidumpCount":0}';;
       *) echo 'unexpected guest command' >&2; exit 9;;
     esac;;
-  exec-crash) : > "${CRASH_MARKER}"; echo '{"disconnected":true}';;
+  exec-crash) : > "${BSOD_RUNNER_TEST__CRASH_MARKER}"; echo '{"disconnected":true}';;
   *) exit 9;;
 esac
 true
@@ -105,10 +110,10 @@ true
 # Stands in for every oc call the runner makes.
 mockOC = r'''#!/usr/bin/env bash
 set -euxo pipefail; shopt -s inherit_errexit
-echo "oc $*" >> "${CALL_LOG}"
+echo "oc $*" >> "${BSOD_RUNNER_TEST__CALL_LOG}"
 case "$*" in
-  *'device_add pvpanic'*) [ "${MOCK_DOMAIN_PATCH_FAIL:-0}" = 0 ] || exit 1;;
-  *'get vm/'*) echo "${MOCK_VM_STATUS:-Stopped}";;
+  *'device_add pvpanic'*) [ "${BSOD_RUNNER_TEST__DOMAIN_PATCH_FAIL:-0}" = 0 ] || exit 1;;
+  *'get vm/'*) echo "${BSOD_RUNNER_TEST__VM_STATUS:-Stopped}";;
   *'get vmi/'*) echo '{}';;
   *'virsh dumpxml'*) echo '<domain/>';;
 esac
@@ -118,7 +123,7 @@ true
 # Any call to a real cluster or hypervisor tool is recorded and fails.
 guardStub = r'''#!/usr/bin/env bash
 set -euxo pipefail; shopt -s inherit_errexit
-echo "GUARD $0 $*" >> "${CALL_LOG}"
+echo "GUARD $0 $*" >> "${BSOD_RUNNER_TEST__CALL_LOG}"
 exit 99
 '''
 
@@ -137,7 +142,9 @@ class RunnerTests(unittest.TestCase):
         self.runner = scripts / 'bsod-pipeline' / 'bsod-runner.sh'
         WriteExecutable(self.runner, runnerSource.read_text(encoding='utf-8'))
         WriteExecutable(scripts / 'host' / 'preflight-rhov.sh', mockPreflight)
-        WriteExecutable(scripts / 'host' / 'watch-crash.sh', mockWatcher)
+        WriteExecutable(scripts / 'host' / 'bsod-watcher.sh', mockWatcher)
+        # The runner no longer starts host/watch-crash.sh; calling it would be recorded as a guard hit.
+        WriteExecutable(scripts / 'host' / 'watch-crash.sh', guardStub)
         self.guestAgent = self.tmpDir / 'mock' / 'guest-agent'
         WriteExecutable(self.guestAgent, mockGuestAgent)
         mockBin = self.tmpDir / 'mockbin'
@@ -157,14 +164,14 @@ class RunnerTests(unittest.TestCase):
             'KUBECONFIG': '/nonexistent/kubeconfig',
             'BSOD_DET__NAMESPACE': 'demo-ns',
             'BSOD_DET__VM__NAME': 'demo-vm',
-            'BSOD_DET__RECOVERY__IMAGE': validImage,
+            'BSOD_DET__RECOVERY__IMAGE': taggedImage + syntheticDigest,
             'BSOD_DET__EVIDENCE__DIR': str(self.evidence),
             'BSOD_DET__GUEST_AGENT__BIN': str(self.guestAgent),
             'BSOD_DET__READY__TIMEOUT': '10',
             'BSOD_DET__PREFLIGHT__TIMEOUT': '30',
-            'CALL_LOG': str(self.callLog),
-            'CRASH_MARKER': str(self.crashMarker),
-            'WATCHER_PID_FILE': str(self.watcherPIDfile),
+            'BSOD_RUNNER_TEST__CALL_LOG': str(self.callLog),
+            'BSOD_RUNNER_TEST__CRASH_MARKER': str(self.crashMarker),
+            'BSOD_RUNNER_TEST__WATCHER_PID_FILE': str(self.watcherPIDfile),
         }
 
     def Run(self, *args, timeout=60, **overrides):
@@ -198,6 +205,11 @@ class RunnerTests(unittest.TestCase):
     def Index(self, calls, prefix):
         return next(index for index, call in enumerate(calls) if call.startswith(prefix))
 
+    def OptionValue(self, call, option):
+        '''The word following option in a recorded call.'''
+        words = call.split()
+        return words[words.index(option) + 1]
+
     def GuestExecIndex(self, calls, marker):
         '''Position of the guest-agent exec call whose PowerShell command contains marker.'''
         return next(index for index, call in enumerate(calls)
@@ -226,15 +238,27 @@ class RunnerTests(unittest.TestCase):
             time.sleep(0.1)
         self.fail(f'watcher process {watcherPID} is still running')
 
-    def testMissingOrMutableRecoveryImageFailsBeforeSideEffects(self):
-        images = (None, '', 'quay.io/konveyor/oadp-vmfr-access:latest', 'quay.io/konveyor/oadp-vmfr-access@sha256:abc')
-        for image in images:
+    def testMissingRecoveryImageFailsBeforeSideEffects(self):
+        # There is no default image; a bare digest leaves nothing once the pin is dropped.
+        for image in (None, '', syntheticDigest):
             with self.subTest(image=image):
                 result, calls = self.Run('--mode', 'watch', BSOD_DET__RECOVERY__IMAGE=image)
                 self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn('BSOD_DET__RECOVERY__IMAGE must be a digest-pinned image', result.stderr)
+                self.assertIn('BSOD_DET__RECOVERY__IMAGE must name the recovery image', result.stderr)
                 self.assertEqual(calls, [])
                 self.assertEqual(self.RunDirs(), [])
+
+    def testRecoveryImageDigestPinIsDroppedAndTagsPassThrough(self):
+        cases = [(taggedImage, taggedImage), (taggedImage + syntheticDigest, taggedImage),
+                 (untaggedImage + syntheticDigest, untaggedImage)]
+        for image, expected in cases:
+            with self.subTest(image=image):
+                self.ResetRun()
+                result, calls = self.Run('--mode', 'watch', BSOD_DET__RECOVERY__IMAGE=image)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for prefix in ('preflight ', 'watcher '):
+                    self.assertEqual(self.OptionValue(calls[self.Index(calls, prefix)], '--recovery-image'), expected)
+                self.assertFalse([call for call in calls if '@sha256' in call])
 
     def testModeCrashTypeAndConfirmationGatesFailBeforeSideEffects(self):
         confirmed = {'BSOD_DET__CONFIRM_TARGET': 'demo-vm'}
@@ -260,7 +284,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         preflight = calls[self.Index(calls, 'preflight ')]
         self.assertNotIn('--require-trigger', preflight)
-        self.assertIn(f'--recovery-image {validImage}', preflight)
+        self.assertEqual(self.OptionValue(preflight, '--recovery-image'), taggedImage)
         self.assertFalse([call for call in calls if call.startswith('guest-agent')])
         watcher = calls[self.Index(calls, 'watcher ')]
         self.assertIn('--no-restart', watcher)
@@ -289,7 +313,10 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn('--require-trigger', calls[watcherAt])
 
     def testUnreadableNotMyFaultStopsBeforeDumpCleanupAndWatcher(self):
-        cases = [{'MOCK_NMF_STATE': 'unavailable'}, {'MOCK_NMF_STATE': 'readable', 'MOCK_NMF_EXIT': '124'}]
+        cases = [
+            {'BSOD_RUNNER_TEST__NMF_STATE': 'unavailable'},
+            {'BSOD_RUNNER_TEST__NMF_STATE': 'readable', 'BSOD_RUNNER_TEST__NMF_EXIT': '124'},
+        ]
         for env in cases:
             with self.subTest(env=env):
                 self.ResetRun()
@@ -303,7 +330,7 @@ class RunnerTests(unittest.TestCase):
 
     def testMismatchedReadinessTimesOutWithoutInjection(self):
         result, calls = self.Run('--mode', 'intentional', '0x01', BSOD_DET__CONFIRM_TARGET='demo-vm',
-                                 MOCK_WATCHER='wrong-ready', BSOD_DET__READY__TIMEOUT='2')
+                                 BSOD_RUNNER_TEST__WATCHER='wrong-ready', BSOD_DET__READY__TIMEOUT='2')
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('watcher readiness timed out after 2s', result.stderr)
         self.assertFalse([call for call in calls if call.startswith('guest-agent exec-crash')])
@@ -312,18 +339,19 @@ class RunnerTests(unittest.TestCase):
 
     def testEarlyWatcherExitIsReportedWithItsStatus(self):
         result, calls = self.Run('--mode', 'intentional', '0x01', BSOD_DET__CONFIRM_TARGET='demo-vm',
-                                 MOCK_WATCHER='exit-early')
+                                 BSOD_RUNNER_TEST__WATCHER='exit-early')
         self.assertEqual(result.returncode, 5, result.stderr)
         self.assertIn('watcher exited (status 5) before publishing readiness', result.stderr)
         self.assertFalse([call for call in calls if call.startswith('guest-agent exec-crash')])
 
     def testFailureStatusSummaryAndVMstateAreErrorsAndKeepEvidence(self):
+        failedSummary = 'current-run evidence summary is absent or reports failure'
         cases = [
-            ({'MOCK_WATCHER_STATUS': '3'}, 3, 'watcher/recovery pipeline failed with status 3'),
-            ({'MOCK_SUMMARY': 'failed'}, 1, 'current-run evidence summary is absent or reports failure'),
-            ({'MOCK_SUMMARY': 'other-run'}, 1, 'current-run evidence summary is absent or reports failure'),
-            ({'MOCK_VM_STATUS': 'Running'}, 1, "is 'Running' after extraction, expected Stopped"),
-            ({'MOCK_PREFLIGHT_FAIL': '1'}, 7, None),
+            ({'BSOD_RUNNER_TEST__WATCHER_STATUS': '3'}, 3, 'watcher/recovery pipeline failed with status 3'),
+            ({'BSOD_RUNNER_TEST__SUMMARY': 'failed'}, 1, failedSummary),
+            ({'BSOD_RUNNER_TEST__SUMMARY': 'other-run'}, 1, failedSummary),
+            ({'BSOD_RUNNER_TEST__VM_STATUS': 'Running'}, 1, "is 'Running' after extraction, expected Stopped"),
+            ({'BSOD_RUNNER_TEST__PREFLIGHT_FAIL': '1'}, 7, None),
         ]
         for env, status, message in cases:
             with self.subTest(env=env):
@@ -337,7 +365,7 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(len(self.RunDirs()), 1)
 
     def testSIGTERMstopsTheWatcherAndKeepsTheRunDirectory(self):
-        env = dict(self.env, MOCK_WATCHER='hang', BSOD_DET__READY__TIMEOUT='60')
+        env = dict(self.env, BSOD_RUNNER_TEST__WATCHER='hang', BSOD_DET__READY__TIMEOUT='60')
         stderrPath = self.tmpDir / 'runner.stderr'
         with stderrPath.open('w', encoding='utf-8') as stderrFile:
             process = subprocess.Popen(['bash', str(self.runner), '--mode', 'watch'], env=env,
@@ -362,7 +390,7 @@ class RunnerTests(unittest.TestCase):
         self.Calls()
 
     def testDomainPatchFailureIsAnSTDERRwarning(self):
-        result, _ = self.Run('--mode', 'watch', MOCK_DOMAIN_PATCH_FAIL='1')
+        result, _ = self.Run('--mode', 'watch', BSOD_RUNNER_TEST__DOMAIN_PATCH_FAIL='1')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('bsod-runner: WARN: domain crash-behaviour patch failed', result.stderr)
 
