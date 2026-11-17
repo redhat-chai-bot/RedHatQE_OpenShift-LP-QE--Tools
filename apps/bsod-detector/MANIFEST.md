@@ -37,7 +37,6 @@ A catalog of what ships in this tool and why each file is kept.
 | File | Description |
 |---|---|
 | `parse-dump-header.sh` | Read bug-check code and parameters from a Windows crash dump header (no debugger). |
-| `extract-evtx.py` | Parse offline-extracted `.evtx` event log files into crash-detection JSON. |
 
 ### Access / lifecycle
 | File | Description |
@@ -69,9 +68,9 @@ A catalog of what ships in this tool and why each file is kept.
 
 | File | Consumed by |
 |---|---|
-| `bugcheck-codes.json` | parse-dump-header.sh, extract-evtx.py |
+| `bugcheck-codes.json` | parse-dump-header.sh |
 | `crash-control.json` | configure-dumps.ps1, prep-guest.ps1 |
-| `event-sources.json` | extract-evtx.py |
+| `event-sources.json` | Reference data only (no active script consumer) |
 | `host-signals.json` | collect-host-signals.sh (host-only) |
 | `trigger-methods.json` | sweep-crashme.sh (host-only) |
 | `chaos-triggers.json` | sweep-chaos.sh (host-only) |
@@ -84,14 +83,3 @@ A catalog of what ships in this tool and why each file is kept.
 Quarantined destructive tooling used only to validate the detector against a
 disposable snapshotted test VM. See
 [`src/scripts/crash-injector/README.md`](src/scripts/crash-injector/README.md).
-
----
-
-## host-tools/ — containerized offline extraction
-
-| File | Description |
-|---|---|
-| `extract-dump.sh` | (in-container) Extract MEMORY.DMP, minidumps, and .evtx files from a guest disk. |
-| `run.sh` | (host) `podman run` wrapper with correct mounts. |
-
-Container image definition: `image/container/bsod-detector/`.

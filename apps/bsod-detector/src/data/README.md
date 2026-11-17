@@ -7,9 +7,9 @@ values. If a table is wrong, fix it here once and every consumer picks it up.
 
 | File | Consumed by |
 |---|---|
-| `bugcheck-codes.json` | Host-side scripts (parse-dump-header.sh, extract-evtx.py) |
+| `bugcheck-codes.json` | Host-side scripts (parse-dump-header.sh) |
 | `crash-control.json` | Guest-side (configure-dumps.ps1, prep-guest.ps1) |
-| `event-sources.json` | Host-side (extract-evtx.py offline parser) |
+| `event-sources.json` | Reference data only (no active script consumer) |
 | `trigger-methods.json` | **Host-only** (sweep-crashme.sh, sweep-chaos.sh) |
 | `chaos-triggers.json` | **Host-only** (sweep-chaos.sh) |
 | `host-signals.json` | **Host-only** (collect-host-signals.sh) |
@@ -41,8 +41,8 @@ Crash-relevant event log `log` / `source` / `eventId` entries with meaning.
 Covers traditional BugCheck events (System/1001), dirty shutdowns (6008),
 boot markers (6009, 12, 13), Kernel-Power (41), WER buckets (Application/1001
 including LiveKernelEvent), WHEA (18), and Kernel-LiveDump (System/1).
-- **Consumers:** the guest collector to build the crash timeline and for
-  fallback detection (LiveKernelEvent, dirty shutdown).
+- **Consumers:** none in the active scripts; kept as reference for manual
+  EventLog analysis (BugCheck, LiveKernelEvent, dirty shutdown).
 
 ### `host-signals.json`
 Linux/KVM **host-side** crash-correlation signals invisible from inside the
