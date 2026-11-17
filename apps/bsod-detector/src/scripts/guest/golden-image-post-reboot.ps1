@@ -100,9 +100,21 @@ if ($dedicatedDump) {
     Write-Host 'OK: DedicatedDumpFile = (not set) - pagefile.sys used via normal I/O'
 }
 
+# Both pagefile checks need the memory size: a failed query or a missing or non-positive
+# size fails verification instead of being read as 'automatic management off' or as a
+# 257 MB minimum.
 Write-Host "`n--- Checking pagefile management ---"
-$computer = Get-CimInstance -ClassName Win32_ComputerSystem
-if (-not $computer.AutomaticManagedPagefile) {
+$computer = $null
+try {
+    $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+} catch {
+    Write-Error "FAIL: Win32_ComputerSystem query failed: $($_.Exception.Message)"
+}
+$hasMemorySize = $computer -and $computer.TotalPhysicalMemory -gt 0
+if (-not $hasMemorySize) {
+    Write-Error "FAIL: physical memory size is missing or not positive (TotalPhysicalMemory = '$($computer.TotalPhysicalMemory)')"
+    $hasFailure = $true
+} elseif (-not $computer.AutomaticManagedPagefile) {
     Write-Host 'OK: AutomaticManagedPagefile = false'
 } else {
     Write-Error 'FAIL: AutomaticManagedPagefile is still true'
@@ -114,7 +126,10 @@ if (-not $computer.AutomaticManagedPagefile) {
 Write-Host "`n--- Checking pagefile.sys ---"
 $pf = Get-CimInstance Win32_PageFileUsage | Where-Object { $_.Name -like 'C:\*' }
 $expectedMinMB = Get-PagefileSizeMB $computer.TotalPhysicalMemory
-if ($pf -and $pf.AllocatedBaseSize -ge $expectedMinMB) {
+if (-not $hasMemorySize) {
+    Write-Error 'FAIL: pagefile.sys size not verified - the physical memory size is unknown'
+    $hasFailure = $true
+} elseif ($pf -and $pf.AllocatedBaseSize -ge $expectedMinMB) {
     Write-Host "OK: pagefile.sys active - AllocatedBaseSize=$($pf.AllocatedBaseSize) MB (>= RAM+257MB=${expectedMinMB} MB), CurrentUsage=$($pf.CurrentUsage) MB"
 } elseif ($pf -and $pf.AllocatedBaseSize -gt 0) {
     Write-Error "FAIL: pagefile.sys active but too small - AllocatedBaseSize=$($pf.AllocatedBaseSize) MB (expected >= ${expectedMinMB} MB = RAM+257MB)"
