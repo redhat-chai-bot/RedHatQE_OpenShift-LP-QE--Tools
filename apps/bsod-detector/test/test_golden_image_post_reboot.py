@@ -85,6 +85,75 @@ def RunHarness(testCase, mode, functionName='', calls=None, scriptPath=SCRIPT, e
     return json.loads(result.stdout)
 
 
+def WriteMainFlowFiles(testCase, tmpDir, helperNames, mocks, startLine=None):
+    """Writes the script's top-level statements as one function, plus mocks and its own helpers.
+
+    The statements run unchanged inside Invoke-MainFlow in the harness's empty runspace. The
+    script's helper functions are loaded next to the mocks, and each top-level `exit N` becomes
+    `Exit-Script N; return`, which records the status and leaves at the same point.
+    """
+    scriptText = SCRIPT.read_text(encoding='ascii')
+    helperTexts = []
+    for helperName in helperNames:
+        definition = RunHarness(testCase, 'definition', helperName)
+        testCase.assertTrue(definition['found'], helperName)
+        testCase.assertEqual(scriptText.count(definition['text']), 1, helperName)
+        scriptText = scriptText.replace(definition['text'], '')
+        helperTexts.append(definition['text'])
+    if startLine is not None:
+        scriptText = scriptText[scriptText.index(startLine):]
+    mainFlow, exitCount = re.subn(r'(?mi)^(\s*)exit (\d+)[ \t]*$', r'\1Exit-Script \2; return', scriptText)
+    codeLines = [line for line in (mainFlow + '\n' + '\n'.join(helperTexts)).splitlines() if not line.lstrip().startswith('#')]
+    testCase.assertGreater(exitCount, 0)
+    testCase.assertFalse([line for line in codeLines if re.search(r'(^|[;{])\s*exit\b(?!-)', line, re.IGNORECASE)])
+    flowPath = Path(tmpDir) / 'main-flow.ps1'
+    mocksPath = Path(tmpDir) / 'main-flow-mocks.ps1'
+    flowPath.write_text('function Invoke-MainFlow {\n' + mainFlow + '\n}\n', encoding='ascii')
+    mocksPath.write_text(mocks + '\n' + '\n'.join(helperTexts) + '\n', encoding='ascii')
+    return flowPath, mocksPath
+
+
+# Mocks for the main-flow tests: every check passes except the memory size under test.
+# 'memory' is error, null or a byte count; 'pagefileMB' is the active page file size.
+postMainFlowMocks = r'''
+function Get-Service ($Name, $ErrorAction) { [pscustomobject]@{ Status = 'Running' } }
+function Set-Service ($Name, $StartupType, $ErrorAction) { $global:MockLog.Add("Set-Service ${Name} ${StartupType}") }
+function Get-WindowsDriver ([switch]$Online) {
+    [pscustomobject]@{ OriginalFileName = 'C:\Windows\System32\DriverStore\FileRepository\viostor.inf' }
+    [pscustomobject]@{ OriginalFileName = 'C:\Windows\System32\DriverStore\FileRepository\vioscsi.inf' }
+}
+function Where-Object ([scriptblock]$FilterScript) {
+    process {
+        $context = [System.Collections.Generic.List[psvariable]]@([psvariable]::new('_', $_))
+        if ($FilterScript.InvokeWithContext($null, $context)) { $_ }
+    }
+}
+function Test-Path ([string]$Path, [string]$LiteralPath) { $true }
+function Get-ItemProperty ([string]$Path, [string]$Name, $ErrorAction) {
+    $values = @{ CrashDumpEnabled = 7; AutoReboot = 0; AlwaysKeepMemoryDump = 1; Overwrite = 1; LogEvent = 1 }
+    if ($values.ContainsKey($Name)) { [pscustomobject]@{ $Name = $values[$Name] } }
+}
+function Get-CimInstance ([string]$ClassName, $ErrorAction) {
+    $global:MockLog.Add("Get-CimInstance ${ClassName} ErrorAction=${ErrorAction}")
+    if ($ClassName -eq 'Win32_PageFileUsage') {
+        return [pscustomobject]@{ Name = 'C:\pagefile.sys'; AllocatedBaseSize = [int64]$global:MockState['pagefileMB'][0]; CurrentUsage = 10 }
+    }
+    $memory = $global:MockState['memory'][0]
+    if ($memory -eq 'error') {
+        if ("${ErrorAction}" -eq 'Stop') { throw 'simulated CIM failure' }
+        return
+    }
+    $totalMemory = if ($memory -eq 'null') { $null } else { [int64]$memory }
+    [pscustomobject]@{ AutomaticManagedPagefile = $false; TotalPhysicalMemory = $totalMemory }
+}
+function Get-DiskImage ($ImagePath, $ErrorAction) { $global:MockLog.Add("Get-DiskImage ${ImagePath}"); [pscustomobject]@{ Attached = $false } }
+function Remove-Item ($LiteralPath, [switch]$Force, $ErrorAction) { $global:MockLog.Add("Remove-Item ${LiteralPath}") }
+function Write-Host ($Object, $ForegroundColor) { $global:MockLog.Add("Write-Host ${Object}") }
+function Write-Error ($Message) { $global:MockLog.Add("Write-Error ${Message}") }
+function Exit-Script ([int]$Code) { $global:MockLog.Add("exit ${Code}") }
+'''
+
+
 class PostRebootStaticTests(unittest.TestCase):
     def setUp(self):
         self.source = SCRIPT.read_bytes()
@@ -211,6 +280,39 @@ class PostRebootPowerShellTests(unittest.TestCase):
             for name in ('Get-WithCommand', 'Get-WithDotNet'):
                 output = RunHarness(self, 'call', name, [[]], scriptPath=probe, expectSuccess=False)
                 self.assertIn('refused', output)
+
+
+class PostRebootMainFlowTests(unittest.TestCase):
+    """The whole script, run as it runs on the guest, with every command mocked."""
+
+    def RunScript(self, cases):
+        with tempfile.TemporaryDirectory() as tmpDir:
+            flowPath, mocksPath = WriteMainFlowFiles(
+                self, tmpDir, ['Get-PagefileSizeMB', 'Remove-SetupCacheFile'], postMainFlowMocks)
+            calls = [{'state': {'memory': [memory], 'pagefileMB': [pagefileMB]}, 'args': []} for memory, pagefileMB in cases]
+            return [result['log'] for result in RunHarness(self, 'mockcall', 'Invoke-MainFlow', calls,
+                                                           scriptPath=flowPath, mocksPath=mocksPath)]
+
+    def testInvalidMemorySizeFailsBeforeCleanupAndSealMessage(self):
+        cases = [('error', '300'), ('null', '300'), ('0', '300'), ('-1073741824', '300')]
+        for (memory, _), log in zip(cases, self.RunScript(cases)):
+            with self.subTest(memory=memory):
+                self.assertEqual(log[-1], 'exit 1', log)
+                self.assertTrue([line for line in log if line.startswith('Write-Error FAIL: physical memory size')], log)
+                passedChecks = [line for line in log if line.startswith(('Write-Host OK: AutomaticManagedPagefile', 'Write-Host OK: pagefile.sys'))]
+                self.assertEqual(passedChecks, [])
+                cleanupOrSeal = [line for line in log if line.startswith(('Get-DiskImage', 'Remove-Item')) or 'safe to seal' in line]
+                self.assertEqual(cleanupOrSeal, [])
+
+    def testValidMemorySizePassesThenRemovesTheISOcacheBeforeSealing(self):
+        log = self.RunScript([('17179869184', '16641')])[0]
+        self.assertNotIn('exit 1', log)
+        self.assertIn('Write-Host OK: AutomaticManagedPagefile = false', log)
+        removals = [index for index, line in enumerate(log) if line.startswith('Remove-Item')]
+        self.assertEqual([log[index] for index in removals],
+                         ['Remove-Item C:\\Temp\\virtio-win.iso', 'Remove-Item C:\\Temp\\virtio-win.iso.download'])
+        sealIndex = next(index for index, line in enumerate(log) if 'safe to seal' in line)
+        self.assertLess(removals[-1], sealIndex)
 
 
 if __name__ == '__main__':
