@@ -13,10 +13,12 @@ The descriptions below document what the scripts in this directory do; they do n
 - Run the golden-image pair inside the Windows guest from an elevated PowerShell session, in the order shown below.
 - Applying settings with `configure-dumps.ps1` also requires Administrator privileges. Its `-VerifyOnly` mode does not enforce elevation.
 - The pre-reboot script uses Windows disk-image, driver-management, service, registry, and CIM operations. Its preferred VirtIO driver paths are for Windows 11 AMD64; it falls back to a recursive AMD64 INF search.
+- The pre-reboot script reads the guest's physical memory size first and stops with exit code 1, before any change, if it cannot be read or is not positive.
 - The pre-reboot script needs network access to download the VirtIO ISO unless a cached copy is already present in `C:\Temp`. It stops with exit code 1, before installing anything or changing registry settings, if no ISO can be obtained.
-- `configure-dumps.ps1` requires a readable configuration JSON file. It downloads NotMyFault (network access, best effort) only in apply mode with `-StageNotMyFault` and only if the executable is missing; watch runs, default apply and `-VerifyOnly` never download.
-- The pre-reboot script configures a pagefile sized to guest RAM plus 257 MB. Ensure the guest's C: volume has room for it; the script does not check free disk space.
-- These scripts prepare the golden image for disposable test VMs: each pytest run tears down its VM, so a VM is not reused after a crash.
+- `configure-dumps.ps1` requires a readable configuration JSON file. It downloads NotMyFault (network access, best effort) only in apply mode with `-StageNotMyFault` and only if no trusted copy is present; watch runs, default apply and `-VerifyOnly` never download.
+- The pre-reboot script configures a pagefile sized to the RAM of the VM it runs on plus 257 MB. Ensure the guest's C: volume has room for it; the script does not check free disk space.
+- VMs cloned from the golden image must not have more RAM than the VM that prepared it: `configure-dumps.ps1` computes the requirement from the RAM of the VM it runs on and then reports the page file as not adequate, which the host preflight rejects. Images prepared by older versions of these scripts (a 4096 MB page file and a `DedicatedDumpFile`) are not adequate either and must be rebuilt.
+- The golden image is meant for test VMs that are disposable. That is an assumption about the consumer of these images and is not enforced in this repository: `src/scripts/host/watch-crash.sh` starts the VM again after extracting evidence unless it runs with `--no-restart`.
 
 ```powershell
 # Step 1: Run as Administrator. This script forces a reboot at the end.
@@ -34,36 +36,37 @@ Do not seal if the post-reboot script reports `FAIL` or exits with code 1. It pr
 
 ### Purpose and interface
 
-Part 1 of golden-image preparation. It has no declared parameters. Run it as Administrator before sealing the guest. Elevation is stated in the script instructions but is not checked explicitly by the script.
+Part 1 of golden-image preparation. It has no declared parameters. Run it as Administrator before sealing the guest. Elevation is stated in the script instructions but is not checked explicitly by the script; a registry write that is denied stops the script with exit code 1.
 
 **Warning:** On reaching the end, the script waits five seconds and calls `Restart-Computer -Force`. Save work before running it; there is no confirmation prompt or no-reboot switch.
 
 ### Actions, in order
 
-1. Creates `C:\Temp` if needed and adds TLS 1.2 to the protocols the process allows. `C:\Temp` is fixed on purpose: the ISO cache must survive the reboot and be found by the post-reboot script, which may run under another account than this one (a per-user `$env:TEMP` would differ).
-2. Sends an HTTP HEAD request to the VirtIO ISO endpoint:
+1. Reads physical RAM through `Win32_ComputerSystem.TotalPhysicalMemory` and computes the page file size. A failed query or a missing, non-numeric or non-positive size reports `FAIL` and exits with code 1 before any of the following steps.
+2. Creates `C:\Temp` if needed and adds TLS 1.2 to the protocols the process allows. `C:\Temp` is fixed on purpose: the ISO cache must survive the reboot and be found by the post-reboot script, which may run under another account than this one (a per-user `$env:TEMP` would differ).
+3. Sends an HTTP HEAD request to the VirtIO ISO endpoint:
    `https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso`.
-   If the request fails, it prints a warning and treats the remote timestamp as unknown.
-3. Decides whether to download, using the cached `C:\Temp\virtio-win.iso`:
+   If the request fails, or the response has no `Last-Modified` header, it prints a warning and treats the remote timestamp as unknown.
+4. Decides whether to download, using the cached `C:\Temp\virtio-win.iso`:
    - no cached copy: download;
    - remote `Last-Modified` newer than the cached copy: download;
    - cached copy at least as recent, or remote timestamp unknown: reuse the cache.
 
    This is a timestamp comparison, not a checksum or driver-version check.
-4. Downloads with `.NET WebClient` to `C:\Temp\virtio-win.iso.download` and moves it over the cache only after a complete transfer. On a failed download, deletion of the partial file is attempted; the script then continues with the existing cache (warning) or, without a cache, exits with code 1 before any further change.
-5. Mounts the ISO and runs the x86_64 QEMU Guest Agent MSI quietly, waiting for completion and requesting no installer-initiated restart. Exit codes 0, 1641 and 3010 are reported as success; any other code (or none) is reported as a warning, and the guest-agent service check in step 9 decides.
-6. Attempts to install both VirtIO storage drivers with `pnputil /add-driver ... /install`:
+5. Downloads with `System.Net.WebClient` to `C:\Temp\virtio-win.iso.download` and moves it over the cache only after a complete transfer. On a failed download, deletion of the partial file is attempted; the script then continues with the existing cache (warning) or, without a cache, exits with code 1 before any further change.
+6. Mounts the ISO (an ISO still mounted by an interrupted run is reused); a failed mount or a missing drive letter reports `FAIL` and exits with code 1 before anything is installed. Runs the x86_64 QEMU Guest Agent MSI quietly, waiting for completion and requesting no installer-initiated restart. Exit codes 0, 1641 and 3010 are reported as success; any other code (or none) is reported as a warning, and the guest-agent service check in step 10 decides.
+7. Attempts to install both VirtIO storage drivers with `pnputil /add-driver ... /install`:
    - VirtIO block: preferred relative path `viostor\w11\amd64\viostor.inf`.
    - VirtIO SCSI: preferred relative path `vioscsi\w11\amd64\vioscsi.inf`.
    - If a preferred path is missing, searches the ISO recursively for that INF filename and takes the first match whose full path contains `amd64`.
    - Exit codes 0, 1641 and 3010 are accepted as success (pnputil normally returns 0 or 3010); other codes are reported as warnings (the post-reboot script checks the driver store).
    - If no INF is found, prints a warning and skips that driver.
-7. Notes that SATA uses the Windows inbox `storahci` driver; it does not install it.
-8. Unmounts the ISO and keeps it in `C:\Temp` for the timestamp check if the script is re-run. The post-reboot script removes it once all of its checks pass.
-9. Checks for the `QEMU-GA` service, requests Automatic startup, and attempts to start it if stopped. After a start attempt, waits three seconds and refreshes the service status. A missing service or a service still not Running causes an explicit exit with code 1.
-10. Writes the CrashControl settings listed below and removes the `DedicatedDumpFile` registry value if present.
-11. Writes the pagefile registry configuration listed below.
-12. Waits five seconds and forces a reboot.
+8. Notes that SATA uses the Windows inbox `storahci` driver; it does not install it.
+9. Unmounts the ISO and keeps it in `C:\Temp` for the timestamp check if the script is re-run. The post-reboot script removes it once all of its checks pass.
+10. Checks for the `QEMU-GA` service, requests Automatic startup, and attempts to start it if it is not Running. After a start attempt, waits three seconds and queries the service again. A missing service or a service still not Running causes an explicit exit with code 1.
+11. Writes the CrashControl settings listed below and removes the `DedicatedDumpFile` registry value if present (an absent value is left alone). A failed write reports `FAIL` and exits with code 1 before the page file change and the reboot. If an old `C:\DedicatedDump.sys` file exists, prints a warning without deleting it; the post-reboot script refuses to seal while it exists.
+12. Writes the pagefile registry configuration listed below.
+13. Waits five seconds and forces a reboot.
 
 ### CrashControl settings
 
@@ -84,18 +87,18 @@ Registry path: `HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl`.
 
 Dumps are written through the page file only (no `DedicatedDumpFile`). Any system-managed or other page file configuration is replaced by one fixed page file:
 
-- Reads physical RAM through `Win32_ComputerSystem.TotalPhysicalMemory`.
-- Calculates the size once with `Get-PagefileSizeMB`: `Round((RAM bytes + 257MB) / 1MB, 0)`. The post-reboot script and `configure-dumps.ps1` use the identical function, so the post-reboot minimum and the reported requirement always equal the configured size.
+- Uses the physical RAM read in step 1 (`Win32_ComputerSystem.TotalPhysicalMemory`).
+- Calculates the size once with `Get-PagefileSizeMB`: `Round((RAM bytes + 257MB) / 1MB, 0)`. The post-reboot script and `configure-dumps.ps1` use the identical function with the RAM of the VM they run on: on the VM that prepared the image their minimum equals the configured size, while a VM with more RAM gets a larger requirement.
 - If Windows manages the page file automatically, turns that off through the documented read/write `Win32_ComputerSystem.AutomaticManagedPagefile` property (`Set-CimInstance`).
 - Replaces `PagingFiles` under `HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management` with exactly one MultiString entry, `C:\pagefile.sys <sizeMB> <sizeMB>`, dropping any other entries.
 - Uses equal initial and maximum sizes.
 - Does not delete or create page files directly: Windows applies the configuration on reboot. The post-reboot script checks the running system.
-- If either step fails, the script reports `FAIL` and exits with code 1 before the reboot.
+- If the CIM change or the registry write fails, the script reports `FAIL` and exits with code 1 before the reboot.
 
 ### Settings not managed by these scripts
 
-- **pvpanic:** no guest pvpanic driver is installed or checked by the golden-image scripts. The pipeline entry script attempts, best effort and non-fatal, to hot-add the pvpanic device to the running VM through the QEMU monitor (`virsh qemu-monitor-command --hmp 'device_add pvpanic,id=pvpanic0'`): `src/scripts/crash-injector/trigger-bsod-intentional.sh`, or `src/scripts/bsod-pipeline/bsod-runner.sh` after the pipeline rename. Adding the device does not install a guest driver, and whether the KubeVirt Panicked event is raised without one has not been verified.
-- **Boot recovery settings:** earlier proof-of-concept versions changed Windows boot recovery behavior (`bcdedit` boot-status policy, recovery and boot-menu options, `reagentc /disable`) and checked it after reboot. These settings are no longer required in this disposable-VM workflow, because each pytest run tears down its VM; the scripts neither change nor check them.
+- **pvpanic:** no guest pvpanic driver is installed or checked by the golden-image scripts. The pipeline entry script attempts, best effort and non-fatal, to hot-add the pvpanic device to the running VM through the QEMU monitor (`virsh qemu-monitor-command --hmp 'device_add pvpanic,id=pvpanic0'`): `src/scripts/crash-injector/trigger-bsod-intentional.sh` (a separately proposed pipeline runner may take over that step). Adding the device does not install a guest driver, and whether the KubeVirt Panicked event is raised without one has not been verified.
+- **Boot recovery settings:** earlier proof-of-concept versions changed Windows boot recovery behavior (`bcdedit` boot-status policy, recovery and boot-menu options, `reagentc /disable`) and checked it after reboot. The scripts no longer change or check them, leaving the Windows defaults, on the assumption that test VMs are disposable and are not booted back into Windows after a crash. That assumption is not enforced in this repository (`src/scripts/host/watch-crash.sh` starts the VM again after extracting evidence unless it runs with `--no-restart`), and how a restarted VM behaves without these settings has not been verified.
 
 ### Validation limits
 
@@ -108,7 +111,7 @@ Dumps are written through the page file only (no `DedicatedDumpFile`). Any syste
 
 Part 2 of golden-image preparation. It has no declared parameters. Run it as Administrator after the reboot from part 1 and before sealing.
 
-This is primarily a verification script. It also requests Automatic startup for the QEMU Guest Agent service and, only after every check passes, removes the pre-reboot ISO cache files. It does not attempt to start a stopped service, resize the pagefile, reinstall drivers, or fix CrashControl values.
+This is primarily a verification script. It also requests Automatic startup for the QEMU Guest Agent service and, only after every check passes, removes the pre-reboot ISO cache files. It does not attempt to start a stopped service, resize the pagefile, reinstall drivers, fix CrashControl values, or delete an old `C:\DedicatedDump.sys`. It sets `$ErrorActionPreference` to `Continue`, so every check runs and reports even when the caller prefers `Stop`.
 
 ### Active checks
 
@@ -116,14 +119,15 @@ This is primarily a verification script. It also requests Automatic startup for 
 2. **Storage drivers:** Checks the online driver store for entries whose original filenames contain `viostor` and `vioscsi`. Checks whether the inbox SATA driver exists. Missing drivers generate `WARN` messages rather than marking failure. The warnings note that the matching disk bus may not boot without its driver; a warning is not assurance that every disk bus is supported.
 3. **CrashControl DWORDs:** Compares these five values against the golden-image expectations: `CrashDumpEnabled=7`, `AutoReboot=0`, `AlwaysKeepMemoryDump=1`, `Overwrite=1`, and `LogEvent=1`. Any mismatch marks failure.
 4. **Dedicated dump setting:** Reads `DedicatedDumpFile`. A nonempty value marks failure; a missing or empty value follows the success branch. The stated golden-image policy is for the value to be absent.
-5. **Pagefile management:** Reads `Win32_ComputerSystem.AutomaticManagedPagefile`. Automatic management still enabled marks failure. This reads the same CIM property the pre-reboot script sets.
-6. **Active pagefile:** Reads `Win32_PageFileUsage` for C: entries and checks that `AllocatedBaseSize` is at least `Get-PagefileSizeMB` of the RAM — the same `Round((RAM bytes + 257MB) / 1MB, 0)` the pre-reboot script configured. Reports allocation and current usage on success. An undersized or missing active pagefile marks failure.
+5. **Old dedicated dump file:** If `C:\DedicatedDump.sys`, created by older preparation scripts, still exists, marks failure: the file is unused but would be sealed into the image. The script does not delete it; remove it manually once the `DedicatedDumpFile` value is gone and the VM has rebooted (Windows can hold the file open until then), and re-run.
+6. **Pagefile management:** Reads `Win32_ComputerSystem` with `-ErrorAction Stop`. A failed query or a missing or non-positive `TotalPhysicalMemory` marks failure, and neither pagefile check can then pass. Otherwise automatic management still enabled marks failure. This reads the same CIM property the pre-reboot script sets.
+7. **Active pagefile:** Reads `Win32_PageFileUsage` for C: entries and checks that `AllocatedBaseSize` is at least `Get-PagefileSizeMB` of the RAM — the same `Round((RAM bytes + 257MB) / 1MB, 0)` the pre-reboot script configured. Reports allocation and current usage on success. An undersized or missing active pagefile marks failure.
 
 ### Result, cleanup and sealing
 
 - `OK` lines describe checks that passed.
 - `WARN` lines do not set the script's failure flag.
-- If any active check sets that flag, the script prints `DO NOT SEAL` and explicitly exits with code 1, instructing the operator to fix issues and rerun part 1. The ISO cache is kept for that re-run.
+- If any active check sets that flag, the script prints `DO NOT SEAL` and explicitly exits with code 1, instructing the operator to fix the issues (re-running part 1 if needed) and re-run this script. The ISO cache is kept for that re-run.
 - If no check sets the flag, it removes the pre-reboot cache files, using only these literal paths: `C:\Temp\virtio-win.iso` and `C:\Temp\virtio-win.iso.download`.
   - A missing file is already clean, so running the script again is safe.
   - A still-mounted ISO is not removed and is reported as `FAIL`.
@@ -132,7 +136,7 @@ This is primarily a verification script. It also requests Automatic startup for 
 - Only when every check passed and the cleanup succeeded does it print `All checks passed` and the following command:
 
 ```powershell
-sysprep /generalize /oobe /shutdown /quiet
+C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /quiet
 ```
 
 The command is printed only. Sealing remains a separate operator action.
@@ -158,7 +162,7 @@ Unlike the golden-image pair, its registry path, recommended values, dump-type m
 |---|---|
 | `-DumpType <string>` | Selects a key from the configuration's `crashDumpTypes`. Defaults to `recommended.crashDumpType`. Valid names depend on the supplied configuration; they are not hard-coded in the script. |
 | `-VerifyOnly` | Reads and compares current settings without registry changes or NotMyFault staging, even with `-StageNotMyFault`. |
-| `-StageNotMyFault` | Apply mode only: stage NotMyFault in `C:\Temp\nmf` for an intentional crash run. Off by default. |
+| `-StageNotMyFault` | Apply mode only: stage a trusted NotMyFault in `C:\Temp\nmf` for an intentional crash run. Off by default. |
 | `-DataFile <string>` | Path to the required configuration JSON. Supply it when running outside the expected repository layout. |
 
 **Configuration dependency:** The script expects `crash-control.json`. Without `-DataFile`, it resolves three levels above its script directory and looks for `src\data\crash-control.json`. The configuration supplies `registryPath`, `recommended.crashDumpType`, `recommended.values`, `crashDumpTypes.<selected type>.CrashDumpEnabled`, and `pageFile.path` / `pageFile.value`. The configuration file is [`src/data/crash-control.json`](../../data/crash-control.json); it is data, not an additional script.
@@ -181,14 +185,14 @@ Run apply mode from an elevated PowerShell session. These examples use a placeho
 ### Apply mode
 
 1. Reads and parses the configuration and validates the selected dump-type name.
-2. Builds the desired registry values from `recommended.values`, replacing `CrashDumpEnabled` with the selected type's numeric value.
+2. Builds the desired registry values from `recommended.values`, replacing `CrashDumpEnabled` with the selected type's numeric value. It ignores a `DedicatedDumpFile` entry, which an older configuration may still contain, and writes a `WARN` line to stderr instead of writing that value.
 3. Requires an Administrator token; otherwise emits failure JSON and exits with code 3.
 4. Sets `rebootRequired` when the current `CrashDumpEnabled` differs from the selected value or a `DedicatedDumpFile` value is present; both take effect only after a reboot.
 5. Creates the configured registry path if needed.
-6. Removes any existing `DedicatedDumpFile` value (dumps go through the page file only; `crash-control.json` no longer recommends it), then writes all desired values. Strings use ExpandString and numeric values use DWORD.
-7. Only with `-StageNotMyFault`: if `C:\Temp\nmf\notmyfaultc64.exe` is missing, downloads the Sysinternals NotMyFault archive (adding TLS 1.2 to the allowed protocols), extracts it, deletes the archive, and unblocks the executable. `C:\Temp\nmf` is the fixed path the host preflight and pipeline scripts check through the guest agent. A failure is written to stderr as a `WARN` line and does not change the JSON on stdout. Without the switch nothing is downloaded. The script does not execute NotMyFault or trigger a crash.
+6. Removes an existing `DedicatedDumpFile` value (dumps go through the page file only; the current `crash-control.json` no longer recommends it). An absent value is left alone; a value that cannot be removed, or any other CrashControl write error, emits failure JSON and exits with code 4. Then writes all desired values. Strings use ExpandString and numeric values use DWORD.
+7. Only with `-StageNotMyFault`: keeps an existing `C:\Temp\nmf\notmyfaultc64.exe` only if it is trusted; otherwise downloads the Sysinternals NotMyFault archive (adding TLS 1.2 to the allowed protocols), extracts it, deletes the archive, checks the extracted executable and only then unblocks it. A copy is trusted only when `Get-AuthenticodeSignature` reports `Valid` and the signer certificate's organization is `Microsoft Corporation`, the publisher of the Sysinternals tools; this is a publisher check, not a pinned hash, and it depends on the guest trusting the certificate chain. An untrusted cached or downloaded copy is renamed to `notmyfaultc64.exe.untrusted` (replacing an earlier quarantined copy; it is never run), so an untrusted download leaves no executable at the fixed path. If such a rename fails, the script emits failure JSON and exits with code 5 instead of leaving the untrusted file in place. `C:\Temp\nmf` is the fixed path the host scripts check through the guest agent. A failure or a replaced copy is written to stderr as a `WARN` line and does not change the JSON on stdout. Without the switch nothing is downloaded. The script does not execute NotMyFault or trigger a crash.
 
-   The host `preflight-rhov.sh` passes `-StageNotMyFault` only when it runs with `--require-trigger`, and then requires the binary to exist, so a failed staging stops an intentional run. An intentional run must therefore call preflight with `--require-trigger`; the new pipeline runner (`src/scripts/bsod-pipeline/bsod-runner.sh`) does not pass it yet, and its update is pending. Watch runs do not pass it, so nothing is staged.
+   The script stages nothing unless the caller passes `-StageNotMyFault`. A caller that then requires the binary, such as `preflight-rhov.sh --require-trigger` (which checks that the file exists), fails unless it passed the switch or a copy is already present. Watch runs must not pass it.
 8. Reads the desired registry values back, compares them, reports pagefile configuration, and emits JSON.
 
 ### Verify-only mode
@@ -197,11 +201,12 @@ Run apply mode from an elevated PowerShell session. These examples use a placeho
 - Does not perform the Administrator check used by apply mode.
 - Does not modify registry settings, download anything, or stage NotMyFault.
 - Sets `action` to `verified`, `applied` to `null`, and `rebootRequired` to `false`.
+- Reports a `DedicatedDumpFile` value that is still present in `dedicatedDumpFile` and counts it as a mismatch.
 - Compares the live values against the selected desired configuration. Environment variables are expanded on both sides before comparison; missing values do not match.
 
 ### Pagefile reporting and reboot behavior
 
-The script reads pagefile registry entries from the configured location and joins them with `; ` for reporting. It reads physical RAM (read-only) and computes `pageFile.requiredMB` with `Get-PagefileSizeMB`, the golden-image size. `pageFile.adequate` is true only when an entry on `C:` has initial and maximum sizes of at least `requiredMB` (a dump is written into the space allocated at boot); system-managed (`?:\pagefile.sys` or `0 0` sizes), missing, smaller or other-drive page files, and an unreadable RAM size, report `false` (never `null`; the host preflight requires `true`). `requiredMB` follows the RAM of the VM being checked, so a VM with more RAM than the golden image was prepared with reports `false`.
+The script reads pagefile registry entries from the configured location and joins them with `; ` for reporting. It reads physical RAM (read-only) and computes `pageFile.requiredMB` with `Get-PagefileSizeMB`, the golden-image size. `pageFile.adequate` is true only when an entry on `C:` has initial and maximum sizes of at least `requiredMB` (a dump is written into the space allocated at boot); system-managed (`?:\pagefile.sys` or `0 0` sizes), missing, smaller or other-drive page files, and an unreadable, missing or non-positive RAM size, report `false` (never `null`; the host preflight requires `true`). `requiredMB` follows the RAM of the VM being checked, so a VM with more RAM than the golden image was prepared with reports `false`.
 
 The script does not resize the pagefile (that belongs to `golden-image-pre-reboot.ps1`), check active kernel allocation, or verify free disk space. It does not reboot. Verify-only mode reports `rebootRequired` as `false` and does not infer whether an earlier reboot is pending.
 
@@ -216,12 +221,13 @@ The normal output is one JSON object with:
 | `requestedDumpType` | The selected configuration key. |
 | `applied` | Desired values written in apply mode; `null` in verify-only mode. |
 | `current` | Live registry values for the desired keys. |
-| `matchesRecommended` | Whether all desired keys match, including the selected dump-type override. |
+| `dedicatedDumpFile` | The live `DedicatedDumpFile` value, or `null` when absent. |
+| `matchesRecommended` | Whether all desired keys match, including the selected dump-type override, and no `DedicatedDumpFile` value is present. |
 | `rebootRequired` | Whether apply mode detected a different `CrashDumpEnabled` or removed a `DedicatedDumpFile` value. |
 | `pageFile.configured` | Configured pagefile entries joined by `; `, or `null`. |
 | `pageFile.adequate` | Boolean: a `C:` entry with initial and maximum sizes of at least `requiredMB` is configured (see above). |
-| `pageFile.requiredMB` | RAM + 257 MB in MB (`Get-PagefileSizeMB`), or `null` when RAM cannot be read. |
+| `pageFile.requiredMB` | RAM + 257 MB in MB (`Get-PagefileSizeMB`), or `null` when RAM cannot be read or is not positive. |
 
-An unknown dump type emits `{ "ok": false, "error": "...", "script": "configure-dumps.ps1" }` and exits with code 2. A non-elevated apply attempt emits the same failure shape and exits with code 3. A missing configuration is a terminating error; other uncaught parsing or registry errors are not wrapped by the explicit failure-JSON helper.
+An unknown dump type emits `{ "ok": false, "error": "...", "script": "configure-dumps.ps1" }` and exits with code 2. A non-elevated apply attempt emits the same failure shape and exits with code 3, a CrashControl write or `DedicatedDumpFile` removal error exits with code 4, and an untrusted NotMyFault copy that cannot be renamed away exits with code 5. A missing configuration is a terminating error; other uncaught parsing errors are not wrapped by the explicit failure-JSON helper.
 
 A settings mismatch or inadequate pagefile does not itself cause an explicit failure exit: inspect `matchesRecommended` and `pageFile.adequate`, not only `ok`. Likewise, successful normal output does not establish that the best-effort NotMyFault staging succeeded; check stderr for its `WARN` line.
