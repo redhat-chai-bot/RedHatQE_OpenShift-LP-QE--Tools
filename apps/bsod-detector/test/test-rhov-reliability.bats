@@ -205,12 +205,7 @@ case "$1" in
   *) exit 93 ;;
 esac
 EOF
-  cat > "$BATS_TMPDIR/mockbin/extract-evtx" <<'EOF'
-#!/usr/bin/env bash
-[[ "${EVTX_FAIL:-0}" == 0 ]] || { echo '{"ok":false,"error":"fixture parse failure"}'; exit 1; }
-echo '{"ok":true,"crash":{"detected":true},"events":[]}'
-EOF
-  chmod +x "$BATS_TMPDIR/mockbin/oc" "$BATS_TMPDIR/mockbin/extract-evtx"
+  chmod +x "$BATS_TMPDIR/mockbin/oc"
 }
 
 write_recovery_metadata() {
@@ -228,8 +223,8 @@ write_recovery_metadata() {
 run_recovery() {
   run env PATH="$BATS_TMPDIR/mockbin:$PATH" REAL_PYTHON="$REAL_PYTHON" EVIDENCE_ROOT="$EVIDENCE_ROOT" \
     BSOD_DET__GUEST_FS__CTR_IMG='registry.test/guestfs:fixture' \
-    OC_LOG="$OC_LOG" BSOD_EXTRACT_EVTX_BIN="$BATS_TMPDIR/mockbin/extract-evtx" \
-    MISSING_GUESTFISH="${MISSING_GUESTFISH:-0}" DUMP_CODE="${DUMP_CODE:-10}" EVTX_FAIL="${EVTX_FAIL:-0}" MOUNT_SOURCE="${MOUNT_SOURCE:-}" \
+    OC_LOG="$OC_LOG" \
+    MISSING_GUESTFISH="${MISSING_GUESTFISH:-0}" DUMP_CODE="${DUMP_CODE:-10}" MOUNT_SOURCE="${MOUNT_SOURCE:-}" \
     bash "$HOST_DIR/extract--guest-os--crash-info.sh" --metadata "$BATS_TMPDIR/metadata.json"
 }
 
