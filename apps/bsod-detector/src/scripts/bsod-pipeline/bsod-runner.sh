@@ -19,7 +19,7 @@ Where:
 
 Environment:
     BSOD_DET__NAMESPACE, BSOD_DET__VM__NAME  Target VM (required).
-    BSOD_DET__RECOVERY__IMAGE                Recovery image, digest-pinned <image>@sha256:<64 hex> (required).
+    BSOD_DET__RECOVERY__IMAGE                Recovery image (required); an @sha256 digest pin is dropped.
     BSOD_DET__CONFIRM_TARGET                 Must equal BSOD_DET__VM__NAME (intentional mode only).
     BSOD_DET__EVIDENCE__DIR                  Evidence mount (default: /mnt/persistent-bsod-evidence).
     BSOD_EVIDENCE_VOLUME_KIND, BSOD_DET__EVIDENCE__STORAGE_ID, BSOD_DET__MEMORY__DUMP_PVC,
@@ -41,6 +41,8 @@ typeset evidenceId="${BSOD_DET__EVIDENCE__STORAGE_ID:-shared-bsod-evidence}"
 typeset memoryPvc="${BSOD_DET__MEMORY__DUMP_PVC:-${vm}-memdump}"
 typeset snapClass="${BSOD_DET__SNAPSHOT__CLASS:-ocs-storagecluster-rbdplugin-snapclass}"
 typeset recoveryImage="${BSOD_DET__RECOVERY__IMAGE:-}"
+# Strip digest pin (@sha256:...) — always use the tag so a stale digest doesn't block the pipeline.
+recoveryImage="${recoveryImage%%@*}"
 typeset readyTimeout="${BSOD_DET__READY__TIMEOUT:-300}"
 typeset preflightTimeout="${BSOD_DET__PREFLIGHT__TIMEOUT:-1800}"
 typeset nmfGuest='C:\Temp\nmf\notmyfaultc64.exe'
@@ -94,9 +96,9 @@ esac
 [[ -n "${vm}" && -n "${ns}" ]] || Die 'BSOD_DET__VM__NAME and BSOD_DET__NAMESPACE must identify the disposable RHOV test VM'
 [[ "${readyTimeout}" =~ ^[1-9][0-9]*$ && "${preflightTimeout}" =~ ^[1-9][0-9]*$ ]] ||
     Die 'BSOD_DET__READY__TIMEOUT and BSOD_DET__PREFLIGHT__TIMEOUT must be positive integers'
-# Same rule as preflight-rhov.sh, checked here so nothing is created before it fails.
-[[ "${recoveryImage}" =~ @sha256:[0-9a-fA-F]{64}$ ]] ||
-    Die "BSOD_DET__RECOVERY__IMAGE must be a digest-pinned image (<image>@sha256:<64 hex>), got: '${recoveryImage:-<unset>}'"
+# There is no default image. Checked here so nothing is created before it fails.
+[[ -n "${recoveryImage}" ]] ||
+    Die "BSOD_DET__RECOVERY__IMAGE must name the recovery image, got: '${BSOD_DET__RECOVERY__IMAGE:-<unset>}'"
 # The target location is not authorization: the operator must name the VM again.
 if [ "${mode}" = intentional ] && [ "${BSOD_DET__CONFIRM_TARGET:-}" != "${vm}" ]; then
     Die "BSOD_DET__CONFIRM_TARGET must be set to '${vm}' to authorize crashing this VM (got: '${BSOD_DET__CONFIRM_TARGET:-<unset>}')"
@@ -160,7 +162,7 @@ fi
 
 typeset -a watchArgArr=("${commonArgArr[@]}" --ready-file "${readyFile}" --no-restart)
 [ "${mode}" = watch ] || watchArgArr+=(--intentional)
-bash "${hostDir}/watch-crash.sh" "${watchArgArr[@]}" &
+bash "${hostDir}/bsod-watcher.sh" "${watchArgArr[@]}" &
 watcherPid=$!
 
 typeset -i es=0 readyDeadline=$((SECONDS + readyTimeout))
