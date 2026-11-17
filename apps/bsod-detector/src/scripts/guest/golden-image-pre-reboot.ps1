@@ -23,8 +23,27 @@ function Test-InstallerSuccess ([Nullable[int]]$ExitCode) {
     $null -ne $ExitCode -and $ExitCode -in 0, 1641, 3010
 }
 
-New-Item -ItemType Directory -Force -Path C:\Temp | Out-Null
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Replaces any system-managed or other page file configuration with one fixed C:\pagefile.sys.
+# Automatic management is turned off through the documented read/write
+# Win32_ComputerSystem.AutomaticManagedPagefile property, then PagingFiles is set to exactly
+# this entry (other entries are dropped). No page file is deleted here: Windows applies the
+# configuration at the next boot.
+function Set-FixedPagefile ([int64]$SizeMB) {
+    $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+    if ($computer.AutomaticManagedPagefile) {
+        Set-CimInstance -InputObject $computer -Property @{ AutomaticManagedPagefile = $false } -ErrorAction Stop
+        Write-Host 'OK: automatic pagefile management disabled'
+    }
+    $entry = 'C:\pagefile.sys {0} {0}' -f $SizeMB
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -Name PagingFiles -Type MultiString -Value @($entry) -ErrorAction Stop
+    Write-Host "OK: PagingFiles set to '${entry}' (RAM + 257 MB), active after reboot"
+}
+
+# C:\Temp is a fixed location on purpose: the ISO cache must survive the reboot and be found by
+# golden-image-post-reboot.ps1, which may run under another account (per-user $env:TEMP differs).
+New-Item -ItemType Directory -Force -Path 'C:\Temp' | Out-Null
+# Add TLS 1.2 to the protocols this process already allows instead of replacing them.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $isoURL  = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso'
 $isoPath = 'C:\Temp\virtio-win.iso'
 
@@ -152,20 +171,15 @@ Write-Host 'OK: Crash dump registry set (CrashDumpEnabled=7, no DedicatedDumpFil
 
 # Fixed-size C:\pagefile.sys of RAM + 257 MB with automatic management off, active after
 # the reboot; golden-image-post-reboot.ps1 checks this size.
-Write-Host "`n--- Pre-allocating pagefile.sys ---"
-$mm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'
-Set-ItemProperty -Path $mm -Name AutomaticManagedPagefile -Value 0 -Type DWord
-
+Write-Host "`n--- Configuring pagefile.sys ---"
 $ramBytes = (Get-CimInstance -ClassName Win32_ComputerSystem).TotalPhysicalMemory
 $pagefileSizeMB = Get-PagefileSizeMB $ramBytes
-$pagefilePath = 'C:\pagefile.sys'
-Write-Host "OK: pagefile.sys will be created by Windows on next reboot at ${pagefileSizeMB} MB ($([math]::Round($pagefileSizeMB / 1024, 1)) GB)"
-
-# Set pagefile via registry (PagingFiles REG_MULTI_SZ) - avoids CIM type inference issues.
-# Format: "<path> <initialMB> <maxMB>"
-Set-ItemProperty -Path $mm -Name PagingFiles -Type MultiString -Value @("${pagefilePath} ${pagefileSizeMB} ${pagefileSizeMB}")
-Write-Host "OK: pagefile.sys registered via registry (${pagefileSizeMB} MB = RAM + 257MB)"
-Write-Host 'OK: Pagefile pre-allocation complete - active after reboot'
+try {
+    Set-FixedPagefile $pagefileSizeMB
+} catch {
+    Write-Error "FAIL: pagefile configuration failed: $($_.Exception.Message)"
+    exit 1
+}
 
 Write-Host "`n=== All steps complete. Rebooting in 5 seconds... ==="
 Start-Sleep -Seconds 5
