@@ -6,6 +6,7 @@ Checks against the script sources run once those changes are present; until then
 skipped, which is why this README must be merged after them. Nothing is executed.
 """
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -16,6 +17,8 @@ GUEST_DIR = APP_DIR / 'src' / 'scripts' / 'guest'
 README = GUEST_DIR / 'README.md'
 PRE_SCRIPT = GUEST_DIR / 'golden-image-pre-reboot.ps1'
 POST_SCRIPT = GUEST_DIR / 'golden-image-post-reboot.ps1'
+CONFIGURE_SCRIPT = GUEST_DIR / 'configure-dumps.ps1'
+DATA_FILE = APP_DIR / 'src' / 'data' / 'crash-control.json'
 CLEANUP_PATHS = ('C:\\Temp\\virtio-win.iso', 'C:\\Temp\\virtio-win.iso.download')
 PAGEFILE_FORMULA = 'Round((RAM bytes + 257MB) / 1MB, 0)'
 
@@ -44,6 +47,10 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn('no longer required in this disposable-VM workflow', self.readme)
         for path in CLEANUP_PATHS:
             self.assertIn(f'`{path}`', self.readme)
+        self.assertIn('Win32_ComputerSystem.AutomaticManagedPagefile', self.readme)
+        self.assertIn('pageFile.requiredMB', self.readme)
+        self.assertIn('initial and maximum sizes of at least `requiredMB`', self.readme)
+        self.assertNotIn('If the recommendation includes `DedicatedDumpFile`', self.readme)
 
     def test_readme_matches_scripts_when_companion_changes_are_present(self):
         pre = PRE_SCRIPT.read_text(encoding='utf-8')
@@ -57,6 +64,19 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn("Remove-SetupCacheFile @('{}', '{}')".format(*CLEANUP_PATHS), post)
         self.assertIn('$ExitCode -in 0, 1641, 3010', pre)
         self.assertIn('Exit codes 0, 1641 and 3010 are reported as success', self.readme)
+        if 'function Set-FixedPagefile' in pre:
+            self.assertIn('AutomaticManagedPagefile = $false', pre)
+            self.assertNotIn('-Name AutomaticManagedPagefile -Value 0', pre)
+
+    def test_readme_matches_configure_dumps_when_its_changes_are_present(self):
+        script = CONFIGURE_SCRIPT.read_text(encoding='utf-8')
+        if 'function Test-PageFileAdequate' not in script:
+            self.skipTest('configure-dumps.ps1 changes are not present yet; this README must merge after them')
+        data = json.loads(DATA_FILE.read_text(encoding='utf-8'))
+        self.assertNotIn('DedicatedDumpFile', data['recommended']['values'])
+        self.assertIn('requiredMB = $requiredMB', script)
+        self.assertIn('[Console]::Error.WriteLine', script)
+        self.assertIn('no longer recommends it', self.readme)
 
 
 if __name__ == '__main__':
