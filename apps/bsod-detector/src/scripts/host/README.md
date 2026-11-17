@@ -205,7 +205,7 @@ evidence-summary.json        (final pipeline verdict)
   - `ok == true` — script ran successfully
   - `matchesRecommended == true` — all registry values match expected
   - `current.AutoReboot == 0` — VM will stay frozen after BSOD
-  - `pageFile.adequate == true` — DedicatedDumpFile or pagefile is adequate
+  - `pageFile.adequate == true` — a fixed pagefile of at least RAM + 257 MB is configured
   - `rebootRequired == false` — no pending reboot needed; if true, do `virtctl stop && virtctl start`
 
 **8. Guest path verification**

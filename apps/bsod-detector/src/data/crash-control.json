@@ -19,14 +19,13 @@
       "LogEvent": 1,
       "AutoReboot": 0,
       "MinidumpDir": "%SystemRoot%\\Minidump",
-      "DumpFile": "%SystemRoot%\\MEMORY.DMP",
-      "DedicatedDumpFile": "C:\\DedicatedDump.sys"
+      "DumpFile": "%SystemRoot%\\MEMORY.DMP"
     },
-    "notes": "CrashDumpEnabled=7 (Automatic). pagefile.sys cannot be created on KVM with VirtIO Balloon; full physical memory captured via KubeVirt vm-memory.elf.tar.gz. AutoReboot=0 keeps VM frozen. Minidump and on-disk MEMORY.DMP are blocked on this platform."
+    "notes": "CrashDumpEnabled=7 (Automatic). AutoReboot=0 keeps the VM frozen. Dumps are written through the page file only: golden-image-pre-reboot.ps1 configures a fixed C:\\pagefile.sys of RAM + 257 MB, and configure-dumps.ps1 removes any DedicatedDumpFile value. KubeVirt vm-memory.elf.tar.gz additionally captures full physical memory."
   },
   "pageFile": {
     "path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management",
     "value": "PagingFiles",
-    "notes": "A complete dump needs a system-managed or fixed page file on the system drive at least as large as physical RAM (+1MB). Kernel/automatic dumps need less but still require a page file on the system volume, or a DedicatedDumpFile configured under CrashControl."
+    "notes": "Adequate when PagingFiles holds an entry on C: (\"<path> <initialMB> <maxMB>\") whose initial and maximum sizes are both at least physical RAM + 257 MB, the size golden-image-pre-reboot.ps1 configures. System-managed or missing page files are not adequate; DedicatedDumpFile is not used."
   }
 }
