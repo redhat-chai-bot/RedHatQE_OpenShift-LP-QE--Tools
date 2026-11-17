@@ -43,8 +43,9 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn('device_add pvpanic,id=pvpanic0', self.readme)
         self.assertIn('best effort and non-fatal', self.readme)
         self.assertIn('src/scripts/crash-injector/trigger-bsod-intentional.sh', self.readme)
-        self.assertIn('leaving the Windows defaults', self.readme)
-        self.assertIn('`src/scripts/host/watch-crash.sh` starts the VM again after extracting evidence unless it runs with `--no-restart`', self.readme)
+        self.assertIn('intentionally leave the Windows defaults, because the intended test flow does not restart a VM after a simulated crash', self.readme)
+        self.assertIn('`src/scripts/host/watch-crash.sh` still starts the VM again after extracting evidence unless it runs with `--no-restart`', self.readme)
+        self.assertIn('### Pinned virtio-win ISO', self.readme)
         self.assertIn('must not have more RAM than the VM that prepared it', self.readme)
         self.assertIn('C:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /shutdown /quiet', self.readme)
         for path in CLEANUP_PATHS:
@@ -81,6 +82,11 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn('Exit codes 0, 1641 and 3010 are reported as success', self.readme)
         self.assertIn('AutomaticManagedPagefile = $false', pre)
         self.assertNotIn('-Name AutomaticManagedPagefile -Value 0', pre)
+        # The README documents exactly the virtio-win build and digest the script pins.
+        isoURL = re.search(r"(?m)^\$isoURL\s*=\s*'([^']+)'", pre).group(1)
+        isoSHA256 = re.search(r"(?m)^\$isoSHA256\s*=\s*'([0-9a-f]{64})'", pre).group(1)
+        self.assertIn(f'`{isoURL}`', self.readme)
+        self.assertIn(f'`{isoSHA256}`', self.readme)
         # Memory is validated before any change; an old dump file only warns before, and refuses sealing after, the reboot.
         self.assertLess(pre.index('if (-not ($ramBytes -gt 0)) {'), pre.index("New-Item -ItemType Directory -Force -Path 'C:\\Temp'"))
         self.assertIn("reads the guest's physical memory size first", self.readme)
