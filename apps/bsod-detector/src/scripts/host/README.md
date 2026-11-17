@@ -326,14 +326,15 @@ guest-agent.py <cmd>
         → PowerShell / program execution
 ```
 
-**Environment Variables** (re-read at resolve time, not just import time):
+**Environment Variables** (read once per invocation; each run resolves its own target, with no module-level state):
 
 | Variable | Purpose |
 |---|---|
-| `BSOD_DET__VM__NAME` | Target VM name |
+| `BSOD_DET__VM__NAME` | Target VM name (the only VMI in scope is used if unset) |
 | `BSOD_DET__NAMESPACE` | Kubernetes namespace |
 | `BSOD_DET__POD__NAME` | Virt-launcher pod (auto-resolved if unset) |
 | `BSOD_DET__DOMAIN__NAME` | Libvirt domain name (auto-derived as `<ns>_<vm>`) |
+| `BSOD_TRIGGER_CONFIRM_TIMEOUT` | `exec-crash` confirmation window in seconds (default 45) |
 
 **Subcommands**:
 - `ping` — QGA liveness check
@@ -341,7 +342,8 @@ guest-agent.py <cmd>
 - `exec-crash <program> [args]` — run crash command (handles disconnect as success)
 - `psfile <local.ps1> [--companion ...] [-- args]` — upload and run PowerShell script
 - `put <local> <guestpath>` — upload file
-- `get <guestpath> <local>` — download file
+
+Run `guest-agent.py` without arguments for the full usage, exit statuses and configuration.
 
 ---
 
@@ -632,17 +634,19 @@ Output, when its stage succeeds: `guest-fs--crash-info--<partition>.tgz`. It may
 
 | Function | Purpose |
 |----------|---------|
-| `_oc()` | Execute OpenShift CLI command, return stdout or empty string |
-| `_resolve_pod()` | Find virt-launcher pod for a given VM in namespace |
-| `resolve_target()` | Auto-detect and populate NS, VM, POD, DOM from cluster; re-reads environment variables |
-| `agent()` | Send QEMU agent command via virsh; return response payload JSON |
-| `guest_exec()` | Execute program in guest; optionally wait for completion |
-| `guest_exec_crash()` | Execute crash program; handle disconnect as success |
-| `guest_put()` | Upload local file to guest (512KB chunks via base64) |
-| `guest_get()` | Download guest file (1MB chunks, seek-based retries); auto-compress large files |
-| `_print_exec_result()` | Output guest command results (stdout, stderr); return exit code |
-| `_psfile_args()` | Parse companion file uploads and PowerShell arguments |
-| `main()` | Parse CLI commands and dispatch to above functions |
+| `RunOC()` | Execute a bounded OpenShift CLI read, return stdout or empty string |
+| `FindLauncherPod()` | Find virt-launcher pod for a given VM in namespace |
+| `GuestAgent.FromEnvironment()` | Create a client from the `BSOD_DET__*` target variables |
+| `GuestAgent.ResolveTarget()` | Resolve namespace, VM, Pod and domain once; cache the `GuestTarget` on that instance |
+| `GuestAgent.SendCommand()` | Send QEMU agent command via virsh; return the decoded `return` payload |
+| `GuestAgent.LaunchProgram()` | Start a guest program with captured output; return its PID |
+| `GuestAgent.GetExecStatus()` | Return the raw guest-exec-status reply for a PID |
+| `GuestAgent.GuestExec()` | Execute program in guest and wait for completion |
+| `GuestAgent.GuestExecCrash()` | Execute crash program; handle disconnect as success |
+| `GuestAgent.GuestPut()` | Upload local file to guest (64 KiB chunks via base64) |
+| `PrintExecResult()` | Output guest command results (stdout, stderr); return exit code |
+| `ParsePSfileArgs()` | Parse companion file uploads and PowerShell arguments |
+| `Main()` | Parse CLI commands and dispatch to above functions |
 
 #### Subcommands
 
@@ -653,14 +657,14 @@ Output, when its stage succeeds: `guest-fs--crash-info--<partition>.tgz`. It may
 | `exec-crash <prog> [args]` | Run crash command (disconnect = success) |
 | `psfile <script.ps1> [--companion LOCAL GUEST -- args]` | Upload + run PowerShell script |
 | `put <local> <guestpath>` | Upload file |
-| `get <guestpath> <local>` | Download file |
 
 #### Environment Variables
 
-- `BSOD_DET__VM__NAME`: Target VM name
+- `BSOD_DET__VM__NAME`: Target VM name (the only VMI in scope is used if unset)
 - `BSOD_DET__NAMESPACE`: Kubernetes namespace
 - `BSOD_DET__POD__NAME`: Virt-launcher pod (auto-resolved)
 - `BSOD_DET__DOMAIN__NAME`: Libvirt domain (derived as `<ns>_<vm>` if unset)
+- `BSOD_TRIGGER_CONFIRM_TIMEOUT`: `exec-crash` confirmation window in seconds (default 45)
 
 #### Communication Path
 
