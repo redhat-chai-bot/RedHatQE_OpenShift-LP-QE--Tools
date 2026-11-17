@@ -8,6 +8,7 @@ no cmdlets, providers or applications. Without `pwsh` those checks are skipped, 
 BSOD_DET__TEST__REQUIRE_PWSH=1.
 """
 
+import importlib.util
 import json
 import os
 import re
@@ -23,6 +24,27 @@ GUEST_DIR = APP_DIR / 'src' / 'scripts' / 'guest'
 SCRIPT = GUEST_DIR / 'configure-dumps.ps1'
 PARTNER_SCRIPTS = (GUEST_DIR / 'golden-image-pre-reboot.ps1', GUEST_DIR / 'golden-image-post-reboot.ps1')
 DATA_FILE = APP_DIR / 'src' / 'data' / 'crash-control.json'
+HOST_DIR = APP_DIR / 'src' / 'scripts' / 'host'
+NMF_DIR = 'C:\\Temp\\nmf'
+NMF_PATH = 'C:\\Temp\\nmf\\notmyfaultc64.exe'
+
+# Mock cmdlets for Invoke-NotMyFaultStaging; they exist only inside the harness's empty runspace,
+# record each call and simulate the guest file system from $global:MockState.
+STAGING_MOCKS = r'''
+function Test-Path ([string]$LiteralPath) { $global:MockLog.Add("Test-Path ${LiteralPath}"); $global:MockState['existing'] -contains $LiteralPath }
+function New-Item ([string]$ItemType, [switch]$Force, [string]$Path) { $global:MockLog.Add("New-Item ${Path}") }
+function Out-Null { process { } }
+function Save-NotMyFaultArchive ([string]$Path) {
+    $global:MockLog.Add("Save-NotMyFaultArchive ${Path}")
+    if ($global:MockState['downloadFails'] -contains 'true') { throw 'The remote name could not be resolved' }
+}
+function Expand-Archive ([string]$Path, [string]$DestinationPath, [switch]$Force) {
+    $global:MockLog.Add("Expand-Archive ${Path}")
+    if ($global:MockState['extractCreates'] -contains 'true') { $global:MockState['existing'] = @($global:MockState['existing']) + 'C:\Temp\nmf\notmyfaultc64.exe' }
+}
+function Remove-Item ([string]$LiteralPath, [switch]$Force, $ErrorAction) { $global:MockLog.Add("Remove-Item ${LiteralPath}") }
+function Unblock-File ([string]$Path, $ErrorAction) { $global:MockLog.Add("Unblock-File ${Path}") }
+'''
 HARNESS = Path(__file__).resolve().parent / 'fixtures' / 'ps-function-harness.ps1'
 
 # Expected pagefile sizes (MB), shared with the golden-image tests. The 4095.5 and 16383.5 MiB
@@ -99,11 +121,47 @@ class ConfigureDumpsStaticTests(unittest.TestCase):
         self.assertIn('DedicatedDumpFile is not used', self.data['pageFile']['notes'])
         self.assertIn("Remove-ItemProperty -Path $regPath -Name 'DedicatedDumpFile'", self.text)
 
-    def test_verify_only_never_writes_or_downloads(self):
+    def test_writes_happen_only_in_apply_mode_or_opt_in_staging(self):
         applyBlock = BlockAfter(self.text, 'if (-not $VerifyOnly) {')
-        outside = self.text.replace(applyBlock, '')
+        stagingBody = BlockAfter(self.text, 'function Invoke-NotMyFaultStaging ([bool]$IsVerifyOnly, [bool]$IsStageRequested) {')
+        downloadBody = BlockAfter(self.text, 'function Save-NotMyFaultArchive ([string]$Path) {')
+        outside = self.text
+        for block in (applyBlock, stagingBody, downloadBody):
+            outside = outside.replace(block, '')
         self.assertIsNone(WRITE_OR_DOWNLOAD.search(outside))
         self.assertIsNotNone(WRITE_OR_DOWNLOAD.search(applyBlock))
+        self.assertEqual(self.text.count('= Invoke-NotMyFaultStaging '), 1)
+        self.assertIn('$nmfStatus = Invoke-NotMyFaultStaging ([bool]$VerifyOnly) ([bool]$StageNotMyFault)', self.text)
+        self.assertEqual(self.text.count('Save-NotMyFaultArchive $zip'), 1)
+        # The read-only and opt-in guards come before any write in the staging function.
+        firstWrite = stagingBody.index('New-Item')
+        self.assertLess(stagingBody.index('if ($IsVerifyOnly) { return'), firstWrite)
+        self.assertLess(stagingBody.index('if (-not $IsStageRequested) { return'), firstWrite)
+
+    def test_preflight_forwards_staging_only_for_require_trigger(self):
+        preflight = (HOST_DIR / 'preflight-rhov.sh').read_text(encoding='utf-8')
+        function = re.search(r'(?ms)^function ConfigureDumpsArgs \(\) \{.*?^\}', preflight).group(0)
+        for requireTrigger, expected in ((0, ['-DataFile', 'C:\\Windows\\Temp\\crash-control.json']),
+                                         (1, ['-DataFile', 'C:\\Windows\\Temp\\crash-control.json', '-StageNotMyFault'])):
+            script = (f'set -euo pipefail; shopt -s inherit_errexit\n{function}\n'
+                      f'typeset -a argArr2=(); ConfigureDumpsArgs argArr2 {requireTrigger}; printf "%s\\n" "${{argArr2[@]}}"')
+            result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.splitlines(), expected)
+        self.assertIn('ConfigureDumpsArgs configureArgArr "${requireTrigger}"', preflight)
+        self.assertIn("--companion \"${crashControlFile}\" 'C:\\Windows\\Temp\\crash-control.json' -- \\\n  \"${configureArgArr[@]}\")\"", preflight)
+        self.assertIn('--require-trigger) requireTrigger=1', preflight)
+
+    def test_guest_agent_psfile_passes_the_switch_to_powershell(self):
+        spec = importlib.util.spec_from_file_location('guestAgent', HOST_DIR / 'guest-agent.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        companions, powershellArgs = module._psfile_args(
+            ['--companion', 'crash-control.json', 'C:\\Windows\\Temp\\crash-control.json', '--',
+             '-DataFile', 'C:\\Windows\\Temp\\crash-control.json', '-StageNotMyFault'])
+        self.assertEqual(companions, [('crash-control.json', 'C:\\Windows\\Temp\\crash-control.json')])
+        self.assertEqual(powershellArgs, ['-DataFile', 'C:\\Windows\\Temp\\crash-control.json', '-StageNotMyFault'])
+        self.assertIn('["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", guestpath] + powershell_args',
+                      (HOST_DIR / 'guest-agent.py').read_text(encoding='utf-8'))
 
     def test_notmyfault_failures_are_reported_on_stderr(self):
         self.assertIsNone(re.search(r'catch\s*\{\s*(#[^\n]*\s*)*\}', self.text))
@@ -129,7 +187,7 @@ class ConfigureDumpsPowerShellTests(unittest.TestCase):
         self.assertEqual(parsed['windows1252Errors'], 0)
         self.assertEqual(parsed['ps7OnlyTokens'], [])
         self.assertEqual(parsed['convertibleDoubleQuoted'], [])
-        self.assertEqual(sorted(parsed['functions']), ['Fail', 'Get-PagefileSizeMB', 'Get-RegValue', 'Test-PageFileAdequate', 'Test-RebootRequired', 'Test-ValueMatch'])
+        self.assertEqual(sorted(parsed['functions']), ['Fail', 'Get-PagefileSizeMB', 'Get-RegValue', 'Invoke-NotMyFaultStaging', 'Save-NotMyFaultArchive', 'Test-PageFileAdequate', 'Test-RebootRequired', 'Test-ValueMatch'])
 
     def test_required_pagefile_size_matches_golden_image(self):
         ramValues = list(PAGEFILE_SIZES_MB)
@@ -172,6 +230,34 @@ class ConfigureDumpsPowerShellTests(unittest.TestCase):
         ]
         results = RunHarness(self, 'call', 'Test-RebootRequired', [args for args, _ in cases])
         self.assertEqual(results, [expected for _, expected in cases])
+
+    def test_notmyfault_staging_is_opt_in_and_never_in_verify_only(self):
+        cases = [
+            {'state': {}, 'args': [False, False]},                                              # default / watch
+            {'state': {}, 'args': [True, True]},                                                # -VerifyOnly with opt-in
+            {'state': {'existing': [NMF_PATH]}, 'args': [False, True]},                         # already staged
+            {'state': {'extractCreates': ['true']}, 'args': [False, True]},                     # stages when missing
+            {'state': {'downloadFails': ['true']}, 'args': [False, True]},                      # download error
+            {'state': {}, 'args': [False, True]},                                               # archive without the binary
+        ]
+        with tempfile.TemporaryDirectory() as tmpDir:
+            mocks = Path(tmpDir) / 'mocks.ps1'
+            mocks.write_text(STAGING_MOCKS, encoding='ascii')
+            results = RunHarness(self, 'mockcall', 'Invoke-NotMyFaultStaging', cases, mocksPath=mocks)
+        default, verifyOnly, present, staged, downloadError, noBinary = results
+        downloads = lambda result: [entry for entry in result['log'] if entry.startswith('Save-NotMyFaultArchive')]
+        writes = lambda result: [entry for entry in result['log'] if not entry.startswith(('Test-Path', 'Save-'))]
+        self.assertEqual(default['output'], ['skipped: not requested'])
+        self.assertEqual(default['log'], [])
+        self.assertEqual(verifyOnly['output'], ['skipped: -VerifyOnly is read-only'])
+        self.assertEqual(verifyOnly['log'], [])
+        self.assertEqual(present['output'], ['present'])
+        self.assertEqual(downloads(present) + writes(present), [])
+        self.assertEqual(staged['output'], ['staged'])
+        self.assertEqual(downloads(staged), [f'Save-NotMyFaultArchive {NMF_DIR}\\NotMyFault.zip'])
+        self.assertIn(f'Unblock-File {NMF_PATH}', staged['log'])
+        self.assertEqual(downloadError['output'], ['failed: The remote name could not be resolved'])
+        self.assertEqual(noBinary['output'], [f'failed: {NMF_PATH} missing after extraction'])
 
     def test_isolated_runspace_cannot_reach_host_commands(self):
         names = ['New-ItemProperty', 'Remove-ItemProperty', 'Expand-Archive', 'Get-CimInstance', 'cmd', 'sh']
