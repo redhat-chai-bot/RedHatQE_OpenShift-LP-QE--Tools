@@ -24,6 +24,7 @@ GUEST_DIR = APP_DIR / 'src' / 'scripts' / 'guest'
 SCRIPT = GUEST_DIR / 'golden-image-post-reboot.ps1'
 PARTNER_SCRIPT = GUEST_DIR / 'golden-image-pre-reboot.ps1'
 HARNESS = Path(__file__).resolve().parent / 'fixtures' / 'ps-function-harness.ps1'
+DATA_FILE = APP_DIR / 'src' / 'data' / 'crash-control.json'
 
 # Mock cmdlets for Remove-SetupCacheFile. They exist only inside the harness's empty runspace,
 # record each call in $global:MockLog and simulate file state from $global:MockState.
@@ -85,6 +86,94 @@ def RunHarness(testCase, mode, functionName='', calls=None, scriptPath=SCRIPT, e
     return json.loads(result.stdout)
 
 
+def WriteMainFlowFiles(testCase, tmpDir, helperNames, mocks, startLine=None):
+    """Writes the script's top-level statements as one function, plus mocks and its own helpers.
+
+    The statements run unchanged inside Invoke-MainFlow in the harness's empty runspace. The
+    script's helper functions are loaded next to the mocks, and each top-level `exit N` becomes
+    `Exit-Script N; return`, which records the status and leaves at the same point.
+    """
+    scriptText = SCRIPT.read_text(encoding='ascii')
+    helperTexts = []
+    for helperName in helperNames:
+        definition = RunHarness(testCase, 'definition', helperName)
+        testCase.assertTrue(definition['found'], helperName)
+        testCase.assertEqual(scriptText.count(definition['text']), 1, helperName)
+        scriptText = scriptText.replace(definition['text'], '')
+        helperTexts.append(definition['text'])
+    if startLine is not None:
+        scriptText = scriptText[scriptText.index(startLine):]
+    mainFlow, exitCount = re.subn(r'(?mi)^(\s*)exit (\d+)[ \t]*$', r'\1Exit-Script \2; return', scriptText)
+    codeLines = [line for line in (mainFlow + '\n' + '\n'.join(helperTexts)).splitlines() if not line.lstrip().startswith('#')]
+    testCase.assertGreater(exitCount, 0)
+    testCase.assertFalse([line for line in codeLines if re.search(r'(^|[;{])\s*exit\b(?!-)', line, re.IGNORECASE)])
+    flowPath = Path(tmpDir) / 'main-flow.ps1'
+    mocksPath = Path(tmpDir) / 'main-flow-mocks.ps1'
+    flowPath.write_text('function Invoke-MainFlow {\n' + mainFlow + '\n}\n', encoding='ascii')
+    mocksPath.write_text(mocks + '\n' + '\n'.join(helperTexts) + '\n', encoding='ascii')
+    return flowPath, mocksPath
+
+
+# Mocks for the main-flow tests. Every check passes unless the state says otherwise: 'memory' is
+# error, null or a byte count; 'pagefileMB' is the active page file size; 'reg' overrides CrashControl
+# values ('Name=Value', or 'Name=' to remove one); 'missing' lists paths that do not exist and
+# 'ddfFile' makes C:\DedicatedDump.sys exist.
+postMainFlowMocks = r'''
+function Get-Service ($Name, $ErrorAction) {
+    if ($global:MockState['service'] -contains 'missing') { return }
+    [pscustomobject]@{ Status = $(if ($global:MockState['service'] -contains 'stopped') { 'Stopped' } else { 'Running' }) }
+}
+function Set-Service ($Name, $StartupType, $ErrorAction) { $global:MockLog.Add("Set-Service ${Name} ${StartupType}") }
+function Get-WindowsDriver ([switch]$Online) {
+    [pscustomobject]@{ OriginalFileName = 'C:\Windows\System32\DriverStore\FileRepository\viostor.inf' }
+    [pscustomobject]@{ OriginalFileName = 'C:\Windows\System32\DriverStore\FileRepository\vioscsi.inf' }
+}
+function Where-Object ([scriptblock]$FilterScript) {
+    process {
+        $context = [System.Collections.Generic.List[psvariable]]@([psvariable]::new('_', $_))
+        if ($FilterScript.InvokeWithContext($null, $context)) { $_ }
+    }
+}
+function Test-Path ([string]$Path, [string]$LiteralPath) {
+    $target = if ($LiteralPath) { $LiteralPath } else { $Path }
+    if ($target -eq 'C:\DedicatedDump.sys') { return ($global:MockState['ddfFile'] -contains 'true') }
+    $global:MockState['missing'] -notcontains $target
+}
+function Get-ItemProperty ([string]$Path, [string]$Name, $ErrorAction) {
+    $values = @{ CrashDumpEnabled = '7'; AutoReboot = '0'; AlwaysKeepMemoryDump = '1'; Overwrite = '1'; LogEvent = '1' }
+    foreach ($pair in $global:MockState['reg']) {
+        $key, $value = $pair -split '=', 2
+        if ($value) { $values[$key] = $value } else { $values.Remove($key) }
+    }
+    if ($values.ContainsKey($Name)) { [pscustomobject]@{ $Name = $values[$Name] } }
+}
+function Get-CimInstance ([string]$ClassName, $ErrorAction) {
+    $global:MockLog.Add("Get-CimInstance ${ClassName} ErrorAction=${ErrorAction}")
+    if ($ClassName -eq 'Win32_PageFileUsage') {
+        $size = [int64]@($global:MockState['pagefileMB'])[0]
+        if ($size -gt 0) { return [pscustomobject]@{ Name = 'C:\pagefile.sys'; AllocatedBaseSize = $size; CurrentUsage = 10 } }
+        return
+    }
+    $memory = @($global:MockState['memory'])[0]
+    if ($memory -eq 'error') {
+        if ("${ErrorAction}" -eq 'Stop') { throw 'simulated CIM failure' }
+        return
+    }
+    $totalMemory = if ($memory -eq 'null') { $null } else { [int64]$memory }
+    [pscustomobject]@{ AutomaticManagedPagefile = ($global:MockState['auto'] -contains 'true'); TotalPhysicalMemory = $totalMemory }
+}
+function Get-DiskImage ($ImagePath, $ErrorAction) { $global:MockLog.Add("Get-DiskImage ${ImagePath}"); [pscustomobject]@{ Attached = $false } }
+function Remove-Item ($LiteralPath, [switch]$Force, $ErrorAction) {
+    $global:MockLog.Add("Remove-Item ${LiteralPath}")
+    # Like the real cmdlet, the failure terminates only with -ErrorAction Stop.
+    if ($global:MockState['removeFails'] -contains 'true' -and "${ErrorAction}" -eq 'Stop') { throw 'The process cannot access the file because it is being used by another process.' }
+}
+function Write-Host ($Object, $ForegroundColor) { $global:MockLog.Add("Write-Host ${Object}") }
+function Write-Error ($Message) { $global:MockLog.Add("Write-Error ${Message}") }
+function Exit-Script ([int]$Code) { $global:MockLog.Add("exit ${Code}") }
+'''
+
+
 class PostRebootStaticTests(unittest.TestCase):
     def setUp(self):
         self.source = SCRIPT.read_bytes()
@@ -113,10 +202,32 @@ class PostRebootStaticTests(unittest.TestCase):
         self.assertIn('Test-Path -LiteralPath $path', self.text)
 
     def test_leftover_paths_match_the_pre_reboot_script(self):
+        # Unconditional, so a validation checkout without the pre-reboot change fails instead of passing.
         partner = PARTNER_SCRIPT.read_text(encoding='utf-8')
-        self.assertIn('C:\\Temp\\virtio-win.iso', partner)
-        if '$isoTmpPath' in partner:
-            self.assertIn('$isoTmpPath = "${isoPath}.download"', partner)
+        self.assertIn("$isoPath = 'C:\\Temp\\virtio-win.iso'", partner)
+        self.assertIn('$isoTmpPath = "${isoPath}.download"', partner)
+
+    def test_failures_do_not_depend_on_the_callers_error_preference(self):
+        self.assertIn("$ErrorActionPreference = 'Continue'", self.text)
+        self.assertLess(self.text.index("$ErrorActionPreference = 'Continue'"), self.text.index('    Write-Error '))
+
+    def test_old_dedicated_dump_file_refuses_sealing_without_deleting_it(self):
+        check = self.text.index("if (Test-Path -LiteralPath 'C:\\DedicatedDump.sys') {")
+        self.assertLess(check, self.text.index('if ($hasFailure) {'))
+        self.assertNotRegex(self.text, r'Remove-Item[^\n]*DedicatedDump\.sys')
+        # The only cleanup call is the one for the two ISO cache paths (checked in the stale-files test).
+        self.assertEqual(self.text.count('Remove-SetupCacheFile'), 2)
+
+    def test_sealing_command_uses_the_full_sysprep_path(self):
+        self.assertIn('C:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /shutdown /quiet', self.text)
+        self.assertNotRegex(self.text, r'with: sysprep ')
+        self.assertIn('Fix the issues (re-run golden-image-pre-reboot.ps1 if needed), then re-run this script.', self.text)
+
+    def test_expected_crash_control_values_match_the_data_file(self):
+        recommended = json.loads(DATA_FILE.read_text(encoding='utf-8'))['recommended']['values']
+        block = re.search(r'(?s)\$expected = \[ordered\]@\{(.*?)\n\}', self.text).group(1)
+        expected = {name: int(value) for name, value in re.findall(r'(?m)^\s*(\w+)\s*=\s*(\d+)\s*$', block)}
+        self.assertEqual(expected, {name: value for name, value in recommended.items() if isinstance(value, int)})
 
     def test_pvpanic_is_documented_as_a_qemu_monitor_device_only(self):
         self.assertNotIn('Device is added at runtime by preflight-rhov.sh', self.text)
@@ -147,11 +258,11 @@ class PostRebootPowerShellTests(unittest.TestCase):
         sizes = RunHarness(self, 'call', 'Get-PagefileSizeMB', [[ram] for ram in ramValues])
         self.assertEqual(dict(zip(ramValues, sizes)), PAGEFILE_SIZES_MB)
 
-    def test_pagefile_size_matches_pre_reboot_script_when_present(self):
+    def test_pagefile_size_matches_pre_reboot_script(self):
+        # Fails instead of skipping, so a validation checkout without the pre-reboot change cannot pass.
         own = RunHarness(self, 'definition', 'Get-PagefileSizeMB')
         partner = RunHarness(self, 'definition', 'Get-PagefileSizeMB', scriptPath=PARTNER_SCRIPT)
-        if not partner['found']:
-            self.skipTest('pre-reboot script does not define Get-PagefileSizeMB yet')
+        self.assertTrue(partner['found'], 'golden-image-pre-reboot.ps1 lacks Get-PagefileSizeMB; include its companion change')
         self.assertEqual(partner['text'], own['text'])
 
     def test_stale_file_cleanup_with_mocks(self):
@@ -211,6 +322,69 @@ class PostRebootPowerShellTests(unittest.TestCase):
             for name in ('Get-WithCommand', 'Get-WithDotNet'):
                 output = RunHarness(self, 'call', name, [[]], scriptPath=probe, expectSuccess=False)
                 self.assertIn('refused', output)
+
+
+class PostRebootMainFlowTests(unittest.TestCase):
+    """The whole script, run as it runs on the guest, with every command mocked."""
+
+    VALID = {'memory': ['17179869184'], 'pagefileMB': ['16641']}
+    SEAL = 'Write-Host === Seal the image with: C:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /shutdown /quiet ==='
+
+    def RunScript(self, states):
+        with tempfile.TemporaryDirectory() as tmpDir:
+            flowPath, mocksPath = WriteMainFlowFiles(
+                self, tmpDir, ['Get-PagefileSizeMB', 'Remove-SetupCacheFile'], postMainFlowMocks)
+            calls = [{'state': dict(self.VALID, **state), 'args': []} for state in states]
+            return [result['log'] for result in RunHarness(self, 'mockcall', 'Invoke-MainFlow', calls,
+                                                           scriptPath=flowPath, mocksPath=mocksPath)]
+
+    def AssertRefusedBeforeCleanup(self, log, failure):
+        self.assertEqual(log[-1], 'exit 1', log)
+        self.assertTrue([line for line in log if line.startswith(f'Write-Error FAIL: {failure}')], log)
+        self.assertTrue([line for line in log if line.startswith('Write-Error ===') and 'DO NOT SEAL' in line], log)
+        cleanupOrSeal = [line for line in log if line.startswith(('Get-DiskImage', 'Remove-Item')) or 'safe to seal' in line]
+        self.assertEqual(cleanupOrSeal, [])
+
+    def testInvalidMemorySizeFailsBeforeCleanupAndSealMessage(self):
+        memoryValues = ['error', 'null', '0', '-1073741824']
+        for memory, log in zip(memoryValues, self.RunScript([{'memory': [memory], 'pagefileMB': ['300']} for memory in memoryValues])):
+            with self.subTest(memory=memory):
+                self.AssertRefusedBeforeCleanup(log, 'physical memory size')
+                passedChecks = [line for line in log if line.startswith(('Write-Host OK: AutomaticManagedPagefile', 'Write-Host OK: pagefile.sys'))]
+                self.assertEqual(passedChecks, [])
+
+    def testValidMemorySizePassesThenRemovesTheISOcacheBeforeSealing(self):
+        log = self.RunScript([{}])[0]
+        self.assertNotIn('exit 1', log)
+        self.assertIn('Write-Host OK: AutomaticManagedPagefile = false', log)
+        removals = [index for index, line in enumerate(log) if line.startswith('Remove-Item')]
+        self.assertEqual([log[index] for index in removals],
+                         ['Remove-Item C:\\Temp\\virtio-win.iso', 'Remove-Item C:\\Temp\\virtio-win.iso.download'])
+        sealIndex = next(index for index, line in enumerate(log) if 'safe to seal' in line)
+        self.assertLess(removals[-1], sealIndex)
+        self.assertEqual(log[-1], self.SEAL)
+
+    def testEveryFailedCheckRefusesSealingBeforeCleanup(self):
+        cases = [
+            ({'reg': ['DedicatedDumpFile=C:\\DedicatedDump.sys']}, "DedicatedDumpFile = 'C:\\DedicatedDump.sys'"),
+            ({'ddfFile': ['true']}, 'C:\\DedicatedDump.sys from an older preparation still exists'),
+            ({'reg': ['CrashDumpEnabled=2']}, "CrashDumpEnabled = '2' (expected '7')"),
+            ({'reg': ['AutoReboot=']}, "AutoReboot = '' (expected '0')"),
+            ({'auto': ['true']}, 'AutomaticManagedPagefile is still true'),
+            ({'pagefileMB': ['16640']}, 'pagefile.sys active but too small - AllocatedBaseSize=16640 MB (expected >= 16641 MB'),
+            ({'pagefileMB': ['0']}, 'pagefile.sys not active in running kernel'),
+            ({'service': ['stopped']}, 'QEMU-GA not running (status: Stopped)'),
+            ({'service': ['missing']}, 'QEMU-GA not running (status: not installed)'),
+        ]
+        for (state, failure), log in zip(cases, self.RunScript([state for state, _ in cases])):
+            with self.subTest(state=state):
+                self.AssertRefusedBeforeCleanup(log, failure)
+
+    def testCleanupFailureRefusesSealing(self):
+        log = self.RunScript([{'removeFails': ['true']}])[0]
+        self.assertEqual(log[-1], 'exit 1', log)
+        self.assertIn('Write-Error === Stale setup files remain - DO NOT SEAL. Unmount or close them, remove them and re-run this script. ===', log)
+        self.assertFalse([line for line in log if 'safe to seal' in line], log)
 
 
 if __name__ == '__main__':
