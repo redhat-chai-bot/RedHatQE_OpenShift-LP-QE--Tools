@@ -1,6 +1,13 @@
 # Golden-image setup, part 2 of 2. Run as Administrator AFTER the reboot triggered by
 # golden-image-pre-reboot.ps1 and BEFORE sealing. Any FAIL exits 1 (do not seal);
 # WARN lines are informational.
+
+# Fixed pagefile size in MB: physical RAM plus 257 MB, rounded once to a whole MB. This must
+# match the size golden-image-pre-reboot.ps1 configures, so the check below can pass exactly.
+function Get-PagefileSizeMB ([int64]$MemoryBytes) {
+    [int64][math]::Round(($MemoryBytes + 257MB) / 1MB, 0)
+}
+
 $hasFailure = $false
 
 # Also (re)sets the startup type to Automatic.
@@ -10,7 +17,7 @@ Set-Service qemu-ga -StartupType Automatic -ErrorAction SilentlyContinue
 if ($svc -and $svc.Status -eq 'Running') {
     Write-Host 'OK: QEMU-GA = Running, StartupType = Automatic'
 } else {
-    Write-Error "FAIL: QEMU-GA not running (status: $($svc.Status))"
+    Write-Error "FAIL: QEMU-GA not running (status: $(if ($svc) { $svc.Status } else { 'not installed' }))"
     $hasFailure = $true
 }
 
@@ -33,8 +40,10 @@ if (Test-Path 'C:\Windows\System32\drivers\storahci.sys') {
     Write-Host 'WARN: storahci.sys not found - unexpected (inbox driver should always be present)'
 }
 
-# pvpanic check not needed — pipeline uses KubeVirt Panicked event for crash detection,
-# not the Windows pvpanic driver. Device is added at runtime by preflight-rhov.sh via QMP.
+# pvpanic driver check is disabled together with the install in golden-image-pre-reboot.ps1. The
+# pipeline watches the KubeVirt Panicked event, and its entry script (not preflight-rhov.sh)
+# hot-adds the pvpanic device at runtime with `virsh qemu-monitor-command --hmp device_add`.
+# Whether that event is raised without the guest driver has not been verified.
 # Write-Host "`n--- Checking pvpanic driver ---"
 # $pvpanicStart = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\pvpanic' -Name Start -ErrorAction SilentlyContinue).Start
 # if ("$pvpanicStart" -eq '3') {
@@ -94,10 +103,11 @@ if (-not $computer.AutomaticManagedPagefile) {
     $hasFailure = $true
 }
 
-# Must be active in the running kernel with at least the RAM + 257 MB set before the reboot.
+# Must be active in the running kernel with at least the size (RAM + 257 MB) that
+# golden-image-pre-reboot.ps1 set before the reboot.
 Write-Host "`n--- Checking pagefile.sys ---"
 $pf = Get-CimInstance Win32_PageFileUsage | Where-Object { $_.Name -like 'C:\*' }
-$expectedMinMB = [math]::Round($computer.TotalPhysicalMemory / 1MB, 0) + 257
+$expectedMinMB = Get-PagefileSizeMB $computer.TotalPhysicalMemory
 if ($pf -and $pf.AllocatedBaseSize -ge $expectedMinMB) {
     Write-Host "OK: pagefile.sys active - AllocatedBaseSize=$($pf.AllocatedBaseSize) MB (>= RAM+257MB=${expectedMinMB} MB), CurrentUsage=$($pf.CurrentUsage) MB"
 } elseif ($pf -and $pf.AllocatedBaseSize -gt 0) {
@@ -108,10 +118,26 @@ if ($pf -and $pf.AllocatedBaseSize -ge $expectedMinMB) {
     $hasFailure = $true
 }
 
+# golden-image-pre-reboot.ps1 keeps its ISO download (and, after an interrupted transfer, a
+# partial .download file) for re-runs. Neither should be sealed into the image. They are only
+# reported, and the deletion command is printed with the sealing steps; nothing is deleted here.
+Write-Host "`n--- Checking leftover setup files ---"
+$leftoverPaths = @(@('C:\Temp\virtio-win.iso', 'C:\Temp\virtio-win.iso.download') | Where-Object { Test-Path $_ })
+foreach ($path in $leftoverPaths) {
+    Write-Host "WARN: $path is still present - delete it before sealing so it is not captured in the image"
+}
+if (-not $leftoverPaths) { Write-Host 'OK: no leftover setup files in C:\Temp' }
+
 Write-Host ''
 if ($hasFailure) {
     Write-Error '=== One or more checks FAILED - DO NOT SEAL. Fix issues and re-run Script 1. ==='
     exit 1
 }
-Write-Host '=== All checks passed - safe to seal the golden image. ===' -ForegroundColor Green
+if ($leftoverPaths) {
+    $removeCommand = 'Remove-Item -Force ' + (($leftoverPaths | ForEach-Object { "'$_'" }) -join ', ')
+    Write-Host '=== All checks passed - delete the leftover setup files, then seal the golden image. ===' -ForegroundColor Green
+    Write-Host "=== Delete them with: $removeCommand ===" -ForegroundColor Green
+} else {
+    Write-Host '=== All checks passed - safe to seal the golden image. ===' -ForegroundColor Green
+}
 Write-Host '=== Seal the image with: sysprep /generalize /oobe /shutdown /quiet ===' -ForegroundColor Green
