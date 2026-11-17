@@ -25,6 +25,11 @@ SCRIPT = GUEST_DIR / 'golden-image-pre-reboot.ps1'
 PARTNER_SCRIPT = GUEST_DIR / 'golden-image-post-reboot.ps1'
 HARNESS = Path(__file__).resolve().parent / 'fixtures' / 'ps-function-harness.ps1'
 DATA_FILE = APP_DIR / 'src' / 'data' / 'crash-control.json'
+# The pinned virtio-win build. The digest is the SHA-256 recorded for this ISO in the official
+# virtio-win-0.1.302-1.noarch.rpm header; the ISO inside that RPM and the direct download match it.
+PINNED_ISO_URL = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-0.1.302.iso'
+PINNED_ISO_SHA256 = '303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d'
+OTHER_SHA256 = 'AB' * 32
 
 # Mock cmdlets for Set-FixedPagefile; they exist only inside the harness's empty runspace.
 PAGEFILE_MOCKS = r'''
@@ -152,11 +157,10 @@ function Remove-ItemProperty ([string]$Path, [string]$Name, $ErrorAction) { $glo
 function New-Item ([string]$ItemType, [switch]$Force, [string]$Path) { $global:MockLog.Add("New-Item ${Path}") }
 function Out-Null { process { } }
 function Enable-TLS12 { $global:MockLog.Add('Enable-TLS12') }
-function Get-RemoteLastModifiedUTC ([string]$URL) {
-    $global:MockLog.Add('Get-RemoteLastModifiedUTC')
-    $remote = @($global:MockState['remote'])[0]
-    if ($remote -eq 'error') { throw 'The remote name could not be resolved' }
-    if ($remote -and $remote -ne 'none') { [datetime]::Parse($remote, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal) }
+function Get-FileHash ([string]$LiteralPath, [string]$Algorithm) {
+    $global:MockLog.Add("Get-FileHash ${LiteralPath} ${Algorithm}")
+    $key = if ($LiteralPath -like '*.download') { 'downloadHash' } else { 'cacheHash' }
+    [pscustomobject]@{ Hash = "$(@($global:MockState[$key])[0])" }
 }
 function Test-Path ([string]$Path, [string]$LiteralPath) {
     $target = if ($LiteralPath) { $LiteralPath } else { $Path }
@@ -169,8 +173,9 @@ function Get-Item ([string]$Path, $ErrorAction) {
     [pscustomobject]@{ FullName = $Path }
 }
 function Save-ISOdownload ([string]$URL, [string]$Path) {
-    $global:MockLog.Add("Save-ISOdownload ${Path}")
+    $global:MockLog.Add("Save-ISOdownload ${URL} ${Path}")
     if ($global:MockState['downloadFails'] -contains 'true') { throw 'The operation has timed out' }
+    $global:MockState['existing'] = @($global:MockState['existing']) + $Path
 }
 function Move-Item ([string]$Path, [string]$Destination, [switch]$Force, $ErrorAction) { $global:MockLog.Add("Move-Item ${Path} ${Destination}") }
 function Remove-Item ([string]$Path, [string]$LiteralPath, [switch]$Force, $ErrorAction) { $global:MockLog.Add("Remove-Item $(if ($LiteralPath) { $LiteralPath } else { $Path })") }
@@ -194,7 +199,7 @@ function Get-ChildItem { $global:MockLog.Add('Get-ChildItem') }
 function Where-Object { process { } }
 function Select-Object { process { } }
 function pnputil { $global:MockLog.Add("pnputil $($args -join ' ')"); $global:LASTEXITCODE = 0 }
-function Dismount-DiskImage ([string]$ImagePath) { $global:MockLog.Add("Dismount-DiskImage ${ImagePath}") }
+function Dismount-DiskImage ([string]$ImagePath, $ErrorAction) { $global:MockLog.Add("Dismount-DiskImage ${ImagePath}") }
 function Get-Service ([string]$Name, $ErrorAction) {
     if ($global:MockState['service'] -contains 'missing') { return }
     [pscustomobject]@{ Status = $(if ($global:MockState['service'] -contains 'stopped') { 'Stopped' } else { 'Running' }) }
@@ -225,11 +230,16 @@ class PreRebootStaticTests(unittest.TestCase):
         self.assertIn('$pagefileSizeMB = Get-PagefileSizeMB $ramBytes', self.text)
         self.assertIsNone(re.search(r'\)\s*\+\s*257\b', self.text))
 
-    def test_remote_timestamp_failure_is_handled(self):
-        self.assertRegex(self.text, r'(?s)try \{\s*\$remoteLastModified = Get-RemoteLastModifiedUTC \$isoURL(?:(?!\} catch \{).)*\} catch \{')
-        # A missing Last-Modified header must not be read as "now" (HttpWebResponse.LastModified does that).
-        self.assertIn("$header = $resp.Headers['Last-Modified']", self.text)
-        self.assertNotRegex(self.text, r'\$resp\.LastModified')
+    def test_iso_is_pinned_and_verified_before_use(self):
+        self.assertIn(f"$isoURL    = '{PINNED_ISO_URL}'", self.text)
+        self.assertIn(f"$isoSHA256 = '{PINNED_ISO_SHA256}'", self.text)
+        self.assertNotRegex(self.text, r"(?i)\$isoURL\s*=\s*'[^']*(latest|stable)-virtio")
+        self.assertNotRegex(self.text, r'(?i)Last-Modified|HttpWebRequest')
+        # The download is verified before it replaces the cache.
+        verify = self.text.index('if (-not (Test-ISOhash $isoTmpPath $isoSHA256))')
+        self.assertLess(self.text.index('Save-ISOdownload $isoURL $isoTmpPath'), verify)
+        self.assertLess(verify, self.text.index('Move-Item -Path $isoTmpPath -Destination $isoPath'))
+        self.assertIn('(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -eq $ExpectedSHA256', self.text)
 
     def test_iso_download_goes_through_a_temporary_file(self):
         self.assertIn('Save-ISOdownload $isoURL $isoTmpPath', self.text)
@@ -269,8 +279,8 @@ class PreRebootStaticTests(unittest.TestCase):
         self.assertNotRegex(self.text, r'(?i)bcdedit|reagentc|recoveryenabled')
         self.assertIn('CrashDumpEnabled', self.text)
         # The rationale stays documented, including that it is unverified for restarted VMs.
-        self.assertIn('intentionally left at their Windows defaults for disposable test VMs', self.text)
-        self.assertIn('src/scripts/host/watch-crash.sh does unless --no-restart', self.text)
+        self.assertIn('the intended flow does not restart a VM after a', self.text)
+        self.assertIn('src/scripts/host/watch-crash.sh still starts the VM again unless it', self.text)
 
     def test_double_quoted_strings_use_formal_variable_syntax(self):
         self.assertEqual(SimpleVariablesInDoubleQuotes(self.text), [])
@@ -313,18 +323,21 @@ class PreRebootPowerShellTests(unittest.TestCase):
         self.assertIn(expected, manual['log'])
         self.assertIn('Access denied', failure)
 
-    def test_iso_download_decision(self):
-        older, newer = {'utc': '2026-01-01T00:00:00Z'}, {'utc': '2026-02-01T00:00:00Z'}
+    def test_iso_hash_check(self):
+        iso = 'C:\\Temp\\virtio-win.iso'
         cases = [
-            ([None, newer], True),     # no cache
-            ([None, None], True),      # no cache, remote unknown
-            ([older, newer], True),    # cache older than remote
-            ([newer, older], False),   # cache newer than remote
-            ([newer, newer], False),   # same timestamp
-            ([older, None], False),    # remote unknown: keep cache
+            ({'existing': []}, False),                                                  # missing: not hashed
+            ({'existing': [iso], 'cacheHash': [PINNED_ISO_SHA256.upper()]}, True),      # match (Get-FileHash is upper case)
+            ({'existing': [iso], 'cacheHash': [OTHER_SHA256]}, False),                  # mismatch
         ]
-        decisions = RunHarness(self, 'call', 'Test-ISOdownloadNeeded', [args for args, _ in cases])
-        self.assertEqual(decisions, [expected for _, expected in cases])
+        with tempfile.TemporaryDirectory() as tmpDir:
+            mocks = Path(tmpDir) / 'mocks.ps1'
+            mocks.write_text(preMainFlowMocks, encoding='ascii')
+            results = RunHarness(self, 'mockcall', 'Test-ISOhash',
+                                 [{'state': state, 'args': [iso, PINNED_ISO_SHA256]} for state, _ in cases], mocksPath=mocks)
+        self.assertEqual([result['output'] for result in results], [[str(expected)] for _, expected in cases])
+        self.assertFalse([entry for entry in results[0]['log'] if entry.startswith('Get-FileHash')])
+        self.assertIn(f'Get-FileHash {iso} SHA256', results[1]['log'])
 
     def test_installer_success_codes(self):
         codes = [0, 1641, 3010, 1, 1603, None]
@@ -355,10 +368,10 @@ class PreRebootMainFlowTests(unittest.TestCase):
     record their calls. The network helpers are replaced by mocks; the other helpers run unchanged.
     """
 
-    HELPERS = ['Get-PagefileSizeMB', 'Test-ISOdownloadNeeded', 'Test-InstallerSuccess', 'Set-FixedPagefile']
-    MOCKED_HELPERS = ['Enable-TLS12', 'Get-RemoteLastModifiedUTC', 'Save-ISOdownload']
-    VALID = {'memory': ['17179869184'], 'remote': ['2026-02-01T00:00:00Z'], 'existing': [], 'ddf': ['present']}
-    SIDE_EFFECTS = ('New-Item', 'Enable-TLS12', 'Get-RemoteLastModifiedUTC', 'Save-ISOdownload', 'Move-Item', 'Remove-Item',
+    HELPERS = ['Get-PagefileSizeMB', 'Test-ISOhash', 'Test-InstallerSuccess', 'Set-FixedPagefile']
+    MOCKED_HELPERS = ['Enable-TLS12', 'Save-ISOdownload']
+    VALID = {'memory': ['17179869184'], 'existing': [], 'ddf': ['present'], 'downloadHash': [PINNED_ISO_SHA256.upper()]}
+    SIDE_EFFECTS = ('New-Item', 'Enable-TLS12', 'Get-FileHash', 'Save-ISOdownload', 'Move-Item', 'Remove-Item',
                     'Get-DiskImage', 'Mount-DiskImage', 'Start-Process', 'pnputil', 'Dismount-DiskImage', 'Set-Service',
                     'Start-Service', 'Set-ItemProperty', 'Remove-ItemProperty', 'Set-CimInstance', 'Start-Sleep', 'Restart-Computer')
 
@@ -394,8 +407,9 @@ class PreRebootMainFlowTests(unittest.TestCase):
         self.assertEqual(written, expected)
         self.assertIn('Remove-ItemProperty DedicatedDumpFile ErrorAction=Stop', log)
         self.assertIn('Set-ItemProperty PagingFiles=C:\\pagefile.sys 16641 16641 MultiString ErrorAction=Stop', log)
+        self.assertIn(f'Save-ISOdownload {PINNED_ISO_URL} C:\\Temp\\virtio-win.iso.download', log)
         order = [next(index for index, line in enumerate(log) if line.startswith(prefix))
-                 for prefix in ('Save-ISOdownload', 'Mount-DiskImage', 'Start-Process', 'Set-Service', 'Set-ItemProperty CrashDumpEnabled',
+                 for prefix in ('Save-ISOdownload', 'Get-FileHash C:\\Temp\\virtio-win.iso.download SHA256', 'Move-Item', 'Mount-DiskImage', 'Start-Process', 'Set-Service', 'Set-ItemProperty CrashDumpEnabled',
                                 'Set-ItemProperty PagingFiles', 'Restart-Computer')]
         self.assertEqual(order, sorted(order))
 
@@ -413,26 +427,49 @@ class PreRebootMainFlowTests(unittest.TestCase):
                 self.assertTrue(self.Starting(log, message), log)
                 self.assertEqual(self.Starting(log, 'Start-Process', 'pnputil', 'Set-ItemProperty', 'Restart-Computer'), [])
 
-    def testAlreadyMountedISOisReused(self):
-        log = self.RunScript([{'mounted': ['true']}])[0]
-        self.assertEqual(self.Starting(log, 'Mount-DiskImage'), [])
+    def testAlreadyMountedVerifiedISOisReused(self):
+        log = self.RunScript([{'mounted': ['true'], 'existing': ['C:\\Temp\\virtio-win.iso'], 'cacheHash': [PINNED_ISO_SHA256.upper()]}])[0]
+        self.assertEqual(self.Starting(log, 'Mount-DiskImage', 'Save-ISOdownload', 'Move-Item'), [])
+        self.assertEqual(self.Starting(log, 'Dismount-DiskImage'), ['Dismount-DiskImage C:\\Temp\\virtio-win.iso'])  # only after installing
         self.assertTrue(self.Starting(log, 'Start-Process msiexec.exe /i E:\\guest-agent\\qemu-ga-x86_64.msi'), log)
         self.assertEqual(log[-1], 'Restart-Computer')
 
-    def testDownloadFailureStopsWithoutCacheAndFallsBackToCache(self):
-        noCache, cached = self.RunScript([{'downloadFails': ['true']},
-                                          {'downloadFails': ['true'], 'existing': ['C:\\Temp\\virtio-win.iso']}])
-        self.assertEqual(noCache[-1], 'exit 1', noCache)
-        self.assertIn('Remove-Item C:\\Temp\\virtio-win.iso.download', noCache)
-        self.assertEqual(self.Starting(noCache, 'Get-DiskImage', 'Move-Item', 'Set-ItemProperty', 'Restart-Computer'), [])
-        self.assertTrue([line for line in cached if line.startswith('Write-Host WARN: virtio-win ISO download failed, using the cached copy')], cached)
-        self.assertEqual(cached[-1], 'Restart-Computer')
-
-    def testMissingLastModifiedHeaderKeepsTheCache(self):
-        log = self.RunScript([{'remote': ['none'], 'existing': ['C:\\Temp\\virtio-win.iso']}])[0]
-        self.assertIn('Write-Host WARN: the server sent no Last-Modified header; a cached ISO is kept', log)
-        self.assertEqual(self.Starting(log, 'Save-ISOdownload'), [])
+    def testVerifiedCacheIsReusedWithoutDownload(self):
+        log = self.RunScript([{'existing': ['C:\\Temp\\virtio-win.iso'], 'cacheHash': [PINNED_ISO_SHA256.upper()]}])[0]
+        self.assertIn(f'Write-Host OK: cached virtio-win ISO matches the pinned SHA-256 {PINNED_ISO_SHA256}', log)
+        self.assertEqual(self.Starting(log, 'Save-ISOdownload', 'Move-Item'), [])
         self.assertEqual(log[-1], 'Restart-Computer')
+
+    def testMismatchedCacheIsReplacedByAVerifiedDownload(self):
+        log = self.RunScript([{'existing': ['C:\\Temp\\virtio-win.iso'], 'cacheHash': [OTHER_SHA256]}])[0]
+        self.assertIn('Write-Host WARN: the cached virtio-win ISO does not match the pinned SHA-256 - replacing it', log)
+        self.assertLess(log.index('Get-FileHash C:\\Temp\\virtio-win.iso.download SHA256'),
+                        log.index('Move-Item C:\\Temp\\virtio-win.iso.download C:\\Temp\\virtio-win.iso'))
+        self.assertEqual(log[-1], 'Restart-Computer')
+
+    def testMountedMismatchedCacheIsDismountedBeforeItIsReplaced(self):
+        log = self.RunScript([{'mounted': ['true'], 'existing': ['C:\\Temp\\virtio-win.iso'], 'cacheHash': [OTHER_SHA256]}])[0]
+        dismount = log.index('Dismount-DiskImage C:\\Temp\\virtio-win.iso')
+        self.assertLess(log.index('Get-FileHash C:\\Temp\\virtio-win.iso.download SHA256'), dismount)
+        self.assertLess(dismount, log.index('Move-Item C:\\Temp\\virtio-win.iso.download C:\\Temp\\virtio-win.iso'))
+        self.assertEqual(log[-1], 'Restart-Computer')
+
+    def testMismatchedDownloadStopsBeforeInstalling(self):
+        for state in ({}, {'existing': ['C:\\Temp\\virtio-win.iso'], 'cacheHash': [OTHER_SHA256]}):
+            with self.subTest(state=state):
+                log = self.RunScript([dict(state, downloadHash=[OTHER_SHA256])])[0]
+                self.assertEqual(log[-1], 'exit 1', log)
+                self.assertTrue(self.Starting(log, f'Write-Error FAIL: no virtio-win ISO matching the pinned SHA-256 is available: the download does not match the pinned SHA-256 {PINNED_ISO_SHA256}'), log)
+                self.assertIn('Remove-Item C:\\Temp\\virtio-win.iso.download', log)
+                self.assertEqual(self.Starting(log, 'Move-Item', 'Get-DiskImage', 'Start-Process', 'Set-ItemProperty', 'Restart-Computer'), [])
+
+    def testDownloadFailureStopsWithoutFallingBackToAnUnverifiedCache(self):
+        for state in ({}, {'existing': ['C:\\Temp\\virtio-win.iso'], 'cacheHash': [OTHER_SHA256]}):
+            with self.subTest(state=state):
+                log = self.RunScript([dict(state, downloadFails=['true'])])[0]
+                self.assertEqual(log[-1], 'exit 1', log)
+                self.assertTrue(self.Starting(log, 'Write-Error FAIL: no virtio-win ISO matching the pinned SHA-256 is available: The operation has timed out'), log)
+                self.assertEqual(self.Starting(log, 'Move-Item', 'Get-DiskImage', 'Set-ItemProperty', 'Restart-Computer'), [])
 
     def testAbsentDedicatedDumpFileIsLeftAloneAndAnOldDumpFileOnlyWarns(self):
         log = self.RunScript([{'ddf': [], 'existing': ['C:\\DedicatedDump.sys']}])[0]
