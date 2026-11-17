@@ -170,9 +170,19 @@ Remove-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction SilentlyConti
 Write-Host 'OK: Crash dump registry set (CrashDumpEnabled=7, no DedicatedDumpFile)'
 
 # Fixed-size C:\pagefile.sys of RAM + 257 MB with automatic management off, active after
-# the reboot; golden-image-post-reboot.ps1 checks this size.
+# the reboot; golden-image-post-reboot.ps1 checks this size. An unreadable, missing or
+# non-positive memory size stops the script before any page file change or reboot.
 Write-Host "`n--- Configuring pagefile.sys ---"
-$ramBytes = (Get-CimInstance -ClassName Win32_ComputerSystem).TotalPhysicalMemory
+try {
+    $ramBytes = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory
+} catch {
+    Write-Error "FAIL: cannot read the physical memory size: $($_.Exception.Message)"
+    exit 1
+}
+if (-not ($ramBytes -gt 0)) {
+    Write-Error "FAIL: physical memory size is missing or not positive (TotalPhysicalMemory = '${ramBytes}')"
+    exit 1
+}
 $pagefileSizeMB = Get-PagefileSizeMB $ramBytes
 try {
     Set-FixedPagefile $pagefileSizeMB
