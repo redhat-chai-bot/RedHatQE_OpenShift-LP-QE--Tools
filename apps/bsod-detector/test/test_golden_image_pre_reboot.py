@@ -25,6 +25,22 @@ SCRIPT = GUEST_DIR / 'golden-image-pre-reboot.ps1'
 PARTNER_SCRIPT = GUEST_DIR / 'golden-image-post-reboot.ps1'
 HARNESS = Path(__file__).resolve().parent / 'fixtures' / 'ps-function-harness.ps1'
 
+# Mock cmdlets for Set-FixedPagefile; they exist only inside the harness's empty runspace.
+PAGEFILE_MOCKS = r'''
+function Get-CimInstance ([string]$ClassName, $ErrorAction) {
+    $global:MockLog.Add("Get-CimInstance ${ClassName}")
+    [pscustomobject]@{ AutomaticManagedPagefile = ($global:MockState['auto'] -contains 'true') }
+}
+function Set-CimInstance ($InputObject, [hashtable]$Property, $ErrorAction) {
+    $global:MockLog.Add("Set-CimInstance AutomaticManagedPagefile=$($Property['AutomaticManagedPagefile'])")
+    if ($global:MockState['setFails'] -contains 'true') { throw 'Access denied' }
+}
+function Set-ItemProperty ([string]$Path, [string]$Name, [string]$Type, [string[]]$Value, $ErrorAction) {
+    $global:MockLog.Add("Set-ItemProperty ${Name} ${Type} count=$($Value.Count) [$($Value -join '|')]")
+}
+function Write-Host ($Object) { $global:MockLog.Add("Write-Host ${Object}") }
+'''
+
 # Expected pagefile sizes (MB), shared with the post-reboot tests. The 4095.5 and 16383.5 MiB
 # cases are where rounding before adding 257 differs from rounding once (banker's rounding).
 PAGEFILE_SIZES_MB = {
@@ -94,6 +110,11 @@ class PreRebootStaticTests(unittest.TestCase):
         self.assertIn('Move-Item -Path $isoTmpPath -Destination $isoPath -Force -ErrorAction Stop', self.text)
         self.assertNotIn('.DownloadFile($isoURL, $isoPath)', self.text)
 
+    def test_pagefile_uses_documented_cim_property_and_fails_the_script_on_error(self):
+        self.assertNotIn('-Name AutomaticManagedPagefile -Value 0', self.text)
+        self.assertIn('Set-CimInstance -InputObject $computer -Property @{ AutomaticManagedPagefile = $false } -ErrorAction Stop', self.text)
+        self.assertRegex(self.text, r'(?s)try \{\s*Set-FixedPagefile \$pagefileSizeMB\s*\} catch \{[^}]*exit 1')
+
     def test_installer_exit_codes_are_checked(self):
         self.assertIn('-Wait -PassThru', self.text)
         self.assertIn('Test-InstallerSuccess $msiProcess.ExitCode', self.text)
@@ -119,8 +140,9 @@ class PreRebootPowerShellTests(unittest.TestCase):
         self.assertEqual(parsed['utf8Errors'], 0)
         self.assertEqual(parsed['windows1252Errors'], 0)
         self.assertEqual(parsed['ps7OnlyTokens'], [])
+        self.assertEqual(parsed['convertibleDoubleQuoted'], [])
         self.assertEqual(parsed['numberTokens'].count('257MB'), 1)
-        self.assertEqual(sorted(parsed['functions']), ['Get-PagefileSizeMB', 'Test-ISOdownloadNeeded', 'Test-InstallerSuccess'])
+        self.assertEqual(sorted(parsed['functions']), ['Get-PagefileSizeMB', 'Set-FixedPagefile', 'Test-ISOdownloadNeeded', 'Test-InstallerSuccess'])
 
     def test_pagefile_size_rounds_once(self):
         ramValues = list(PAGEFILE_SIZES_MB)
@@ -133,6 +155,21 @@ class PreRebootPowerShellTests(unittest.TestCase):
         if not partner['found']:
             self.skipTest('post-reboot script does not define Get-PagefileSizeMB yet')
         self.assertEqual(partner['text'], own['text'])
+
+    def test_fixed_pagefile_replaces_system_managed_configuration(self):
+        cases = [{'state': {'auto': ['true']}, 'args': [16641]}, {'state': {'auto': ['false']}, 'args': [16641]}]
+        with tempfile.TemporaryDirectory() as tmpDir:
+            mocks = Path(tmpDir) / 'mocks.ps1'
+            mocks.write_text(PAGEFILE_MOCKS, encoding='ascii')
+            systemManaged, manual = RunHarness(self, 'mockcall', 'Set-FixedPagefile', cases, mocksPath=mocks)
+            failure = RunHarness(self, 'mockcall', 'Set-FixedPagefile', [{'state': {'auto': ['true'], 'setFails': ['true']}, 'args': [16641]}],
+                                 mocksPath=mocks, expectSuccess=False)
+        expected = 'Set-ItemProperty PagingFiles MultiString count=1 [C:\\pagefile.sys 16641 16641]'
+        self.assertIn('Set-CimInstance AutomaticManagedPagefile=False', systemManaged['log'])
+        self.assertIn(expected, systemManaged['log'])
+        self.assertFalse([entry for entry in manual['log'] if entry.startswith('Set-CimInstance')])
+        self.assertIn(expected, manual['log'])
+        self.assertIn('Access denied', failure)
 
     def test_iso_download_decision(self):
         older, newer = {'utc': '2026-01-01T00:00:00Z'}, {'utc': '2026-02-01T00:00:00Z'}

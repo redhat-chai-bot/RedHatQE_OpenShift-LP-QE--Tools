@@ -1,8 +1,10 @@
-# Test harness for the guest PowerShell scripts; used by test_golden_image_*_reboot.py.
+# Test harness for the guest PowerShell scripts; used by test_golden_image_*_reboot.py and
+# test_configure_dumps.py.
 # It never runs a guest script. It parses the script, and in `call` mode runs only one
 # function definition, extracted from the syntax tree, in a runspace with an empty
 # InitialSessionState (no cmdlets, providers or applications). Functions that invoke any
-# command, or any .NET member other than static [math] members, are refused before running.
+# command or method, or a static .NET member other than [math], are refused before running;
+# reading properties of the values passed in (for example $array.Count) is allowed.
 # `mockcall` mode additionally defines test-supplied mock functions in that runspace and only
 # allows the function to call those mocks, so no real cmdlet or file operation is reachable.
 param(
@@ -80,6 +82,8 @@ switch ($Mode) {
             numberTokens = @($parsed.Tokens | Where-Object { $_.Kind -eq 'Number' } | ForEach-Object { $_.Text })
             functions = @($parsed.AST.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
             commands = @($parsed.AST.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ } | Sort-Object -Unique)
+            # Double-quoted constants without escapes or embedded single quotes can be single-quoted.
+            convertibleDoubleQuoted = @($parsed.AST.FindAll({ param($node) $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $node.StringConstantType -eq 'DoubleQuoted' -and $node.Extent.Text -notmatch "[``']" }, $true) | ForEach-Object { $_.Extent.Text })
         } | ConvertTo-Json -Compress -Depth 4
     }
     'definition' {
@@ -90,7 +94,7 @@ switch ($Mode) {
         if ($parsed.Errors.Count) { throw "parse errors in ${ScriptPath}" }
         $fn = Find-Function $parsed.AST $FunctionName
         if (-not $fn) { throw "function ${FunctionName} not found in ${ScriptPath}" }
-        Assert-PureFunction $fn
+        Assert-PureFunction $fn -AllowInstanceProperties
         $shell = New-IsolatedShell
         [void]$shell.AddScript($fn.Extent.Text, $false).Invoke()
         $results = [System.Collections.Generic.List[object]]::new()
@@ -126,7 +130,9 @@ switch ($Mode) {
             $shell.Commands.Clear()
             $shell.Streams.Error.Clear()
             [void]$shell.AddCommand($FunctionName)
-            foreach ($value in $call.args) { [void]$shell.AddArgument([string[]]@($value)) }
+            foreach ($value in $call.args) {
+                if ($value -is [array]) { [void]$shell.AddArgument([string[]]$value) } else { [void]$shell.AddArgument((ConvertTo-Argument $value)) }
+            }
             $out = @($shell.Invoke())
             if ($shell.Streams.Error.Count) { throw $shell.Streams.Error[0].Exception }
             $results.Add([ordered]@{ output = @($out | ForEach-Object { "$_" }); log = @($log) })
