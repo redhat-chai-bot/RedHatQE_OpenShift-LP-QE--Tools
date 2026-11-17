@@ -138,6 +138,7 @@ class PostRebootPowerShellTests(unittest.TestCase):
         self.assertEqual(parsed['utf8Errors'], 0)
         self.assertEqual(parsed['windows1252Errors'], 0)
         self.assertEqual(parsed['ps7OnlyTokens'], [])
+        self.assertEqual(parsed['convertibleDoubleQuoted'], [])
         self.assertEqual(parsed['numberTokens'].count('257MB'), 1)
         self.assertEqual(sorted(parsed['functions']), ['Get-PagefileSizeMB', 'Remove-SetupCacheFile'])
 
