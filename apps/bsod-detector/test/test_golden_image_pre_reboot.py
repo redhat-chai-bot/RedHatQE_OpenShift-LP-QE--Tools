@@ -35,7 +35,24 @@ PAGEFILE_SIZES_MB = {
 }
 
 
-def RunHarness(testCase, mode, functionName='', calls=None, scriptPath=SCRIPT, expectSuccess=True):
+def SimpleVariablesInDoubleQuotes(text):
+    """Lines whose double-quoted strings use `$name` instead of the formal `${name}` syntax."""
+    found = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith('#'):
+            continue
+        for segment in re.findall(r'"((?:[^"`]|`.)*)"', line):
+            previous = None
+            while previous != segment:  # drop $( ... ) subexpressions; keep plain parentheses' text
+                previous = segment
+                segment = re.sub(r'\$\([^()]*\)', '', segment)
+                segment = re.sub(r'(?<!\$)\(([^()]*)\)', r'<\1>', segment)
+            if re.search(r'(?<!`)\$(?!\{)[A-Za-z_]', segment):
+                found.append(number)
+    return found
+
+
+def RunHarness(testCase, mode, functionName='', calls=None, scriptPath=SCRIPT, expectSuccess=True, mocksPath=None):
     pwsh = shutil.which('pwsh')
     if not pwsh:
         if os.environ.get('BSOD_DET__TEST__REQUIRE_PWSH') == '1':
@@ -43,7 +60,8 @@ def RunHarness(testCase, mode, functionName='', calls=None, scriptPath=SCRIPT, e
         testCase.skipTest('pwsh is not installed')
     result = subprocess.run(
         [pwsh, '-NoProfile', '-NonInteractive', '-File', str(HARNESS), '-Mode', mode,
-         '-ScriptPath', str(scriptPath), '-FunctionName', functionName, '-CallsJson', json.dumps(calls or [])],
+         '-ScriptPath', str(scriptPath), '-FunctionName', functionName, '-CallsJson', json.dumps(calls or []),
+         '-MocksPath', str(mocksPath or '')],
         capture_output=True, text=True, timeout=180, check=False)
     if not expectSuccess:
         testCase.assertNotEqual(result.returncode, 0, result.stdout)
@@ -81,8 +99,18 @@ class PreRebootStaticTests(unittest.TestCase):
         self.assertIn('Test-InstallerSuccess $msiProcess.ExitCode', self.text)
         self.assertIn('Test-InstallerSuccess $LASTEXITCODE', self.text)
 
-    def test_pvpanic_comment_does_not_credit_preflight(self):
+    def test_pvpanic_is_documented_as_a_qemu_monitor_device_only(self):
         self.assertNotIn('Device is added at runtime by preflight-rhov.sh', self.text)
+        self.assertIn('device_add pvpanic,id=pvpanic0', self.text)
+        self.assertIn('src/scripts/crash-injector/trigger-bsod-intentional.sh', self.text)
+        self.assertIsNone(re.search(r'(?m)^#\s*\$pvpanic', self.text))
+
+    def test_obsolete_recovery_settings_are_removed(self):
+        self.assertNotRegex(self.text, r'(?i)bcdedit|reagentc|recoveryenabled')
+        self.assertIn('CrashDumpEnabled', self.text)
+
+    def test_double_quoted_strings_use_formal_variable_syntax(self):
+        self.assertEqual(SimpleVariablesInDoubleQuotes(self.text), [])
 
 
 class PreRebootPowerShellTests(unittest.TestCase):
