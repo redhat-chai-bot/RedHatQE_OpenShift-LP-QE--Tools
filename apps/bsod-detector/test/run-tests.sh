@@ -18,10 +18,14 @@ fi
 
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
   "${testDir}/test_reliability.py" \
+  "${testDir}/test_golden_image_pre_reboot.py" \
   "${testDir}/test_recovery.py" \
   "${testDir}/test_evtx.py" \
+  "${testDir}/test_configure_dumps.py" \
   "${testDir}/test_container_contract.py" \
+  "${testDir}/test_golden_image_post_reboot.py" \
   "${testDir}/test_recursive_mapping.py" \
+  "${testDir}/test_guest_readme.py" \
   "${testDir}/test_guestfs_lifecycle.py"
 
 # Keep the default suite explicit: archived pre-RHOV Bats files live under
