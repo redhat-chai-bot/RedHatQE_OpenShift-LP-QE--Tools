@@ -14,7 +14,6 @@
 #   MODE=extract
 #     Offline dump extraction from a guest disk image via libguestfs.
 #     Calls extract-dump. Pass --disk / --out as CMD args.
-#     Original use case — run via host-tools/run.sh on a KVM host.
 #
 # All target parameters come from environment variables — nothing is
 # hardcoded to a specific VM, namespace, or cluster:

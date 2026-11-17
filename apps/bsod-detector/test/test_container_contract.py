@@ -62,10 +62,13 @@ class ContainerContractTests(unittest.TestCase):
         extractor = ROOT / "apps/bsod-detector/src/scripts/host" / name
         self.assertTrue(extractor.is_file())
         self.assertTrue(extractor.stat().st_mode & 0o111)
-        self.assertIn(f'exec /usr/local/bin/{name} "$@"', (IMAGE / "entrypoint.sh").read_text(encoding="utf-8"))
+        installed = re.escape(f"/usr/local/bin/{name}")
+        source = re.escape(f"apps/bsod-detector/src/scripts/host/{name}")
+        entrypoint = (IMAGE / "entrypoint.sh").read_text(encoding="utf-8")
+        self.assertRegex(entrypoint, rf'(?m)^\s+exec {installed} "\$@"$')
         logical = (IMAGE / "Dockerfile").read_text(encoding="utf-8").replace("\\\n", " ")
-        self.assertRegex(logical, rf"(?m)^COPY apps/bsod-detector/src/scripts/host/{name}\s+/usr/local/bin/{name}$")
-        self.assertRegex(logical, rf"(?m)^RUN chmod \+x .*/usr/local/bin/{name}\b")
+        self.assertRegex(logical, rf"(?m)^COPY {source}\s+{installed}$")
+        self.assertRegex(logical, rf"(?m)^RUN chmod \+x\s.*\s{installed}(?:\s|$)")
 
 
 if __name__ == "__main__":
