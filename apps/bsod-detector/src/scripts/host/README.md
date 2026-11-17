@@ -61,8 +61,9 @@ These scripts manage the full BSOD detection and artifact extraction pipeline or
 - Die if watcher exits before publishing readiness
 
 **Phase 4 — Inject BSOD** (`notmyfaultc64.exe`)
-- Calls `guest-agent.py exec-crash notmyfaultc64.exe /accepteula /crash <crashType>`
-- Waits up to 90s for QGA to confirm crash delivery (disconnect = success)
+- Calls `guest-agent.py exec-crash 'C:\Temp\nmf\notmyfaultc64.exe' /accepteula /crash <crashType>`
+- Waits up to `BSOD_TRIGGER_CONFIRM_TIMEOUT` seconds (default 45) for QGA to confirm crash delivery (disconnect = success);
+  the caller's outer `timeout 90` bounds the whole call, including the launch and the final status poll
 
 **Phase 5 — Wait for completion**
 - Waits for watcher background process to exit
@@ -354,7 +355,8 @@ guest-agent.py psfile <local.ps1> [--companion <localPath> <guestPath>]... [-- <
    namespace whose name starts with `virt-launcher-<vm>-` (`oc get pod -o name`).
 
 Discovery reads use `oc --request-timeout=20s` (25s local limit), and any failed read (missing client, expired login,
-timeout) counts as empty output. Target problems therefore print one actionable `guest-agent: <message>` line, for example
+timeout) counts as empty output. Target problems therefore print an actionable `guest-agent: <message>` error (with
+several VirtualMachineInstances in scope, the candidates follow on indented lines), for example
 `guest-agent: no VirtualMachineInstance found; set BSOD_DET__VM__NAME (and BSOD_DET__NAMESPACE)`, and exit 1 before any
 agent call.
 
@@ -372,10 +374,10 @@ agent call.
 
 | Status | Meaning |
 |---|---|
-| guest code | `exec`, `exec-crash` and `psfile` relay the guest exit code (its low 8 bits, so it can coincide with a status below) |
+| guest code | `exec`, `exec-crash` and `psfile` exit with the low 8 bits of the guest exit code, which the script does not remap: `0xC0000005` exits 5, a multiple of 256 such as `0x100` exits 0 (success), and a code can coincide with a status below |
 | 0 | `ping`/`put` succeeded, or `exec-crash` observed the expected agent loss |
-| 1 | Target error, agent error, or another unhandled error (missing `put` argument, unreadable local file, non-integer `BSOD_TRIGGER_CONFIRM_TIMEOUT`); unhandled errors print a traceback |
-| 2 | Usage error: no or unknown subcommand, missing program or script, malformed `--companion` list |
+| 1 | Target error, agent error, or another unhandled error (unreadable local file, non-integer `BSOD_TRIGGER_CONFIRM_TIMEOUT`, `exec`/`psfile` status-poll errors until the end of the window); unhandled errors print a traceback |
+| 2 | Usage error: no or unknown subcommand, missing program or script, missing `put` local or guest path, malformed `--companion` list |
 | 124 | The guest program did not exit within its wait window |
 | 125 | The guest reported an exit without an exit code |
 
@@ -526,7 +528,7 @@ trigger-bsod-intentional.sh
   │    ├─ RestartVM
   │    └─ write evidence-summary.json
   │
-  └─ Inject BSOD via guest-agent.py exec-crash notmyfaultc64.exe /crash <type> after watcher readiness
+  └─ Inject BSOD via guest-agent.py exec-crash C:\Temp\nmf\notmyfaultc64.exe /accepteula /crash <type> after watcher readiness
 ```
 
 ## Environment Variable Convention
@@ -705,8 +707,9 @@ statuses are described in the [script overview](#guest-agentpy) above.
   cached on that instance only, and only after a complete resolution, so a failed resolution is retried; the module holds
   no mutable state.
 - **Error types**: `TargetError` (configuration) deliberately does not derive from `RuntimeError`. `RuntimeError` means an
-  agent or transport failure: `GuestExec()` retries it and `GuestExecCrash()` treats it, after a confirmed launch, as the
-  crash signal, so a configuration problem can never be mistaken for either. `Main()` turns `TargetError` into exit 1.
+  agent or transport failure: `GuestExec()` retries it during status polling (a failed launch is not retried and exits 1)
+  and `GuestExecCrash()` treats it, after a confirmed launch, as the crash signal. Keeping the types separate makes this
+  explicit; the target is resolved before any polling starts. `Main()` turns `TargetError` into exit 1.
 - **Discovery reads**: `RunOC()` folds every `oc` failure into empty output, so discovery reports one actionable
   `TargetError` instead of a client traceback.
 - **Timeouts**: `SendCommand()` passes its timeout to both `oc --request-timeout` and `virsh --timeout`; the local subprocess
