@@ -9,7 +9,9 @@ No cluster, VM or guest is contacted.
 Naming follows the team guide: camelCase variables and module constants, PascalCase helpers and
 single quotes. Technical exceptions: unittest only discovers methods starting with `test` and calls
 the `setUp` hook; standard library names, the guest-agent.py CLI, QMP command names and environment
-variable names are used as defined.
+variable names are used as defined. The generated fake `oc` is a two-line `#!/bin/sh` shim that execs
+the Python fake, not a bash script with the errexit/xtrace options: xtrace output would reach the `oc`
+stderr that guest-agent.py embeds in its error messages, which several tests compare exactly.
 '''
 from __future__ import annotations
 
@@ -310,7 +312,8 @@ def VirtualSleep(seconds):
 
 virtualTime = types.ModuleType('time')
 vars(virtualTime).update(vars(time))
-virtualTime.time = virtualTime.monotonic = lambda: virtualNow[0]
+virtualTime.time = virtualTime.monotonic = virtualTime.perf_counter = lambda: virtualNow[0]
+virtualTime.time_ns = virtualTime.monotonic_ns = virtualTime.perf_counter_ns = lambda: int(virtualNow[0] * 10**9)
 virtualTime.sleep = VirtualSleep
 sys.modules['time'] = virtualTime
 sys.argv = sys.argv[1:]
@@ -377,8 +380,8 @@ class GuestAgentCLItestCase(unittest.TestCase):
         '''Run guest-agent.py isolated (-I) with `environ` (no BSOD_* variables are inherited) and return its CLIresult.
 
         The script runs as __main__ under a bootstrap that gives it a `time` module whose sleep()
-        advances time()/monotonic() instantly, so wait windows elapse deterministically without
-        sleeping and no result depends on the real clock.
+        advances time(), monotonic(), perf_counter() and their *_ns() forms instantly, so wait
+        windows elapse deterministically without sleeping and no result depends on the real clock.
         '''
         runEnv = {envName: envValue for envName, envValue in os.environ.items() if not envName.startswith('BSOD_')}
         runEnv.update({'PATH': str(self.binDir), 'BSOD_DET__TEST__FAKE_OC_DIR': str(self.workDir)})
@@ -520,6 +523,15 @@ class GuestAgentCLIcommandTests(GuestAgentCLItestCase):
         self.assertEqual([qmpCommand['execute'] for qmpCommand, _ in self.AgentCalls(cliResult)],
                          ['guest-exec', 'guest-exec-status', 'guest-exec-status'])
 
+    def testExecStatusErrorsUntilWindowEndExitOne(self) -> None:
+        self.Script(agent={'guest-exec': [{'return': {'pid': 3}}], 'guest-exec-status': [{'fail': 'error: gone'}]})
+        cliResult = self.RunCLI('exec', 'fixture.exe', environ=explicitTargetEnv)
+        self.assertEqual((cliResult.status, cliResult.stdOut), (1, ''))
+        self.assertIn('guest-exec timed out waiting for pid 3: virsh failed (timeout=300): error: gone', cliResult.stdErr)
+        # Polls every 3s from t=0 in the 600s window; the first error with 10s or less left (t=591) is final.
+        self.assertEqual([qmpCommand['execute'] for qmpCommand, _ in self.AgentCalls(cliResult)],
+                         ['guest-exec'] + ['guest-exec-status'] * 198)
+
     def testPutWritesChunksAndClosesHandle(self) -> None:
         fileData = bytes(range(256)) * 256 + b'!'  # 64 KiB + 1 byte -> two chunks.
         (self.workDir / 'payload.bin').write_bytes(fileData)
@@ -543,12 +555,22 @@ class GuestAgentCLIcommandTests(GuestAgentCLItestCase):
         self.assertEqual(self.AgentCalls(cliResult)[-1],
                          ({'execute': 'guest-file-close', 'arguments': {'handle': guestFileHandle}}, 300))
 
+    def testPutOfEmptyFileOpensAndClosesWithoutWrites(self) -> None:
+        (self.workDir / 'empty.bin').write_bytes(b'')
+        self.ScriptUploads()
+        cliResult = self.RunCLI('put', 'empty.bin', r'C:\Temp\empty.bin', environ=explicitTargetEnv)
+        self.assertEqual((cliResult.status, cliResult.stdOut), (0, 'wrote 0 bytes -> C:\\Temp\\empty.bin\n'))
+        self.assertEqual([qmpCommand['execute'] for qmpCommand, _ in self.AgentCalls(cliResult)],
+                         ['guest-file-open', 'guest-file-close'])
+
 
 class GuestAgentCLIexitTests(GuestAgentCLItestCase):
     '''CLI dispatch, output relay and exit statuses relied on by the shell callers.'''
 
     def testGuestExitCodeIsRelayed(self) -> None:
-        for guestExitCode, expectedStatus in ((7, 7), (0xC0000005, 5)):  # An NTSTATUS keeps its low 8 bits.
+        # The process exit status keeps only the low 8 bits of the guest code: an NTSTATUS such as
+        # 0xC0000005 exits 5, and a multiple of 256 exits 0. The runtime does not remap such codes.
+        for guestExitCode, expectedStatus in ((7, 7), (0xC0000005, 5), (0x100, 0)):
             with self.subTest(guestExitCode=guestExitCode):
                 self.Script(agent={'guest-exec': [{'return': {'pid': 1}}],
                                    'guest-exec-status': [self.Exited(guestExitCode, stdOut=b'out', stdErr=b'err')]})
@@ -639,9 +661,18 @@ class GuestAgentCLIexitTests(GuestAgentCLItestCase):
                 cliResult = self.RunCLI(*cliArgs, environ=podlessTargetEnv)
                 self.assertEqual((cliResult.status, cliResult.ocCalls), (2, []))
 
+    def testIncompletePutFailsWithoutClusterCalls(self) -> None:
+        # Only the guarantee callers rely on (`put ... || Die`): a non-zero status, no upload
+        # record on stdout and no cluster call. The exact status is not part of this contract.
+        for cliArgs in (('put',), ('put', 'payload.bin')):
+            with self.subTest(cliArgs=cliArgs):
+                cliResult = self.RunCLI(*cliArgs, environ=podlessTargetEnv)
+                self.assertNotEqual(cliResult.status, 0)
+                self.assertEqual((cliResult.stdOut, cliResult.ocCalls), ('', []))
+                self.assertTrue(cliResult.stdErr)
+
     def testInvalidInputExitsOneWithoutClusterCalls(self) -> None:
         for cliArgs, crashEnv, expectedError in (
-                (('put', 'payload.bin'), {}, 'IndexError'),
                 (('put', 'missing.bin', r'C:\Temp\missing.bin'), {}, 'FileNotFoundError'),
                 (('exec-crash', 'fixture.exe'), {'BSOD_TRIGGER_CONFIRM_TIMEOUT': 'soon'}, 'ValueError')):
             with self.subTest(cliArgs=cliArgs):
