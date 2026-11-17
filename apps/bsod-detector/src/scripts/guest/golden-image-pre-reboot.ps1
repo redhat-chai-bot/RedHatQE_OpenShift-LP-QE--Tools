@@ -38,7 +38,7 @@ try {
     } finally {
         $resp.Close()
     }
-    Write-Host "Remote ISO Last-Modified (UTC): $remoteLastModified"
+    Write-Host "Remote ISO Last-Modified (UTC): ${remoteLastModified}"
 } catch {
     Write-Host "WARN: cannot read the remote ISO timestamp: $($_.Exception.Message)"
 }
@@ -48,7 +48,7 @@ if (Test-Path $isoPath) { $localLastWrite = (Get-Item $isoPath).LastWriteTimeUtc
 if (Test-ISOdownloadNeeded $localLastWrite $remoteLastModified) {
     # Download to a temporary name first: a failed transfer must neither replace the cache
     # nor leave a partial file that a later run would treat as the latest ISO.
-    $isoTmpPath = "$isoPath.download"
+    $isoTmpPath = "${isoPath}.download"
     try {
         Write-Host 'Downloading virtio-win ISO...'
         (New-Object System.Net.WebClient).DownloadFile($isoURL, $isoTmpPath)
@@ -63,7 +63,7 @@ if (Test-ISOdownloadNeeded $localLastWrite $remoteLastModified) {
         Write-Host "WARN: virtio-win ISO download failed, using the cached copy: $($_.Exception.Message)"
     }
 } else {
-    Write-Host "OK: using cached virtio-win ISO (local=$localLastWrite, remote=$(if ($remoteLastModified) { $remoteLastModified } else { 'unknown' }))"
+    Write-Host "OK: using cached virtio-win ISO (local=${localLastWrite}, remote=$(if ($remoteLastModified) { $remoteLastModified } else { 'unknown' }))"
 }
 
 $iso   = Mount-DiskImage -ImagePath $isoPath -PassThru
@@ -96,7 +96,7 @@ foreach ($drv in $storageDrivers) {
         if (Test-InstallerSuccess $LASTEXITCODE) {
             Write-Host "OK: $($drv.Name) installed from $($inf.FullName)"
         } else {
-            Write-Host "WARN: pnputil exited with code $LASTEXITCODE for $($inf.FullName) - golden-image-post-reboot.ps1 checks the driver store"
+            Write-Host "WARN: pnputil exited with code ${LASTEXITCODE} for $($inf.FullName) - golden-image-post-reboot.ps1 checks the driver store"
         }
     } else {
         Write-Host "WARN: $($drv.Name) not found in ISO - skip"
@@ -104,29 +104,18 @@ foreach ($drv in $storageDrivers) {
 }
 Write-Host 'NOTE: storahci.sys (SATA) is an inbox Windows driver - no installation needed'
 
-# pvpanic driver installation is disabled. The pipeline watches the KubeVirt Panicked event, and
-# its entry script (not preflight-rhov.sh) hot-adds the pvpanic device at runtime with
-# `virsh qemu-monitor-command --hmp device_add`. Whether that event is raised without this guest
-# driver has not been verified; re-enable this block and the matching post-reboot check if not.
-# Write-Host "`n--- Installing pvpanic driver ---"
-# $pvpanicInf = Get-ChildItem "${drive}:\pvpanic" -Recurse -Filter 'pvpanic.inf' -ErrorAction SilentlyContinue |
-#     Where-Object { $_.FullName -like '*amd64*' } | Select-Object -First 1
-# if ($pvpanicInf) {
-#     pnputil /add-driver $pvpanicInf.FullName /install | Out-Null
-#     Write-Host "OK: pvpanic driver added to store from $($pvpanicInf.FullName)"
-#     $pvpanicReg = 'HKLM:\SYSTEM\CurrentControlSet\Services\pvpanic'
-#     New-Item -Path $pvpanicReg -Force | Out-Null
-#     Set-ItemProperty -Path $pvpanicReg -Name Start -Value 3 -Type DWord
-#     Set-ItemProperty -Path $pvpanicReg -Name Type  -Value 1 -Type DWord
-#     Write-Host 'OK: pvpanic service key set (Start=3 demand-load, Type=1 kernel driver)'
-# } else {
-#     Write-Host 'WARN: pvpanic.inf not found in ISO - pipeline will add pvpanic device via QMP at runtime'
-# }
+# pvpanic: no guest pvpanic driver is installed here (golden-image-post-reboot.ps1 does not check
+# one). The pipeline entry script attempts, best effort and non-fatal, to hot-add the pvpanic
+# device to the running VM through the QEMU monitor
+# (`virsh qemu-monitor-command --hmp 'device_add pvpanic,id=pvpanic0'`):
+# src/scripts/crash-injector/trigger-bsod-intentional.sh, or src/scripts/bsod-pipeline/bsod-runner.sh
+# after the pipeline rename. Whether the KubeVirt Panicked event is raised without a guest driver
+# has not been verified.
 
-# The ISO stays on disk for the version check on the next run; golden-image-post-reboot.ps1
-# warns if it is still present when the image is about to be sealed.
+# The ISO stays on disk for the version check if this script is re-run; golden-image-post-reboot.ps1
+# removes it once every check has passed.
 Dismount-DiskImage -ImagePath $isoPath
-Write-Host "OK: ISO unmounted (kept on disk at $isoPath for future version checks)"
+Write-Host "OK: ISO unmounted (kept on disk at ${isoPath} until golden-image-post-reboot.ps1 passes)"
 
 Write-Host "`n--- Verifying QEMU Guest Agent ---"
 $svc = Get-Service QEMU-GA -ErrorAction SilentlyContinue
@@ -146,13 +135,6 @@ if ($svc.Status -ne 'Running') {
     exit 1
 }
 Write-Host 'OK: QEMU-GA is Running and set to Automatic'
-
-# Disabled: keep Windows out of automatic recovery (WinRE) after a BSOD. Re-enable together
-# with the matching check in golden-image-post-reboot.ps1.
-#bcdedit /set '{default}' bootstatuspolicy IgnoreAllFailures
-#bcdedit /set '{default}' recoveryenabled No
-#bcdedit /set '{bootmgr}' displaybootmenu No
-#reagentc /disable
 
 # CrashDumpEnabled=7 is the Automatic memory dump. DedicatedDumpFile must be absent
 # (golden-image policy, see virtio-win issue #1629).
@@ -181,7 +163,7 @@ Write-Host "OK: pagefile.sys will be created by Windows on next reboot at ${page
 
 # Set pagefile via registry (PagingFiles REG_MULTI_SZ) - avoids CIM type inference issues.
 # Format: "<path> <initialMB> <maxMB>"
-Set-ItemProperty -Path $mm -Name PagingFiles -Type MultiString -Value @("$pagefilePath $pagefileSizeMB $pagefileSizeMB")
+Set-ItemProperty -Path $mm -Name PagingFiles -Type MultiString -Value @("${pagefilePath} ${pagefileSizeMB} ${pagefileSizeMB}")
 Write-Host "OK: pagefile.sys registered via registry (${pagefileSizeMB} MB = RAM + 257MB)"
 Write-Host 'OK: Pagefile pre-allocation complete - active after reboot'
 
