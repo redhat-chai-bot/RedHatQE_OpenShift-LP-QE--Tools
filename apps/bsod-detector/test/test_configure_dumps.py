@@ -395,6 +395,34 @@ class ConfigureDumpsPowerShellTests(unittest.TestCase):
     def Data():
         return json.loads(DATA_FILE.read_text(encoding='utf-8'))
 
+    def test_harness_applies_a_scripts_strict_mode(self):
+        # Set-StrictMode is the one real cmdlet in the harness runspace: a script's top-level strict
+        # mode also applies to single-function runs (as on the guest), a function can enable it
+        # itself, other runs stay lax, and a mock may not replace the cmdlet.
+        with tempfile.TemporaryDirectory() as tmpDir:
+            strictScript = Path(tmpDir) / 'strict.ps1'
+            strictScript.write_text('Set-StrictMode -Version Latest\nfunction Get-Unset { "value=${neverAssigned}" }\n', encoding='ascii')
+            laxScript = Path(tmpDir) / 'lax.ps1'
+            laxScript.write_text('function Get-Unset { "value=${neverAssigned}" }\n'
+                                 'function Get-StrictUnset {\n    Set-StrictMode -Version Latest\n    "value=${neverAssigned}"\n}\n',
+                                 encoding='ascii')
+            mocks = Path(tmpDir) / 'mocks.ps1'
+            mocks.write_text('function Write-Nothing { }\n', encoding='ascii')
+            shadowing = Path(tmpDir) / 'shadowing.ps1'
+            shadowing.write_text('function Set-StrictMode ($Version) { }\n', encoding='ascii')
+            strict = RunHarness(self, 'call', 'Get-Unset', [[]], scriptPath=strictScript, expectSuccess=False)
+            lax = RunHarness(self, 'call', 'Get-Unset', [[]], scriptPath=laxScript)
+            strictInFunction = RunHarness(self, 'mockcall', 'Get-StrictUnset', [{'state': {}, 'args': []}], scriptPath=laxScript,
+                                          expectSuccess=False, mocksPath=mocks)
+            shadowed = RunHarness(self, 'mockcall', 'Get-Unset', [{'state': {}, 'args': []}], scriptPath=laxScript,
+                                  expectSuccess=False, mocksPath=shadowing)
+        unset = "The variable '$neverAssigned' cannot be retrieved because it has not been set."
+        self.assertIn(unset, strict)
+        self.assertEqual(lax, ['value='])
+        self.assertIn(unset, strictInFunction)
+        self.assertIn('refused: mocks must not replace Set-StrictMode', shadowed)
+        self.assertNotIn('function Set-StrictMode', MainFlowMocks())
+
     def test_isolated_runspace_cannot_reach_host_commands(self):
         names = ['New-ItemProperty', 'Remove-ItemProperty', 'Expand-Archive', 'Get-CimInstance', 'cmd', 'sh']
         results = RunHarness(self, 'isolation', calls=names)
@@ -434,7 +462,6 @@ def MainFlowMocks():
     oldData = json.loads(json.dumps(data))
     oldData['recommended']['values']['DedicatedDumpFile'] = 'C:\\DedicatedDump.sys'
     return r'''
-function Set-StrictMode ($Version) { }
 function Out-Null { process { } }
 function Write-StdErr ([string]$Message) { $global:MockLog.Add("stderr ${Message}") }
 function Write-FlowError ($Message) { $global:MockLog.Add("error ${Message}") }
@@ -497,8 +524,9 @@ class ConfigureDumpsMainFlowTests(unittest.TestCase):
     Helper definitions are taken out of the script; the pure ones run unchanged next to the
     mocks, the others are replaced by mocks. The registry lives in $global:FakeReg and persists
     between calls when 'keepRegistry' is set, so a second run sees the first run's writes.
-    Limitation: the harness runspace has no Set-StrictMode cmdlet, so these runs are not in strict
-    mode; strict-mode behavior is covered only by review and needs a Windows PowerShell 5.1 run.
+    The script's own `Set-StrictMode -Version Latest` runs through the real cmdlet the harness
+    provides (it is not mocked), so these runs use strict mode as the script does. The strict-mode
+    rules are those of pwsh 7.4 on the test host; a Windows PowerShell 5.1 run remains authoritative.
     """
 
     def RunScript(self, states):
