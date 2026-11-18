@@ -57,7 +57,7 @@ def pagedu64_bytes(code=1):
     return bytes(data)
 
 
-def small_dump_bytes():
+def small_dump_bytes() -> bytes:
     data = bytearray(44)
     data[:4] = b"MDMP"
     struct.pack_into("<II", data, 8, 1, 32)
@@ -120,7 +120,7 @@ class ReliabilityTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout)["reason"], "statistics-unavailable")
 
-    def test_structural_artifact_validation(self):
+    def test_ValidateArtifact_AcceptsStructuredArtifactsAndRejectsSmallDumps(self) -> None:
         samples = {"screenshot": png_bytes(), "memory": elf_bytes(), "dump": pagedu64_bytes(), "evtx": evtx_bytes()}
         with tempfile.TemporaryDirectory() as temporary:
             for kind, data in samples.items():
@@ -133,7 +133,7 @@ class ReliabilityTests(unittest.TestCase):
             small.write_bytes(small_dump_bytes())
             self.assertNotEqual(run_helper("validate-artifact", "--type", "dump", "--path", str(small)).returncode, 0)
 
-    def test_truncated_and_malformed_artifacts_fail(self):
+    def test_ValidateArtifact_RejectsTruncatedAndMalformedArtifacts(self) -> None:
         malformed = {
             "screenshot": b"\x89PNG\r\n\x1a\nfixture",
             "memory": b"\x7fELFfixture",
@@ -273,8 +273,9 @@ class GuestAgentExitTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertTrue(json.loads(stdout.getvalue())["disconnected"])
 
-    def test_psfile_companion_contract(self):
-        companions, arguments = self.module._psfile_args(["--companion", "local.json", r"C:\Windows\Temp\local.json", "--", "-stageNotMyFault"])
+    def test__psfile_args_SplitsCompanionsFromPowerShellArguments(self) -> None:
+        MUT = self.module  # guest-agent.py, the module under test
+        companions, arguments = MUT._psfile_args(["--companion", "local.json", r"C:\Windows\Temp\local.json", "--", "-stageNotMyFault"])
         self.assertEqual(companions, [("local.json", r"C:\Windows\Temp\local.json")])
         self.assertEqual(arguments, ["-stageNotMyFault"])
 
