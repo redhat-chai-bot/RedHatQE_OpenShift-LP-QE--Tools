@@ -56,7 +56,7 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn('Win32_ComputerSystem.AutomaticManagedPagefile', self.readme)
         self.assertIn('pageFile.requiredMB', self.readme)
         self.assertIn('initial and maximum sizes of at least `requiredMB`', self.readme)
-        self.assertIn('| `-StageNotMyFault` |', self.readme)
+        self.assertIn('| `-stageNotMyFault` |', self.readme)
         self.assertIn('normal validation never downloads or stages anything', self.readme)
         self.assertIn('Never runs NotMyFault, crashes or reboots the guest', self.readme)
         self.assertIn('they do not constitute a successful Windows execution or crash-dump test', self.readme)
@@ -70,7 +70,7 @@ class GuestReadmeTests(unittest.TestCase):
     def test_no_unsupported_caller_or_consumer_claims(self):
         # Claims that no code in this repository supports: an unconditional preflight forwarding
         # claim, a pending runner update, and a consumer that always discards its VMs.
-        self.assertNotRegex(self.readme, r'preflight-rhov\.sh` passes `-StageNotMyFault`(?! only with `--require-trigger`)')
+        self.assertNotRegex(self.readme, r'preflight-rhov\.sh` passes `-stageNotMyFault`(?! only with `--require-trigger`)')
         self.assertNotIn('does not pass it yet, and its update is pending', self.readme)
         self.assertNotIn('src/scripts/bsod-pipeline/bsod-runner.sh', self.readme)
         self.assertNotIn('each pytest run tears down its VM', self.readme)
@@ -82,11 +82,11 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn('function Remove-SetupCacheFile', post, 'include the golden-image-post-reboot.ps1 change')
         self.assertIn('function Get-PagefileSizeMB', pre, 'include the golden-image-pre-reboot.ps1 change')
         for script in (pre, post):
-            self.assertIn('[math]::Round(($MemoryBytes + 257MB) / 1MB, 0)', script)
+            self.assertIn('[math]::Round(($memoryBytes + 257MB) / 1MB, 0)', script)
             self.assertNotRegex(script, r'(?i)bcdedit|reagentc')
             self.assertIn('device_add pvpanic,id=pvpanic0', script)
         self.assertIn("Remove-SetupCacheFile @('{}', '{}')".format(*CLEANUP_PATHS), post)
-        self.assertIn('$ExitCode -in 0, 1641, 3010', pre)
+        self.assertIn('$exitCode -in 0, 1641, 3010', pre)
         self.assertIn('Exit codes 0, 1641 and 3010 are reported as success', self.readme)
         self.assertIn('AutomaticManagedPagefile = $false', pre)
         self.assertNotIn('-Name AutomaticManagedPagefile -Value 0', pre)
@@ -117,9 +117,9 @@ class GuestReadmeTests(unittest.TestCase):
         # Read-only: no registry, CIM or file-system write outside the NotMyFault staging directory.
         self.assertNotRegex(script, r'(?i)Set-ItemProperty|New-ItemProperty|Remove-ItemProperty|Set-CimInstance|Restart-Computer')
         self.assertIn('(read-only)', self.readme)
-        self.assertIn('[switch]$StageNotMyFault', script)
+        self.assertIn('[switch]$stageNotMyFault', script)
         self.assertIn("$notMyFault = [ordered]@{ status = 'not requested' }", script)
-        self.assertIn('`{ "status": "not requested" }` without `-StageNotMyFault`', self.readme)
+        self.assertIn('`{ "status": "not requested" }` without `-stageNotMyFault`', self.readme)
         # DedicatedDumpFile is a required absence; exit codes 2 and 4 and the signature check are documented as implemented.
         self.assertIn('always `DedicatedDumpFile`, as `must be absent`', self.readme)
         self.assertIn("Fail \"Unknown dump type '${type}'. Valid: $($typeNames -join ', ').\" 2", script)
@@ -129,7 +129,7 @@ class GuestReadmeTests(unittest.TestCase):
         # A staging failure keeps the settings result (mismatches, page file) next to the error.
         self.assertIn('Fail "NotMyFault could not be staged: $($notMyFault.problem)" 4 $result', script)
         self.assertIn('still emits the full result', self.readme)
-        self.assertIn('Get-AuthenticodeSignature -LiteralPath $Path', script)
+        self.assertIn('Get-AuthenticodeSignature -LiteralPath $path', script)
         self.assertIn("-cnotcontains 'O=Microsoft Corporation'", script)
         self.assertIn('exactly `Microsoft Corporation`', self.readme)
         self.assertIn('`artifacts.notMyFault`', self.readme)
