@@ -8,7 +8,7 @@ values. If a table is wrong, fix it here once and every consumer picks it up.
 | File | Consumed by |
 |---|---|
 | `bugcheck-codes.json` | Host-side scripts (parse-dump-header.sh, extract-evtx.py) |
-| `crash-control.json` | Guest-side (configure-dumps.ps1, prep-guest.ps1) |
+| `crash-control.json` | Guest-side (golden-image-pre-reboot.ps1 writes the same values; validate-crash-settings.ps1 compares them read-only) |
 | `event-sources.json` | Host-side (extract-evtx.py offline parser) |
 | `trigger-methods.json` | **Host-only** (sweep-crashme.sh, sweep-chaos.sh) |
 | `chaos-triggers.json` | **Host-only** (sweep-chaos.sh) |
@@ -26,8 +26,9 @@ Bug-check (stop) code -> name + description. Keyed by canonical `0x`-prefixed
 ### `crash-control.json`
 Crash-dump registry configuration under `CrashControl`, dump-type semantics, and
 page-file requirements.
-- **Consumers:** `configure-dumps.ps1` applies `recommended.values`; the
-  collector verifies live settings match before trusting a dump exists.
+- **Consumers:** `validate-crash-settings.ps1` (run by `preflight-rhov.sh`) compares the live registry with
+  `recommended.values` (value and registry type) and `recommended.absentValues` and reports mismatches; it never
+  writes or reboots. `golden-image-pre-reboot.ps1` configures the same settings in the golden image.
 
 ### `trigger-methods.json`
 How each bug-check code is triggered in the test harness: method, parameters,
