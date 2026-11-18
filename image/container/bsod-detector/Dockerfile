@@ -114,7 +114,7 @@ COPY apps/bsod-detector/src/scripts/host/reliability.py             /usr/local/b
 COPY apps/bsod-detector/src/scripts/host/parse-dump-header.sh       /usr/local/bin/parse-dump-header.sh
 COPY apps/bsod-detector/src/scripts/host/collect-host-signals.sh    /usr/local/bin/collect-host-signals.sh
 COPY apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py    /usr/local/bin/extract-evtx.py
-COPY apps/bsod-detector/src/scripts/guest/validate-crash-settings.ps1 /usr/share/bsod-detector/guest/validate-crash-settings.ps1
+COPY apps/bsod-detector/src/scripts/guest/configure-dumps.ps1       /usr/share/bsod-detector/guest/configure-dumps.ps1
 COPY apps/bsod-detector/src/data/                                  /usr/share/bsod-detector/data/
 COPY apps/bsod-detector/archieve/host-tools/extract-dump.sh          /usr/local/bin/extract-dump.sh
 RUN chmod +x \
@@ -146,8 +146,8 @@ RUN mkdir -p /evidence
 ENV BSOD_CODES_FILE=/usr/share/bsod-detector/data/bugcheck-codes.json \
     BSOD_HOST_SIGNALS_FILE=/usr/share/bsod-detector/data/host-signals.json \
     BSOD_DATA_DIR=/usr/share/bsod-detector/data \
-    BSOD_DET__VALIDATE__CRASH_SETTINGS=/usr/share/bsod-detector/guest/validate-crash-settings.ps1 \
-    BSOD_DET__CRASH_CONTROL__FILE=/usr/share/bsod-detector/data/crash-control.json
+    BSOD_CONFIGURE_DUMPS=/usr/share/bsod-detector/guest/configure-dumps.ps1 \
+    BSOD_CRASH_CONTROL_FILE=/usr/share/bsod-detector/data/crash-control.json
 
 # ── Entrypoint ───────────────────────────────────────────────────────────────
 COPY image/container/bsod-detector/entrypoint.sh /entrypoint.sh
