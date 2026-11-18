@@ -57,7 +57,7 @@ def pagedu64_bytes(code=1):
     return bytes(data)
 
 
-def minidump_bytes():
+def small_dump_bytes():
     data = bytearray(44)
     data[:4] = b"MDMP"
     struct.pack_into("<II", data, 8, 1, 32)
@@ -128,9 +128,10 @@ class ReliabilityTests(unittest.TestCase):
                 path.write_bytes(data)
                 result = run_helper("validate-artifact", "--type", kind, "--path", str(path))
                 self.assertEqual(result.returncode, 0, (kind, result.stdout, result.stderr))
-            mini = Path(temporary) / "mini.dmp"
-            mini.write_bytes(minidump_bytes())
-            self.assertEqual(run_helper("validate-artifact", "--type", "dump", "--path", str(mini)).returncode, 0)
+            # Small (MDMP) dumps are not evidence in the frozen-VM flow and are rejected.
+            small = Path(temporary) / "small.dmp"
+            small.write_bytes(small_dump_bytes())
+            self.assertNotEqual(run_helper("validate-artifact", "--type", "dump", "--path", str(small)).returncode, 0)
 
     def test_truncated_and_malformed_artifacts_fail(self):
         malformed = {
@@ -144,9 +145,9 @@ class ReliabilityTests(unittest.TestCase):
                 path = Path(temporary) / kind
                 path.write_bytes(data)
                 self.assertNotEqual(run_helper("validate-artifact", "--type", kind, "--path", str(path)).returncode, 0, kind)
-            bad_mini = Path(temporary) / "bad-mini"
-            bad_mini.write_bytes(b"MDMP" + bytes(40))
-            self.assertNotEqual(run_helper("validate-artifact", "--type", "dump", "--path", str(bad_mini)).returncode, 0)
+            bad_small = Path(temporary) / "bad-small"
+            bad_small.write_bytes(b"MDMP" + bytes(40))
+            self.assertNotEqual(run_helper("validate-artifact", "--type", "dump", "--path", str(bad_small)).returncode, 0)
             trailing = Path(temporary) / "memory-with-status"
             trailing.write_bytes(elf_bytes() + b"Domain dumped successfully\n")
             self.assertNotEqual(run_helper("validate-artifact", "--type", "memory", "--path", str(trailing)).returncode, 0)
@@ -273,9 +274,9 @@ class GuestAgentExitTests(unittest.TestCase):
         self.assertTrue(json.loads(stdout.getvalue())["disconnected"])
 
     def test_psfile_companion_contract(self):
-        companions, arguments = self.module._psfile_args(["--companion", "local.json", r"C:\Windows\Temp\local.json", "--", "-VerifyOnly"])
+        companions, arguments = self.module._psfile_args(["--companion", "local.json", r"C:\Windows\Temp\local.json", "--", "-stageNotMyFault"])
         self.assertEqual(companions, [("local.json", r"C:\Windows\Temp\local.json")])
-        self.assertEqual(arguments, ["-VerifyOnly"])
+        self.assertEqual(arguments, ["-stageNotMyFault"])
 
 
 if __name__ == "__main__":
