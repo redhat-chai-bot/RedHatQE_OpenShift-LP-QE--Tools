@@ -105,7 +105,7 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn("$ErrorActionPreference = 'Continue'", post)
         self.assertIn('C:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /shutdown /quiet', post)
 
-    def test_readme_matches_validate_crash_settings(self):
+    def test_GuestReadme_MatchesTheValidatorAndItsCallerContract(self) -> None:
         script = VALIDATOR_SCRIPT.read_text(encoding='utf-8')
         self.assertIn('function Test-PageFileAdequate', script, 'include the validate-crash-settings.ps1 change')
         data = json.loads(DATA_FILE.read_text(encoding='utf-8'))
