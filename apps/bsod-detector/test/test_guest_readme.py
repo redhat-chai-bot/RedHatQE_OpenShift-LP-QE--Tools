@@ -126,6 +126,9 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn('Fail "NotMyFault could not be staged: $($notMyFault.problem)" 4', script)
         self.assertIn('exits with code 2', self.readme)
         self.assertIn('exits with code 4', self.readme)
+        # A staging failure keeps the settings result (mismatches, page file) next to the error.
+        self.assertIn('Fail "NotMyFault could not be staged: $($notMyFault.problem)" 4 $result', script)
+        self.assertIn('still emits the full result', self.readme)
         self.assertIn('Get-AuthenticodeSignature -LiteralPath $Path', script)
         self.assertIn("-cnotcontains 'O=Microsoft Corporation'", script)
         self.assertIn('exactly `Microsoft Corporation`', self.readme)
