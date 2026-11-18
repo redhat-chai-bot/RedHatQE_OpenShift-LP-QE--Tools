@@ -5,7 +5,8 @@ The real runner is copied into a temporary tree next to mock preflight-rhov.sh a
 scripts, a mock guest agent (BSOD_DET__GUEST_AGENT__BIN) and a mock `oc` on PATH. kubectl, virtctl,
 virsh and the old host/watch-crash.sh path are guard stubs that fail and are recorded, and
 KUBECONFIG points nowhere, so no guest, VM, cluster, network or crash operation can run. The digest
-below is synthetic test data; the runner drops any digest pin and uses the image name or tag.
+below is synthetic test data; the runner passes only the watcher the image, without any digest pin,
+and leaves BSOD_DET__RECOVERY__IMAGE unchanged for preflight.
 
 Naming follows the team guide: camelCase variables, PascalCase helpers and upper-case environment
 variables namespaced with a prefix: BSOD_DET__* is the runner's interface and BSOD_RUNNER_TEST__*
@@ -31,10 +32,12 @@ taggedImage = untaggedImage + ':test'
 syntheticDigest = '@sha256:' + 'e26c74ce' * 8
 nmfGuest = r'C:\Temp\nmf\notmyfaultc64.exe'
 
-# Records its arguments and writes the launcher Pod/domain metadata the runner reads.
+# Records its arguments and the recovery image it sees in its environment, then writes the launcher
+# Pod/domain metadata the runner reads (BSOD_RUNNER_TEST__METADATA replaces it).
 mockPreflight = r'''#!/usr/bin/env bash
 set -euxo pipefail; shopt -s inherit_errexit
 echo "preflight $*" >> "${BSOD_RUNNER_TEST__CALL_LOG}"
+echo "${BSOD_DET__RECOVERY__IMAGE:-<unset>}" > "${BSOD_RUNNER_TEST__PREFLIGHT_IMAGE_FILE}"
 [ "${BSOD_RUNNER_TEST__PREFLIGHT_FAIL:-0}" = 0 ] || exit 7
 typeset metadata=''
 while (($#)); do
@@ -43,7 +46,9 @@ while (($#)); do
     *) shift;;
   esac
 done
-printf '{"launcherPod":"virt-launcher-demo","domain":"demo-ns_demo-vm"}\n' > "${metadata}"
+typeset metadataJSON='{"launcherPod":"virt-launcher-demo","domain":"demo-ns_demo-vm"}'
+[ -z "${BSOD_RUNNER_TEST__METADATA:-}" ] || metadataJSON="${BSOD_RUNNER_TEST__METADATA}"
+printf '%s\n' "${metadataJSON}" > "${metadata}"
 true
 '''
 
@@ -156,6 +161,7 @@ class RunnerTests(unittest.TestCase):
         self.callLog = self.tmpDir / 'calls.log'
         self.crashMarker = self.tmpDir / 'crash.marker'
         self.watcherPIDfile = self.tmpDir / 'watcher.pid'
+        self.preflightImageFile = self.tmpDir / 'preflight-image'
         # Registered after rmtree, so it runs first: a leftover mock watcher is stopped even when a test fails.
         self.addCleanup(self.KillLeftoverWatcher)
         self.env = {
@@ -172,6 +178,7 @@ class RunnerTests(unittest.TestCase):
             'BSOD_RUNNER_TEST__CALL_LOG': str(self.callLog),
             'BSOD_RUNNER_TEST__CRASH_MARKER': str(self.crashMarker),
             'BSOD_RUNNER_TEST__WATCHER_PID_FILE': str(self.watcherPIDfile),
+            'BSOD_RUNNER_TEST__PREFLIGHT_IMAGE_FILE': str(self.preflightImageFile),
         }
 
     def Run(self, *args, timeout=60, **overrides):
@@ -196,11 +203,12 @@ class RunnerTests(unittest.TestCase):
         return [path for path in self.evidence.iterdir() if path.is_dir()]
 
     def ResetRun(self):
-        '''Fresh evidence directory, call log and watcher pid file for the next subtest.'''
+        '''Fresh evidence directory, call log, watcher pid file and preflight image record for the next subtest.'''
         shutil.rmtree(self.evidence)
         self.evidence.mkdir()
         self.callLog.unlink(missing_ok=True)
         self.watcherPIDfile.unlink(missing_ok=True)
+        self.preflightImageFile.unlink(missing_ok=True)
 
     def Index(self, calls, prefix):
         return next(index for index, call in enumerate(calls) if call.startswith(prefix))
@@ -248,7 +256,7 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(calls, [])
                 self.assertEqual(self.RunDirs(), [])
 
-    def testRecoveryImageDigestPinIsDroppedAndTagsPassThrough(self):
+    def testRecoveryImageGoesOnlyToTheWatcherWithoutItsDigestPin(self):
         cases = [(taggedImage, taggedImage), (taggedImage + syntheticDigest, taggedImage),
                  (untaggedImage + syntheticDigest, untaggedImage)]
         for image, expected in cases:
@@ -256,8 +264,10 @@ class RunnerTests(unittest.TestCase):
                 self.ResetRun()
                 result, calls = self.Run('--mode', 'watch', BSOD_DET__RECOVERY__IMAGE=image)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                for prefix in ('preflight ', 'watcher '):
-                    self.assertEqual(self.OptionValue(calls[self.Index(calls, prefix)], '--recovery-image'), expected)
+                self.assertEqual(self.OptionValue(calls[self.Index(calls, 'watcher ')], '--recovery-image'), expected)
+                self.assertNotIn('--recovery-image', calls[self.Index(calls, 'preflight ')].split())
+                # Preflight gets no option; it sees the caller's variable, digest pin included, unchanged.
+                self.assertEqual(self.preflightImageFile.read_text(encoding='utf-8').strip(), image)
                 self.assertFalse([call for call in calls if '@sha256' in call])
 
     def testModeCrashTypeAndConfirmationGatesFailBeforeSideEffects(self):
@@ -284,7 +294,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         preflight = calls[self.Index(calls, 'preflight ')]
         self.assertNotIn('--require-trigger', preflight)
-        self.assertEqual(self.OptionValue(preflight, '--recovery-image'), taggedImage)
+        self.assertNotIn('--recovery-image', preflight.split())
         self.assertFalse([call for call in calls if call.startswith('guest-agent')])
         watcher = calls[self.Index(calls, 'watcher ')]
         self.assertIn('--no-restart', watcher)
@@ -393,6 +403,33 @@ class RunnerTests(unittest.TestCase):
         result, _ = self.Run('--mode', 'watch', BSOD_RUNNER_TEST__DOMAIN_PATCH_FAIL='1')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('bsod-runner: WARN: domain crash-behaviour patch failed', result.stderr)
+
+    def testDomainPatchHotPlugsPVPanicPCIandKeepsThePreBSODdomainCopy(self):
+        result, calls = self.Run('--mode', 'watch')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The inline launcher Pod script spans several call-log lines.
+        hotPlug = [call for call in calls if 'device_add' in call]
+        self.assertEqual(len(hotPlug), 1, calls)
+        self.assertIn('"device_add pvpanic-pci,id=pvpanic0"', hotPlug[0])
+        runDir = self.RunDirs()[0]
+        self.assertEqual((runDir / 'pre-bsod-domain.xml').read_text(encoding='utf-8'), '<domain/>\n')
+        self.assertFalse((runDir / 'domain.xml').exists())
+
+    def testMetadataWithoutNonEmptyPodOrDomainStopsBeforeGuestAndWatcher(self):
+        cases = [
+            ('{"launcherPod":"","domain":"demo-ns_demo-vm"}', 'has no launcherPod'),
+            ('{"launcherPod":5,"domain":"demo-ns_demo-vm"}', 'has no launcherPod'),
+            ('{"launcherPod":"virt-launcher-demo","domain":null}', 'has no domain'),
+        ]
+        for metadata, message in cases:
+            with self.subTest(metadata=metadata):
+                self.ResetRun()
+                result, calls = self.Run('--mode', 'intentional', '0x01', BSOD_DET__CONFIRM_TARGET='demo-vm',
+                                         BSOD_RUNNER_TEST__METADATA=metadata)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertEqual([call.split()[0] for call in calls], ['preflight'])
+                self.assertEqual(len(self.RunDirs()), 1)
 
 
 if __name__ == '__main__':
