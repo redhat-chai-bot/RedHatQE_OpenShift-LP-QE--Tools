@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Disposable-VM RHOV BSOD pipeline: preflight, arm the watcher, optionally crash with NotMyFault, verify the evidence.
 typeset useMsg=''; read -rd '' useMsg 0<<'useMsg-EOF'
 RHOV BSOD pipeline for an explicitly disposable test VM:
 preflight -> [intentional: check NotMyFault, clear old dumps] -> watcher armed -> [intentional: inject] -> offline extraction.
@@ -10,20 +11,22 @@ Usage:
 
 Where:
     --mode      intentional  Crash the VM on purpose with NotMyFault <crashType>. Preflight runs with
-                             --require-trigger and requires NotMyFault on the guest, staging it first
-                             when preflight and configure-dumps.ps1 support -StageNotMyFault.
-                watch        Wait for a natural crash. NotMyFault is not staged or run and existing
+                             --require-trigger and fails unless NotMyFault is on the guest after its
+                             configure-dumps.ps1 step. This script never copies NotMyFault itself.
+                watch        Wait for a natural crash. NotMyFault is not required or run and existing
                              guest crash dumps are not deleted.
                 Prompted for when omitted on a terminal. Required otherwise.
     crashType   NotMyFault crash type, 0x01 - 0x09. Intentional mode only, no default.
 
 Environment:
     BSOD_DET__NAMESPACE, BSOD_DET__VM__NAME  Target VM (required).
-    BSOD_DET__RECOVERY__IMAGE                Recovery image (required); an @sha256 digest pin is dropped.
+    BSOD_DET__RECOVERY__IMAGE                Recovery image (required, no default). The watcher gets it with any
+                                             @sha256 digest pin dropped; preflight-rhov.sh is not passed it and
+                                             reads this variable itself if it needs it.
     BSOD_DET__CONFIRM_TARGET                 Must equal BSOD_DET__VM__NAME (intentional mode only).
     BSOD_DET__EVIDENCE__DIR                  Evidence mount (default: /mnt/persistent-bsod-evidence).
     BSOD_EVIDENCE_VOLUME_KIND, BSOD_DET__EVIDENCE__STORAGE_ID, BSOD_DET__MEMORY__DUMP_PVC,
-    BSOD_DET__SNAPSHOT__CLASS,
+    BSOD_DET__SNAPSHOT__CLASS, BSOD_DET__GUEST_AGENT__BIN (default: python3 ../host/guest-agent.py),
     BSOD_DET__READY__TIMEOUT (300), BSOD_DET__PREFLIGHT__TIMEOUT (1800)  Optional overrides.
     The watcher's own settings (e.g. BSOD_DET__ARMED__TIMEOUT, default 3600) still apply.
 useMsg-EOF
@@ -41,7 +44,7 @@ typeset evidenceID="${BSOD_DET__EVIDENCE__STORAGE_ID:-shared-bsod-evidence}"
 typeset memoryPVC="${BSOD_DET__MEMORY__DUMP_PVC:-${vm}-memdump}"
 typeset snapClass="${BSOD_DET__SNAPSHOT__CLASS:-ocs-storagecluster-rbdplugin-snapclass}"
 typeset recoveryImage="${BSOD_DET__RECOVERY__IMAGE:-}"
-# Strip digest pin (@sha256:...) — always use the tag so a stale digest doesn't block the pipeline.
+# Only the watcher gets this copy, without any @sha256 pin; preflight reads BSOD_DET__RECOVERY__IMAGE itself if needed.
 recoveryImage="${recoveryImage%%@*}"
 typeset readyTimeout="${BSOD_DET__READY__TIMEOUT:-300}"
 typeset preflightTimeout="${BSOD_DET__PREFLIGHT__TIMEOUT:-1800}"
@@ -114,24 +117,25 @@ typeset -a commonArgArr=(
 )
 mkdir "${outDir}" || Die "cannot create unique run directory ${outDir}"
 
-# --recovery-image goes to the watcher only; preflight-rhov.sh reads BSOD_DET__RECOVERY__IMAGE itself, unmodified.
-# Only an intentional run asks preflight for the trigger: it requires NotMyFault on the guest and, with
-# helpers that support configure-dumps.ps1 -StageNotMyFault, stages it first. Watch runs never stage it.
+# Only an intentional run passes --require-trigger, so preflight fails unless NotMyFault is on the guest.
 typeset -a preflightArgArr=("${commonArgArr[@]}")
 [ "${mode}" = watch ] || preflightArgArr+=(--require-trigger)
 RunTimed "${preflightTimeout}" "${hostDir}/preflight-rhov.sh" "${preflightArgArr[@]}"
 typeset pod='' dom=''
-pod="$(jq -er .launcherPod "${metadataFile}")"
-dom="$(jq -er .domain "${metadataFile}")"
+pod="$(jq -er '.launcherPod | select((type == "string") and (length > 0))' "${metadataFile}")" ||
+    Die "preflight metadata ${metadataFile} has no launcherPod"
+dom="$(jq -er '.domain | select((type == "string") and (length > 0))' "${metadataFile}")" ||
+    Die "preflight metadata ${metadataFile} has no domain"
 export BSOD_DET__POD__NAME="${pod}" BSOD_DET__DOMAIN__NAME="${dom}"
 
 # Best effort: hot-add pvpanic so the BSOD is reported to QEMU instead of a hard reset, and persist
 # on_crash=preserve (effective only if KubeVirt keeps that definition).
 # shellcheck disable=SC2016 # Expanded by the launcher Pod shell.
 RunTimed 30 oc --request-timeout=25s -n "${ns}" exec "${pod}" -- bash -o pipefail -O inherit_errexit -euxc '
+    typeset dom="${1:?}"; (($#)) && shift
     typeset -i es=0
-    virsh qemu-monitor-command "${1}" --hmp "device_add pvpanic-pci,id=pvpanic0" || es=1
-    { virsh dumpxml "${1}" | sed "s|<on_crash>.*</on_crash>|<on_crash>preserve</on_crash>|" 1> /tmp/dom-patch.xml &&
+    virsh qemu-monitor-command "${dom}" --hmp "device_add pvpanic-pci,id=pvpanic0" || es=1
+    { virsh dumpxml "${dom}" | sed "s|<on_crash>.*</on_crash>|<on_crash>preserve</on_crash>|" 1> /tmp/dom-patch.xml &&
         virsh define /tmp/dom-patch.xml 1> /dev/null; } || es=1
     rm -f /tmp/dom-patch.xml || true
     exit "${es}"
