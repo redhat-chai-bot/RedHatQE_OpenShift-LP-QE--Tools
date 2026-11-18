@@ -17,7 +17,7 @@ The descriptions below document what the scripts in this directory do; they do n
 - The pre-reboot script needs network access to resolve and download the latest VirtIO ISO (a cached copy is reused only when it is that same latest release and matches its recorded SHA-256). It stops with exit code 1, before installing anything or changing registry settings, if the latest ISO cannot be resolved, downloaded and recorded.
 - `validate-crash-settings.ps1` requires a readable configuration JSON file. It downloads NotMyFault (network access) only with `-stageNotMyFault`, and then always fetches the current release; normal validation never downloads or stages anything.
 - The pre-reboot script configures a pagefile sized to the RAM of the VM it runs on plus 257 MB. Ensure the guest's C: volume has room for it; the script does not check free disk space.
-- VMs cloned from the golden image must not have more RAM than the VM that prepared it: `validate-crash-settings.ps1` computes the requirement from the RAM of the VM it runs on and then reports the page file as not adequate, which the host preflight rejects. Images prepared by older versions of these scripts (a 4096 MB page file and a `DedicatedDumpFile`) are not adequate either and must be rebuilt.
+- VMs cloned from the golden image must not have more RAM than the VM that prepared it: `validate-crash-settings.ps1` computes the requirement from the RAM of the VM it runs on and then reports the page file as not adequate (`pageFile.adequate` is false), which callers should treat as a failure. Images prepared by older versions of these scripts (a 4096 MB page file and a `DedicatedDumpFile`) are not adequate either and must be rebuilt.
 - The intended test flow does not restart a VM after a simulated crash, so the golden image is meant for disposable test VMs. The current `src/scripts/host/watch-crash.sh` still starts the VM again after extracting evidence unless it runs with `--no-restart`; aligning the watcher with the intended flow is a separate, planned change.
 
 ```powershell
@@ -30,7 +30,7 @@ The descriptions below document what the scripts in this directory do; they do n
 
 Do not seal if the post-reboot script reports `FAIL` or exits with code 1. It prints a sealing command after its checks pass and its cleanup succeeds, but does not execute that command itself.
 
-`validate-crash-settings.ps1` is the run-time check the host preflight runs before arming a crash test, not a step of the golden-image pair; it never repairs a mismatch. Its desired values come from its configuration, so they can differ from the fixed golden-image settings.
+`validate-crash-settings.ps1` is a run-time check for a host caller to run before arming a crash test, not a step of the golden-image pair; it never repairs a mismatch. The host-side caller is maintained separately. Its desired values come from its configuration, so they can differ from the fixed golden-image settings.
 
 ## 1. golden-image-pre-reboot.ps1
 
@@ -151,7 +151,7 @@ The command is printed only. Sealing remains a separate operator action.
 
 ### Purpose
 
-Read-only run-time check of the guest's crash-dump settings, run by the host `preflight-rhov.sh` before a crash test is armed. It compares `crash-control.json` with the live registry and reports every difference. It never writes the registry, CIM or page file, never repairs a mismatch, and never reboots or crashes the guest. The golden-image pair owns the configuration: part 1 writes it and part 2 verifies it before sealing.
+Read-only run-time check of the guest's crash-dump settings, meant to be run by a host caller before a crash test is armed. It compares `crash-control.json` with the live registry and reports every difference. It never writes the registry, CIM or page file, never repairs a mismatch, and never reboots or crashes the guest. The golden-image pair owns the configuration: part 1 writes it and part 2 verifies it before sealing.
 
 ### Parameters
 
@@ -189,7 +189,7 @@ These examples use a placeholder path that must be replaced with the actual conf
 5. Reports every name in `recommended.absentValues`, and always `DedicatedDumpFile`, as `must be absent` when it exists.
 6. Reports page file adequacy (below).
 
-A mismatch does not change the exit code: the JSON reports it, and `preflight-rhov.sh` stops the run when `matchesRecommended` is false, `AutoReboot` is not 0 or the page file is not adequate. The fix is to rebuild or correct the golden image; nothing is changed at run time.
+A mismatch does not change the exit code: the JSON reports it, and a caller should stop when `matchesRecommended` is false, `current.AutoReboot` is not 0 or `pageFile.adequate` is false. The fix is to rebuild or correct the golden image; nothing is changed at run time.
 
 ### NotMyFault staging (`-stageNotMyFault`)
 
@@ -198,9 +198,9 @@ A mismatch does not change the exit code: the JSON reports it, and `preflight-rh
 - Requires a valid Authenticode signature on `notmyfaultc64.exe` whose signer's organization is exactly `Microsoft Corporation`. An untrusted or missing executable is deleted, never staged.
 - Moves the verified executable to `C:\Temp\nmf\notmyfaultc64.exe` and removes the archive and extraction folder.
 - Reports `source`, `resolvedSource`, `archiveSHA256`, `sha256` (of the executable), `version` (file version), `signer` and `stagedPath`. No hash is published for NotMyFault: the SHA-256 values record what was downloaded; the signature is the publisher check.
-- Never runs NotMyFault, crashes or reboots the guest. A staging failure exits with code 4 and still emits the full result (settings mismatches, page file, the failed `notMyFault` record) with `ok` set to `false` and an `error`; the host preflight then stops the run and prints it.
+- Never runs NotMyFault, crashes or reboots the guest. A staging failure exits with code 4 and still emits the full result (settings mismatches, page file, the failed `notMyFault` record) with `ok` set to `false` and an `error`; callers should stop and report it.
 
-The host `preflight-rhov.sh` passes `-stageNotMyFault` only with `--require-trigger` and records the reported values in `recovery-metadata.json` (`artifacts.notMyFault`). Watch runs do not pass it.
+Callers should pass `-stageNotMyFault` only for intentional crash runs; normal validation never stages anything. The reported fields are the record a caller can keep.
 
 ### Pagefile reporting
 
