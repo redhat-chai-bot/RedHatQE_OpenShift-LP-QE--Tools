@@ -27,7 +27,7 @@ Detect, capture, and analyze Blue Screen of Death (BSOD) events on Windows VMs r
    └─────┬──────┘     └────────┬────────┘     └──────────┬─────────┘
          │                     │                          │
    QGA ping             virtctl memory-dump          guestfs-ntfs pod
-   configure-dumps      VNC screenshot               guestfish NTFS mount
+   validate settings    VNC screenshot               guestfish NTFS mount
    recovery-metadata    domain.xml / host-signals    tar stream → evidence dir
 ```
 
@@ -532,11 +532,10 @@ jq '.invalidArtifacts' ...               # [] = all files structurally valid
 | `vm-memory.elf.tar.gz` | Expected; validated when capture succeeds | KubeVirt virtctl — independent of Windows disk state; API/storage/export failures are recorded |
 | `System.evtx` / `Application.evtx` | Extracted when recovery succeeds | Offline guestfish NTFS read after VM stopped; missing/invalid artifacts are reported |
 | `MEMORY.DMP` (on-disk) | ❌ Not captured | `AutoReboot=0` prevents the boot that writes the staged page file dump to MEMORY.DMP |
-| `Minidump/*.dmp` | Not captured in the observed test configuration | Requires `pagefile.sys`; the documented Windows Server 2022 KVM runs did not materialize one |
 | `vm-memory-windows.dmp` | ❌ Not in pipeline | elf2dmp disabled (17GB, run offline) |
 | Volatility outputs | ❌ Not in pipeline | Developer tool, run offline against vm-memory.elf.tar.gz |
 
-### Why MINIDUMP and MEMORY.DMP Were Unavailable in the Observed Test Configuration
+### Why MEMORY.DMP Was Unavailable in the Observed Test Configuration
 
 **Observed in this test configuration**: Windows Server 2022 on KVM with VirtIO Balloon did not create `pagefile.sys` on demand during the documented runs. The pipeline uses `AutoReboot=0` to freeze the VM at BSOD, preventing the post-crash reboot that would copy staged crash dumps to disk.
 
@@ -544,13 +543,13 @@ jq '.invalidArtifacts' ...               # [] = all files structurally valid
 
 | Approach | Execution | Observed Behavior | Failure Reason | Reference |
 |---|---|---|---|---|
-| **Registry Set-ItemProperty** | Run PowerShell: `Set-ItemProperty HKLM:\...\CrashControl -Name "PagingFiles" -Value "C:\pagefile.sys 1024 2048"` after crash config | Registry entry created successfully; reboot applied. Post-reboot check: **pagefile.sys never appeared on disk**. Free RAM remained 15.8GB. | Windows Server 2022 lazy-allocates pagefile only when memory pressure (page faults) occurs. With 16GB VM and no memory-intensive workload, threshold never reached. | configure-dumps.ps1, commit e7c2ca4 |
-| **WMI Win32_PageFileSetting** | Create via PowerShell: `$pf = ([WMICLASS]'Win32_PageFileSetting').CreateInstance()` → Set-CimInstance. Reboot. | Pagefile created at reboot, enumerated via `Get-Volume`; immediately deallocated seconds later (Windows detected unused state). Free RAM still ~16GB. Minidump folder remained empty. | Same lazy-allocation. Windows deallocates pagefile if no page faults occur within observability window. BSOD events don't consume enough RAM to force allocation. | commit 2886457 |
+| **Registry Set-ItemProperty** | Run PowerShell: `Set-ItemProperty HKLM:\...\CrashControl -Name "PagingFiles" -Value "C:\pagefile.sys 1024 2048"` after crash config | Registry entry created successfully; reboot applied. Post-reboot check: **pagefile.sys never appeared on disk**. Free RAM remained 15.8GB. | Windows Server 2022 lazy-allocates pagefile only when memory pressure (page faults) occurs. With 16GB VM and no memory-intensive workload, threshold never reached. | earlier guest crash-configuration script, commit e7c2ca4 |
+| **WMI Win32_PageFileSetting** | Create via PowerShell: `$pf = ([WMICLASS]'Win32_PageFileSetting').CreateInstance()` → Set-CimInstance. Reboot. | Pagefile created at reboot, enumerated via `Get-Volume`; immediately deallocated seconds later (Windows detected unused state). Free RAM still ~16GB. | Same lazy-allocation. Windows deallocates pagefile if no page faults occur within observability window. BSOD events don't consume enough RAM to force allocation. | commit 2886457 |
 | **.NET Registry API** | Direct registry write: `[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(...).SetValue("PagingFiles", ...)` + reboot. | No observable difference from Set-ItemProperty. Registry shows paging file path; no actual `.sys` file created on disk. | Identical root cause — OS-level lazy allocation decision, not registry visibility. | commit 3dfa5ad |
 | **TestLimit64 memory stress** | Download TestLimit64.exe via QGA (ARG_MAX limit hit on first attempt). Retry: VM-side `Invoke-WebRequest` download; ran `TestLimit64.exe -m 14000` to consume 14GB RAM. | **Memory consumed: 5.5GB** (measured via Task Manager `Committed` memory). Guest free RAM dropped to 10.4GB. **Pagefile.sys still not created.** Stress process held memory but no page fault threshold reached. | Consumed memory was allocated in RAM (not paging). No physical page faults triggered — Windows doesn't need to allocate pagefile if RAM still available for allocation. Buffer pool writes are cached, not forcing paging. | commit 1f8a1c2, 2024-10-12 debugging session |
 | **Balloon inflation via KubeVirt API** | Attempted `virtctl set memory-balloon vm --memory-amount X -n ns` to forcibly deflate available RAM. | **Memory pressure achieved: 1.4GB free** (rest held by balloon). Guest reported 14.6GB reserved. **Pagefile.sys not created.** Balloon took effect but Windows still deferred allocation. | KubeVirt balloon implementation on this cluster does not generate sufficient page-fault pressure to trigger Windows pagefile creation. Balloon reserves RAM but doesn't force OS to page. | commit 7e4a5f9, 2024-10-12 afternoon |
 | **Chaos krkn-lib memory-stress pod** | Deployed chaos pod with `pod-memory-stress` scenario (memory: limit=6GB, request=6GB) into cluster. Monitored for guest memory pressure. | **Host-side memory pressure: clear**. Guest `Free Memory` polling via QGA: **still reported 14.4GB free**. No host-to-guest pressure translation. Pagefile.sys never created. | Host memory pressure (pod eviction / swap) doesn't force guest OS paging decisions. Guest and host memory namespaces are isolated; hypervisor can't mandate guest OS behavior. | commit 4c2d8f1, 2024-10-12 revert to a8babfa |
-| **DedicatedDumpFile workaround (historical; no longer used, dumps go through a fixed page file)** | Pre-allocate `C:\DedicatedDump.sys` (RAM + 1MB) at golden image build. Configure `DedicatedDumpFile` registry. No reboot needed at pipeline runtime. | **Crash staging works:** DedicatedDump.sys receives crash dump on BSOD. Dump write succeeds without pagefile. EventLog entries created. **Minidump directory remains empty.** | DedicatedDumpFile bypasses pagefile for kernel dump staging. However, Windows Minidump feature (small user-mode process dumps, crash report generation) **has no bypass** — requires pagefile to exist. Minidump is separate from kernel dump. | Historical approach (commits after a8babfa; superseded by the fixed page file) |
+| **DedicatedDumpFile workaround (historical; no longer used, dumps go through a fixed page file)** | Pre-allocate `C:\DedicatedDump.sys` (RAM + 1MB) at golden image build. Configure `DedicatedDumpFile` registry. No reboot needed at pipeline runtime. | **Crash staging works:** DedicatedDump.sys receives crash dump on BSOD. Dump write succeeds without pagefile. EventLog entries created. | DedicatedDumpFile bypasses pagefile for kernel dump staging. | Historical approach (commits after a8babfa; superseded by the fixed page file) |
 
 #### Pagefile allocation attempts in the observed Windows Server 2022 KVM setup
 
@@ -564,7 +563,6 @@ jq '.invalidArtifacts' ...               # [] = all files structurally valid
 | Dump type | Requires | Current status | Mitigation |
 |---|---|---|---|
 | **Kernel dump (MEMORY.DMP)** | Fixed pagefile (RAM + 257 MB) + reboot | Not observed on disk with this `AutoReboot=0` pipeline configuration | Use `vm-memory.elf.tar.gz` when the KubeVirt capture stages succeed |
-| **Minidump (.dmp files)** | Pagefile | Not produced in observed runs | No supported workaround is documented for this test configuration |
 | **Full physical RAM (vm-memory.elf.tar.gz)** | KubeVirt VirtualMachineExport | Expected when KubeVirt dump/export stages succeed | **Primary artifact** — hand to developer for elf2dmp + volatility |
 
 #### Key Findings from Each Approach
@@ -583,18 +581,16 @@ jq '.invalidArtifacts' ...               # [] = all files structurally valid
 
 **DedicatedDumpFile partial success (historical; the dedicated dump file is no longer used)**
 - Kernel dump staging works (MEMORY.DMP equivalent) via pre-allocated file
-- Minidump files were not produced in the observed configuration; the tested setup requires a pagefile
-- The two dump types are separate Windows subsystems; fixing one doesn't fix the other
 
 #### Conclusion
 
-**MEMORY.DMP and Minidump have not been produced in the observed KVM/VirtIO Balloon configuration** due to:
+**MEMORY.DMP has not been produced in the observed KVM/VirtIO Balloon configuration** due to:
 1. Windows Server 2022 lazy pagefile allocation on KVM
 2. Pipeline requirement for `AutoReboot=0` to freeze VM and capture evidence (prevents the post-crash reboot that would write the staged dump to MEMORY.DMP on disk)
 3. No hypervisor-level mechanism to force pagefile creation — this is a guest OS decision
 4. Even with extreme memory stress (5.5GB consumed, free RAM 10.4GB; or 1.4GB free with balloon), pagefile allocation was not triggered
 
-When capture succeeds, `vm-memory.elf.tar.gz` contains the physical-memory artifact used for offline analysis; developers must run `elf2dmp` offline to convert it to Windows DMP format for WinDbg. System EventLog event 1001 may record the bug-check code and parameters, but it does not supply a minidump crash stack.
+When capture succeeds, `vm-memory.elf.tar.gz` contains the physical-memory artifact used for offline analysis; developers must run `elf2dmp` offline to convert it to Windows DMP format for WinDbg. System EventLog event 1001 may record the bug-check code and parameters, but it does not supply a crash stack.
 
 ---
 
@@ -756,16 +752,16 @@ tail -30 $run/watcher.log
 trigger-bsod-intentional.sh
   │
   ├── Phase 1a: Pre-cleanup — delete stale DVs/PVCs from previous failed runs
-  ├── Phase 1b: Validate notmyfaultc64.exe binary exists on host
   ├── Phase 2:  preflight-rhov.sh
   │               ├── Auto-create memory-dump PVC if missing
   │               ├── Auto-create evidence PVC if missing
   │               ├── QGA ping (5 retries)
-  │               ├── Crash dump registry validation (rebootRequired=false)
+  │               ├── Read-only crash-setting validation (validate-crash-settings.ps1);
+  │               │   --require-trigger stages the latest NotMyFault and records its SHA-256
   │               └── Write recovery-metadata.json
   ├── Phase 2b: Add pvpanic device via QMP + pre-capture domain.xml + vmi-spec.json
-  ├── Phase 2c: Upload notmyfaultc64.exe to VM via QGA
-  ├── Phase 3:  Guest cleanup — remove stale MEMORY.DMP and Minidump files
+  ├── Phase 2c: Confirm the staged NotMyFault recorded by preflight (no host-local copy)
+  ├── Phase 3:  Guest cleanup — remove a stale MEMORY.DMP
   ├── Phase 4:  watch-crash.sh (background)
   │               ├── Poll QGA every 5s → BSOD detected
   │               ├── Capture domain-bsod.xml at crash moment (always overwrites)
@@ -806,11 +802,11 @@ NTFS partitions are discovered dynamically. The extractor consumes only `--metad
 
 ---
 
-## Platform Constraints — MEMORY.DMP and Minidump
+## Platform Constraints — MEMORY.DMP
 
 The retained extractor maps raw `/pagefile.sys` to the archive member `MEMORY.DMP`. Naming raw bytes this way does not convert, parse or validate a Windows crash dump.
 
-No actual MEMORY.DMP/Minidump (or historical DedicatedDump.sys) extraction or dump conversion is enabled. JSON/parser/checksum generation is removed; Python reliability and watcher verdict changes remain deferred.
+No actual MEMORY.DMP (or historical DedicatedDump.sys) extraction or dump conversion is enabled. Small (mini) dumps are not part of this flow: the VM stays frozen after the simulated crash (`AutoReboot=0`) and evidence comes from the KubeVirt memory capture and offline disk extraction. JSON/parser/checksum generation is removed; Python reliability and watcher verdict changes remain deferred.
 
 **Primary memory artifact when capture succeeds:** `vm-memory.elf.tar.gz`. API, storage, export and download failures can prevent it from being produced. Developers may attempt offline conversion with `elf2dmp` for WinDbg/Volatility.
 
@@ -876,7 +872,7 @@ apps/bsod-detector/
 │   │   │   └── collect-host-signals.sh        # KVM/Hyper-V signal parser
 │   │   └── guest/
 │   │       ├── README.md
-│   │       ├── configure-dumps.ps1            # Windows crash dump config
+│   │       ├── validate-crash-settings.ps1    # Read-only crash-setting check + intentional NotMyFault staging
 │   └── data/
 │       ├── crash-control.json                 # CrashControl registry values
 │       ├── bugcheck-codes.json                # Windows bugcheck code database
@@ -904,4 +900,7 @@ apps/bsod-detector/
 | `BSOD_DET__READY__TIMEOUT` | No | `300` | Watcher readiness timeout |
 | `BSOD_DET__PREFLIGHT__TIMEOUT` | No | `300` | Positive-integer validation only; trigger currently uses a fixed 1800s preflight timeout |
 | `BSOD_DET__GUEST_FS__CTR_IMG` | No | Pinned nightly tag | `virtctl guestfs` image; no legacy fallback |
+| `BSOD_DET__VALIDATE__CRASH_SETTINGS` | No | `src/scripts/guest/validate-crash-settings.ps1` | Read-only guest validator run by preflight; `BSOD_DET__CONFIGURE__DUMPS` is a deprecated alias, and any file not named `validate-crash-settings.ps1` is refused |
+| `BSOD_DET__CRASH_CONTROL__FILE` | No | `src/data/crash-control.json` | Validator configuration |
+| `BSOD_DET__QEMU_GA_MSI_URL` | No | Official `latest-qemu-ga` alias | QGA bootstrap MSI; resolved over HTTPS on the same host, SHA-256 recorded in `artifacts.qemuGaMsi` |
 | `BSOD_RECOVERY_IMAGE` | No | — | Digest-pinned recovery image |

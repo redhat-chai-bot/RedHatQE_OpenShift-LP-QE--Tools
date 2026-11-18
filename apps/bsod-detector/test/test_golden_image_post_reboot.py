@@ -86,11 +86,12 @@ def RunHarness(testCase, mode, functionName='', calls=None, scriptPath=SCRIPT, e
     return json.loads(result.stdout)
 
 
-def WriteMainFlowFiles(testCase, tmpDir, helperNames, mocks, startLine=None):
+def WriteMainFlowFiles(testCase, tmpDir, helperNames, mocks, startLine=None, mockedHelperNames=()):
     """Writes the script's top-level statements as one function, plus mocks and its own helpers.
 
     The statements run unchanged inside Invoke-MainFlow in the harness's empty runspace. The
-    script's helper functions are loaded next to the mocks, and each top-level `exit N` becomes
+    script's helper functions are loaded next to the mocks (those in mockedHelperNames are only
+    removed, so the mocks of the same name are used), and each top-level `exit N` becomes
     `Exit-Script N; return`, which records the status and leaves at the same point.
     """
     scriptText = SCRIPT.read_text(encoding='ascii')
@@ -101,6 +102,11 @@ def WriteMainFlowFiles(testCase, tmpDir, helperNames, mocks, startLine=None):
         testCase.assertEqual(scriptText.count(definition['text']), 1, helperName)
         scriptText = scriptText.replace(definition['text'], '')
         helperTexts.append(definition['text'])
+    for helperName in mockedHelperNames:
+        definition = RunHarness(testCase, 'definition', helperName)
+        testCase.assertTrue(definition['found'], helperName)
+        testCase.assertEqual(scriptText.count(definition['text']), 1, helperName)
+        scriptText = scriptText.replace(definition['text'], '')
     if startLine is not None:
         scriptText = scriptText[scriptText.index(startLine):]
     mainFlow, exitCount = re.subn(r'(?mi)^(\s*)exit (\d+)[ \t]*$', r'\1Exit-Script \2; return', scriptText)
@@ -116,9 +122,20 @@ def WriteMainFlowFiles(testCase, tmpDir, helperNames, mocks, startLine=None):
 
 # Mocks for the main-flow tests. Every check passes unless the state says otherwise: 'memory' is
 # error, null or a byte count; 'pagefileMB' is the active page file size; 'reg' overrides CrashControl
-# values ('Name=Value', or 'Name=' to remove one); 'missing' lists paths that do not exist and
-# 'ddfFile' makes C:\DedicatedDump.sys exist.
+# values ('Name=Value', or 'Name=' to remove one); 'missing' lists paths that do not exist,
+# 'ddfFile' makes C:\DedicatedDump.sys exist and 'record' is the virtio-win ISO record (complete
+# unless it is missing, noHash or http).
 postMainFlowMocks = r'''
+function Read-ArtifactRecord ([string]$Path) {
+    $global:MockLog.Add("Read-ArtifactRecord ${Path}")
+    $kind = @($global:MockState['record'])[0]
+    if ($kind -eq 'missing') { return }
+    [pscustomobject]@{
+        version = '9.9.9'
+        resolvedSource = $(if ($kind -eq 'http') { 'http://fedorapeople.org/virtio-win-9.9.9.iso' } else { 'https://fedorapeople.org/virtio-win-9.9.9.iso' })
+        sha256 = $(if ($kind -eq 'noHash') { '' } else { 'CD' * 32 })
+    }
+}
 function Get-Service ($Name, $ErrorAction) {
     if ($global:MockState['service'] -contains 'missing') { return }
     [pscustomobject]@{ Status = $(if ($global:MockState['service'] -contains 'stopped') { 'Stopped' } else { 'Running' }) }
@@ -207,6 +224,15 @@ class PostRebootStaticTests(unittest.TestCase):
         self.assertIn("$isoPath = 'C:\\Temp\\virtio-win.iso'", partner)
         self.assertIn('$isoTmpPath = "${isoPath}.download"', partner)
 
+    def test_iso_record_is_checked_and_kept_with_the_pre_reboot_path(self):
+        record = "$isoRecordPath = 'C:\\ProgramData\\bsod-detector\\virtio-win-iso.json'"
+        self.assertIn(record, self.text)
+        self.assertIn(record, PARTNER_SCRIPT.read_text(encoding='utf-8'))
+        # The record checks precede the failure gate; the cleanup removes only the ISO cache files.
+        self.assertLess(self.text.index('$isoRecord = Read-ArtifactRecord $isoRecordPath'), self.text.index('if ($hasFailure) {'))
+        cleanupLine = next(line for line in self.text.splitlines() if 'Remove-SetupCacheFile @(' in line)
+        self.assertNotIn('ProgramData', cleanupLine)
+
     def test_failures_do_not_depend_on_the_callers_error_preference(self):
         self.assertIn("$ErrorActionPreference = 'Continue'", self.text)
         self.assertLess(self.text.index("$ErrorActionPreference = 'Continue'"), self.text.index('    Write-Error '))
@@ -251,12 +277,19 @@ class PostRebootPowerShellTests(unittest.TestCase):
         self.assertEqual(parsed['ps7OnlyTokens'], [])
         self.assertEqual(parsed['convertibleDoubleQuoted'], [])
         self.assertEqual(parsed['numberTokens'].count('257MB'), 1)
-        self.assertEqual(sorted(parsed['functions']), ['Get-PagefileSizeMB', 'Remove-SetupCacheFile'])
+        self.assertEqual(sorted(parsed['functions']), ['Get-PagefileSizeMB', 'Read-ArtifactRecord', 'Remove-SetupCacheFile'])
 
     def test_minimum_pagefile_size_rounds_once(self):
         ramValues = list(PAGEFILE_SIZES_MB)
         sizes = RunHarness(self, 'call', 'Get-PagefileSizeMB', [[ram] for ram in ramValues])
         self.assertEqual(dict(zip(ramValues, sizes)), PAGEFILE_SIZES_MB)
+
+    def test_artifact_record_reader_matches_pre_reboot_script(self):
+        # The pre-reboot tests run the reader against real files; this copy must stay identical.
+        own = RunHarness(self, 'definition', 'Read-ArtifactRecord')
+        partner = RunHarness(self, 'definition', 'Read-ArtifactRecord', scriptPath=PARTNER_SCRIPT)
+        self.assertTrue(partner['found'], 'golden-image-pre-reboot.ps1 lacks Read-ArtifactRecord; include its companion change')
+        self.assertEqual(partner['text'], own['text'])
 
     def test_pagefile_size_matches_pre_reboot_script(self):
         # Fails instead of skipping, so a validation checkout without the pre-reboot change cannot pass.
@@ -333,7 +366,7 @@ class PostRebootMainFlowTests(unittest.TestCase):
     def RunScript(self, states):
         with tempfile.TemporaryDirectory() as tmpDir:
             flowPath, mocksPath = WriteMainFlowFiles(
-                self, tmpDir, ['Get-PagefileSizeMB', 'Remove-SetupCacheFile'], postMainFlowMocks)
+                self, tmpDir, ['Get-PagefileSizeMB', 'Remove-SetupCacheFile'], postMainFlowMocks, mockedHelperNames=['Read-ArtifactRecord'])
             calls = [{'state': dict(self.VALID, **state), 'args': []} for state in states]
             return [result['log'] for result in RunHarness(self, 'mockcall', 'Invoke-MainFlow', calls,
                                                            scriptPath=flowPath, mocksPath=mocksPath)]
@@ -357,6 +390,9 @@ class PostRebootMainFlowTests(unittest.TestCase):
         log = self.RunScript([{}])[0]
         self.assertNotIn('exit 1', log)
         self.assertIn('Write-Host OK: AutomaticManagedPagefile = false', log)
+        self.assertIn('Read-ArtifactRecord C:\\ProgramData\\bsod-detector\\virtio-win-iso.json', log)
+        self.assertIn('Write-Host OK: virtio-win 9.9.9 from https://fedorapeople.org/virtio-win-9.9.9.iso, SHA-256 ' + 'CD' * 32 +
+                      ' (kept in C:\\ProgramData\\bsod-detector\\virtio-win-iso.json)', log)
         removals = [index for index, line in enumerate(log) if line.startswith('Remove-Item')]
         self.assertEqual([log[index] for index in removals],
                          ['Remove-Item C:\\Temp\\virtio-win.iso', 'Remove-Item C:\\Temp\\virtio-win.iso.download'])
@@ -375,6 +411,9 @@ class PostRebootMainFlowTests(unittest.TestCase):
             ({'pagefileMB': ['0']}, 'pagefile.sys not active in running kernel'),
             ({'service': ['stopped']}, 'QEMU-GA not running (status: Stopped)'),
             ({'service': ['missing']}, 'QEMU-GA not running (status: not installed)'),
+            ({'record': ['missing']}, 'C:\\ProgramData\\bsod-detector\\virtio-win-iso.json is missing or incomplete'),
+            ({'record': ['noHash']}, 'C:\\ProgramData\\bsod-detector\\virtio-win-iso.json is missing or incomplete'),
+            ({'record': ['http']}, 'C:\\ProgramData\\bsod-detector\\virtio-win-iso.json is missing or incomplete'),
         ]
         for (state, failure), log in zip(cases, self.RunScript([state for state, _ in cases])):
             with self.subTest(state=state):

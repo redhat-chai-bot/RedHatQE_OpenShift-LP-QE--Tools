@@ -60,7 +60,7 @@ A catalog of what ships in this tool and why each file is kept.
 
 | File | Description |
 |---|---|
-| `configure-dumps.ps1` | Configure CrashControl registry settings (`AutoReboot=0`, dump type). |
+| `validate-crash-settings.ps1` | Read-only comparison of the guest's CrashControl settings with `crash-control.json` (no writes or reboot); with `-StageNotMyFault` stages the latest NotMyFault and reports its SHA-256. |
 | `clear-dumps.ps1` | Delete existing dumps before a test run. |
 
 ---
@@ -70,7 +70,7 @@ A catalog of what ships in this tool and why each file is kept.
 | File | Consumed by |
 |---|---|
 | `bugcheck-codes.json` | parse-dump-header.sh, extract-evtx.py |
-| `crash-control.json` | configure-dumps.ps1, prep-guest.ps1 |
+| `crash-control.json` | validate-crash-settings.ps1 (read-only comparison); golden-image-pre-reboot.ps1 writes the same values |
 | `event-sources.json` | extract-evtx.py |
 | `host-signals.json` | collect-host-signals.sh (host-only) |
 | `trigger-methods.json` | sweep-crashme.sh (host-only) |
@@ -91,7 +91,7 @@ disposable snapshotted test VM. See
 
 | File | Description |
 |---|---|
-| `extract-dump.sh` | (in-container) Extract MEMORY.DMP, minidumps, and .evtx files from a guest disk. |
+| `extract-dump.sh` | (in-container, archived) Extract MEMORY.DMP and .evtx files from a guest disk. |
 | `run.sh` | (host) `podman run` wrapper with correct mounts. |
 
 Container image definition: `image/container/bsod-detector/`.
