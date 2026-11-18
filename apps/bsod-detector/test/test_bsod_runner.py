@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 '''Behavioural tests for src/scripts/bsod-pipeline/bsod-runner.sh with mocked helpers.
 
-The real runner is copied into a temporary tree next to mock preflight-rhov.sh and bsod-watcher.sh
-scripts, a mock guest agent (BSOD_DET__GUEST_AGENT__BIN) and a mock `oc` on PATH. kubectl, virtctl,
-virsh and the old host/watch-crash.sh path are guard stubs that fail and are recorded, and
-KUBECONFIG points nowhere, so no guest, VM, cluster, network or crash operation can run. The digest
-below is synthetic test data; the runner passes only the watcher the image, without any digest pin,
-and leaves BSOD_DET__RECOVERY__IMAGE unchanged for preflight.
+The real runner is copied into a temporary tree next to mock preflight-rhov.sh and watch-crash.sh
+scripts, a mock guest agent (BSOD_DET__GUEST_AGENT__BIN) and a mock `oc` on PATH. kubectl, virtctl
+and virsh are guard stubs that fail and are recorded, and KUBECONFIG points nowhere, so no guest,
+VM, cluster, network or crash operation can run. One offline contract test checks the mock watcher
+against the checked-in host/watch-crash.sh: that helper must exist and its option parser must accept
+the runner's exact arguments (it is only run up to --help). The digest below is synthetic test data;
+the runner passes only the watcher the image, without any digest pin, and leaves
+BSOD_DET__RECOVERY__IMAGE unchanged for preflight.
 
 Naming follows the team guide: camelCase variables, PascalCase helpers and upper-case environment
 variables namespaced with a prefix: BSOD_DET__* is the runner's interface and BSOD_RUNNER_TEST__*
@@ -31,6 +33,8 @@ untaggedImage = 'quay.io/konveyor/oadp-vmfr-access'
 taggedImage = untaggedImage + ':test'
 syntheticDigest = '@sha256:' + 'e26c74ce' * 8
 nmfGuest = r'C:\Temp\nmf\notmyfaultc64.exe'
+# A watch run and an authorized intentional run: (runner arguments, extra environment).
+runnerModes = [(('--mode', 'watch'), {}), (('--mode', 'intentional', '0x01'), {'BSOD_DET__CONFIRM_TARGET': 'demo-vm'})]
 
 # Records its arguments and the recovery image it sees in its environment, then writes the launcher
 # Pod/domain metadata the runner reads (BSOD_RUNNER_TEST__METADATA replaces it).
@@ -57,6 +61,8 @@ true
 mockWatcher = r'''#!/usr/bin/env bash
 set -euxo pipefail; shopt -s inherit_errexit
 echo "watcher $*" >> "${BSOD_RUNNER_TEST__CALL_LOG}"
+# The exact arguments, NUL-separated, for the contract test with the real watcher.
+printf '%s\0' "$@" > "${BSOD_RUNNER_TEST__WATCHER_ARGV_FILE}"
 echo "$$" > "${BSOD_RUNNER_TEST__WATCHER_PID_FILE}"
 # A normal exit removes the pid file; `exec sleep` below keeps it for the hanging cases.
 trap 'rm -f -- "${BSOD_RUNNER_TEST__WATCHER_PID_FILE}"' EXIT
@@ -143,13 +149,13 @@ class RunnerTests(unittest.TestCase):
     def setUp(self):
         self.tmpDir = Path(tempfile.mkdtemp(prefix='bsod-runner-test-'))
         self.addCleanup(shutil.rmtree, self.tmpDir, ignore_errors=True)
-        scripts = self.tmpDir / 'src' / 'scripts'
-        self.runner = scripts / 'bsod-pipeline' / 'bsod-runner.sh'
+        self.scripts = self.tmpDir / 'src' / 'scripts'
+        self.runner = self.scripts / 'bsod-pipeline' / 'bsod-runner.sh'
         WriteExecutable(self.runner, runnerSource.read_text(encoding='utf-8'))
-        WriteExecutable(scripts / 'host' / 'preflight-rhov.sh', mockPreflight)
-        WriteExecutable(scripts / 'host' / 'bsod-watcher.sh', mockWatcher)
-        # The runner no longer starts host/watch-crash.sh; calling it would be recorded as a guard hit.
-        WriteExecutable(scripts / 'host' / 'watch-crash.sh', guardStub)
+        WriteExecutable(self.scripts / 'host' / 'preflight-rhov.sh', mockPreflight)
+        # Same relative path as the checked-in watcher, so the runner finds no helper the real tree lacks.
+        self.watcher = self.scripts / 'host' / 'watch-crash.sh'
+        WriteExecutable(self.watcher, mockWatcher)
         self.guestAgent = self.tmpDir / 'mock' / 'guest-agent'
         WriteExecutable(self.guestAgent, mockGuestAgent)
         mockBin = self.tmpDir / 'mockbin'
@@ -161,6 +167,7 @@ class RunnerTests(unittest.TestCase):
         self.callLog = self.tmpDir / 'calls.log'
         self.crashMarker = self.tmpDir / 'crash.marker'
         self.watcherPIDfile = self.tmpDir / 'watcher.pid'
+        self.watcherArgvFile = self.tmpDir / 'watcher.argv'
         self.preflightImageFile = self.tmpDir / 'preflight-image'
         # Registered after rmtree, so it runs first: a leftover mock watcher is stopped even when a test fails.
         self.addCleanup(self.KillLeftoverWatcher)
@@ -178,6 +185,7 @@ class RunnerTests(unittest.TestCase):
             'BSOD_RUNNER_TEST__CALL_LOG': str(self.callLog),
             'BSOD_RUNNER_TEST__CRASH_MARKER': str(self.crashMarker),
             'BSOD_RUNNER_TEST__WATCHER_PID_FILE': str(self.watcherPIDfile),
+            'BSOD_RUNNER_TEST__WATCHER_ARGV_FILE': str(self.watcherArgvFile),
             'BSOD_RUNNER_TEST__PREFLIGHT_IMAGE_FILE': str(self.preflightImageFile),
         }
 
@@ -203,11 +211,12 @@ class RunnerTests(unittest.TestCase):
         return [path for path in self.evidence.iterdir() if path.is_dir()]
 
     def ResetRun(self):
-        '''Fresh evidence directory, call log, watcher pid file and preflight image record for the next subtest.'''
+        '''Fresh evidence directory, call log, watcher records and preflight image record for the next subtest.'''
         shutil.rmtree(self.evidence)
         self.evidence.mkdir()
         self.callLog.unlink(missing_ok=True)
         self.watcherPIDfile.unlink(missing_ok=True)
+        self.watcherArgvFile.unlink(missing_ok=True)
         self.preflightImageFile.unlink(missing_ok=True)
 
     def Index(self, calls, prefix):
@@ -245,6 +254,11 @@ class RunnerTests(unittest.TestCase):
                 return
             time.sleep(0.1)
         self.fail(f'watcher process {watcherPID} is still running')
+
+    def RunRealWatcher(self, realWatcher, *args):
+        '''Runs a checked-in watcher with the test environment; callers stop it at its option parser.'''
+        return subprocess.run(['bash', str(realWatcher), *args], env=self.env, cwd=self.tmpDir,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
 
     def testMissingRecoveryImageFailsBeforeSideEffects(self):
         # There is no default image; a bare digest leaves nothing once the pin is dropped.
@@ -288,6 +302,63 @@ class RunnerTests(unittest.TestCase):
                 self.assertIn(message, result.stderr)
                 self.assertEqual(calls, [])
                 self.assertEqual(self.RunDirs(), [])
+
+    def testCheckedInWatcherAcceptsTheRunnerArguments(self):
+        '''Offline contract with the real host/watch-crash.sh, which the mock watcher stands in for.'''
+        realWatcher = appDir / 'src' / 'scripts' / self.watcher.relative_to(self.scripts)
+        self.assertTrue(realWatcher.is_file() and os.access(realWatcher, os.R_OK),
+                        f'the mock watcher stands in for {realWatcher}, which is not a readable checked-in file')
+        for args, env in runnerModes:
+            with self.subTest(args=args):
+                self.ResetRun()
+                result, _ = self.Run(*args, **env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                argv = self.watcherArgvFile.read_text(encoding='utf-8').split('\0')[:-1]
+                # The real parser reaches the trailing --help only if it accepted every earlier option and
+                # value; it exits before any validation, so nothing outside the parser runs.
+                probe = self.RunRealWatcher(realWatcher, *argv, '--help')
+                self.assertEqual(probe.returncode, 0, probe.stderr)
+        # The probe is not vacuous: the same parser rejects an option it does not define.
+        self.assertNotEqual(self.RunRealWatcher(realWatcher, '--not-a-watcher-option', '--help').returncode, 0)
+        self.Calls()
+
+    def testMissingOrUnreadableWatcherFailsBeforeSideEffects(self):
+        def Remove():
+            self.watcher.unlink()
+
+        def MakeUnreadable():
+            self.watcher.chmod(0o000)
+
+        def ReplaceWithDirectory():
+            self.watcher.unlink()
+            self.watcher.mkdir()
+
+        for breakWatcher in (Remove, MakeUnreadable, ReplaceWithDirectory):
+            for args, env in runnerModes:
+                with self.subTest(watcher=breakWatcher.__name__, args=args):
+                    self.ResetRun()
+                    if self.watcher.is_dir():
+                        self.watcher.rmdir()
+                    self.watcher.unlink(missing_ok=True)
+                    WriteExecutable(self.watcher, mockWatcher)
+                    breakWatcher()
+                    if self.watcher.is_file() and os.access(self.watcher, os.R_OK):
+                        self.skipTest('this user can still read a mode 000 file')
+                    result, calls = self.Run(*args, **env)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    # xtrace ('+' lines) always shows the watcher path; the error message must name it too.
+                    messages = [line for line in result.stderr.splitlines() if not line.startswith('+')]
+                    self.assertTrue([line for line in messages if self.watcher.name in line], result.stderr)
+                    # No preflight, oc, guest-agent or watcher call and no run directory precede the failure.
+                    self.assertEqual(calls, [])
+                    self.assertEqual(self.RunDirs(), [])
+
+    def testReadableNonExecutableWatcherIsStarted(self):
+        # The runner starts the watcher through bash, so a checkout or mount without the execute bit works.
+        self.watcher.chmod(0o644)
+        result, calls = self.Run('--mode', 'watch')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue([call for call in calls if call.startswith('watcher ')], calls)
 
     def testWatchModeNeverStagesInjectsOrDeletesGuestDumps(self):
         result, calls = self.Run('--mode', 'watch')
