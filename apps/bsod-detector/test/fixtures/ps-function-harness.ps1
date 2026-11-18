@@ -1,5 +1,5 @@
 # Test harness for the guest PowerShell scripts; used by test_golden_image_*_reboot.py and
-# test_configure_dumps.py.
+# test_validate_crash_settings.py.
 # It never runs a guest script. It parses the script, and in `call` mode runs only one
 # function definition, extracted from the syntax tree, in a runspace with an otherwise empty
 # InitialSessionState (no providers or applications; its only cmdlet is Set-StrictMode, see
