@@ -83,9 +83,9 @@ def RunHarness(testCase, mode, functionName='', calls=None, scriptPath=SCRIPT, e
             testCase.fail('pwsh is required (BSOD_DET__TEST__REQUIRE_PWSH=1) but not installed')
         testCase.skipTest('pwsh is not installed')
     result = subprocess.run(
-        [pwsh, '-NoProfile', '-NonInteractive', '-File', str(HARNESS), '-Mode', mode,
-         '-ScriptPath', str(scriptPath), '-FunctionName', functionName, '-CallsJson', json.dumps(calls or []),
-         '-MocksPath', str(mocksPath or '')],
+        [pwsh, '-NoProfile', '-NonInteractive', '-File', str(HARNESS), '-mode', mode,
+         '-scriptPath', str(scriptPath), '-functionName', functionName, '-callsJSON', json.dumps(calls or []),
+         '-mocksPath', str(mocksPath or '')],
         capture_output=True, text=True, timeout=180, check=False)
     if not expectSuccess:
         testCase.assertNotEqual(result.returncode, 0, result.stdout)
@@ -174,26 +174,26 @@ function Get-Item ([string]$Path, $ErrorAction) {
     }
     [pscustomobject]@{ FullName = $Path }
 }
-function Resolve-OfficialHTTPS ([string]$URL, [string]$OfficialHost) {
-    $global:MockLog.Add("Resolve-OfficialHTTPS ${URL} ${OfficialHost}")
+function Resolve-OfficialHTTPS ([string]$url, [string]$officialHost) {
+    $global:MockLog.Add("Resolve-OfficialHTTPS ${url} ${officialHost}")
     $resolved = @($global:MockState['resolved'])[0]
     if ($resolved -eq 'error') { throw 'redirect from the alias leaves fedorapeople.org' }
     $resolved
 }
-function Read-ArtifactRecord ([string]$Path) {
-    $global:MockLog.Add("Read-ArtifactRecord ${Path}")
+function Read-ArtifactRecord ([string]$path) {
+    $global:MockLog.Add("Read-ArtifactRecord ${path}")
     if (-not $global:MockState['record']) { return }
     $source, $sha256 = "$(@($global:MockState['record'])[0])" -split '\|', 2
     [pscustomobject]@{ resolvedSource = $source; sha256 = $sha256 }
 }
-function Write-ArtifactRecord ([string]$Path, $Record) {
-    $global:MockLog.Add("Write-ArtifactRecord ${Path} source=$($Record['source']) resolvedSource=$($Record['resolvedSource']) version=$($Record['version']) sha256=$($Record['sha256']) sizeBytes=$($Record['sizeBytes'])")
+function Write-ArtifactRecord ([string]$path, $record) {
+    $global:MockLog.Add("Write-ArtifactRecord ${path} source=$($record['source']) resolvedSource=$($record['resolvedSource']) version=$($record['version']) sha256=$($record['sha256']) sizeBytes=$($record['sizeBytes'])")
     if ($global:MockState['recordFails'] -contains 'true') { throw 'Access to the path is denied.' }
 }
-function Save-HTTPSdownload ([string]$URL, [string]$Path) {
-    $global:MockLog.Add("Save-HTTPSdownload ${URL} ${Path}")
+function Save-HTTPSdownload ([string]$url, [string]$path) {
+    $global:MockLog.Add("Save-HTTPSdownload ${url} ${path}")
     if ($global:MockState['downloadFails'] -contains 'true') { throw 'The operation has timed out' }
-    $global:MockState['existing'] = @($global:MockState['existing']) + $Path
+    $global:MockState['existing'] = @($global:MockState['existing']) + $path
 }
 function Move-Item ([string]$Path, [string]$Destination, [switch]$Force, $ErrorAction) { $global:MockLog.Add("Move-Item ${Path} ${Destination}") }
 function Remove-Item ([string]$Path, [string]$LiteralPath, [switch]$Force, $ErrorAction) { $global:MockLog.Add("Remove-Item $(if ($LiteralPath) { $LiteralPath } else { $Path })") }
@@ -228,7 +228,7 @@ function Write-Host ($Object) { $global:MockLog.Add("Write-Host ${Object}") }
 function Write-Error ($Message) { $global:MockLog.Add("Write-Error ${Message}") }
 function Start-Sleep ($Seconds) { $global:MockLog.Add("Start-Sleep ${Seconds}") }
 function Restart-Computer ([switch]$Force) { $global:MockLog.Add('Restart-Computer') }
-function Exit-Script ([int]$Code) { $global:MockLog.Add("exit ${Code}") }
+function Exit-Script ([int]$code) { $global:MockLog.Add("exit ${code}") }
 '''
 
 
