@@ -33,6 +33,12 @@ function Remove-SetupCacheFile ([string[]]$Paths) {
     $failures
 }
 
+# Returns a stored artifact record (JSON), or nothing when it is missing or unreadable.
+function Read-ArtifactRecord ([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    try { Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json } catch { return }
+}
+
 # FAIL lines use Write-Error. Keep the default preference so a caller's Stop preference cannot end
 # the script at the first FAIL and skip the remaining checks.
 $ErrorActionPreference = 'Continue'
@@ -107,6 +113,19 @@ if ($dedicatedDump) {
 # rebooted (Windows can hold the file open until then), then re-run this script.
 if (Test-Path -LiteralPath 'C:\DedicatedDump.sys') {
     Write-Error 'FAIL: C:\DedicatedDump.sys from an older preparation still exists - delete it manually once DedicatedDumpFile is unset and the VM has rebooted, then re-run this script'
+    $hasFailure = $true
+}
+
+# golden-image-pre-reboot.ps1 records the virtio-win ISO it installed from (source, resolved HTTPS
+# source, version, SHA-256 calculated at download) in this file. The record stays in the image when
+# the ISO cache is removed below; its SHA-256 is an audit record, not a publisher attestation.
+Write-Host "`n--- Checking the virtio-win ISO record ---"
+$isoRecordPath = 'C:\ProgramData\bsod-detector\virtio-win-iso.json'
+$isoRecord = Read-ArtifactRecord $isoRecordPath
+if ($isoRecord -and "$($isoRecord.sha256)" -match '^[0-9A-Fa-f]{64}$' -and "$($isoRecord.resolvedSource)" -like 'https://*') {
+    Write-Host "OK: virtio-win $($isoRecord.version) from $($isoRecord.resolvedSource), SHA-256 $($isoRecord.sha256) (kept in ${isoRecordPath})"
+} else {
+    Write-Error "FAIL: ${isoRecordPath} is missing or incomplete - re-run golden-image-pre-reboot.ps1"
     $hasFailure = $true
 }
 
