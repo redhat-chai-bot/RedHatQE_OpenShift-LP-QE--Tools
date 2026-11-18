@@ -168,7 +168,7 @@ evidence-summary.json        (final pipeline verdict)
 
 **2. Helper scripts present**
 - All pipeline helpers must exist and be readable: `guest-agent.py`, `reliability.py`, `extract--guest-os--crash-info.sh`, `collect-host-signals.sh`, `parse-dump-header.sh`
-- Guest validation inputs must exist: `validate-crash-settings.ps1` (override `BSOD_DET__VALIDATE__CRASH_SETTINGS`; `BSOD_DET__CONFIGURE__DUMPS` is a deprecated alias that prints a warning; either must name a copy of `validate-crash-settings.ps1`, any other file name is refused before it runs, and the output must come from that validator), `crash-control.json`
+- Guest validation inputs must exist: `validate-crash-settings.ps1` (override `BSOD_DET__VALIDATE__CRASH_SETTINGS`; `BSOD_DET__CONFIGURE__DUMPS` is a deprecated alias that still works; either must name a copy of `validate-crash-settings.ps1`, any other file name is refused before it runs, and the output must come from that validator), `crash-control.json`
 
 **3. Evidence mount validation**
 - Evidence root must be an existing non-symlink directory
@@ -197,22 +197,24 @@ evidence-summary.json        (final pipeline verdict)
 
 **6. QGA liveness**
 - QGA ping via `guest-agent.py ping` — 5 retries × 3s sleep
+- No QGA bootstrap: installing the agent needs a responding agent. The golden image installs QEMU-GA (`golden-image-pre-reboot.ps1`) and refuses to seal without it (`golden-image-post-reboot.ps1`); if all pings fail, preflight stops with that guidance
 - Die if all retries fail (VM not ready for crash injection)
 
 **7. Guest crash-setting validation (read-only)**
 - Upload `validate-crash-settings.ps1` + `crash-control.json` to VM via guest-agent
-- Run `validate-crash-settings.ps1 -DataFile crash-control.json`, adding `-StageNotMyFault` only with `--require-trigger` (intentional runs; watch runs never stage NotMyFault). The validator changes no settings and never reboots; the golden image owns the configuration.
+- Run `validate-crash-settings.ps1 -dataFile crash-control.json`, adding `-stageNotMyFault` only with `--require-trigger` (intentional runs; watch runs never stage NotMyFault). The validator changes no settings and never reboots; the golden image owns the configuration.
 - Die if output fails any of:
+  - `script == "validate-crash-settings.ps1"` and `action == "validated"` — the output comes from the read-only validator
   - `ok == true` — script ran successfully
   - `matchesRecommended == true` — no `mismatches` (values, registry types, key path, required absences such as `DedicatedDumpFile`)
   - `current.AutoReboot == 0` — VM will stay frozen after BSOD
   - `pageFile.adequate == true` — a fixed pagefile of at least RAM + 257 MB is configured
-  - With `--require-trigger`: `notMyFault.status == "staged"` with a SHA-256
+  - With `--require-trigger`: `notMyFault.status == "staged"` with 64-hex `sha256` and `archiveSHA256` and a `resolvedSource` on `https://download.sysinternals.com/`
 - A mismatch is fixed in the golden image (pre-reboot script, reboot, post-reboot script); nothing is repaired at run time
 
 **8. Guest path verification**
 - `C:\Windows` exists
-- If `--require-trigger`: the validator ran with `-StageNotMyFault` (removes any earlier copy, downloads the current NotMyFault, checks its Microsoft signature), then `C:\Temp\nmf\notmyfaultc64.exe` must exist. Without the flag (watch runs) nothing is downloaded or staged.
+- If `--require-trigger`: the validator ran with `-stageNotMyFault` (removes any earlier copy, downloads the current NotMyFault, checks its Microsoft signature), then `C:\Temp\nmf\notmyfaultc64.exe` must exist. Without the flag (watch runs) nothing is downloaded or staged.
 
 **9. Pre-crash dump inventory**
 - Records an existing `MEMORY.DMP` with path/size/mtime
@@ -220,8 +222,7 @@ evidence-summary.json        (final pipeline verdict)
 
 **10. Generate recovery-metadata.json**
 - `artifacts.notMyFault`: the validator's staging record (`source`, `resolvedSource`, `archiveSHA256`, `sha256`, `version`, `signer`), or `null` without `--require-trigger`
-- `artifacts.qemuGaMsi`: when the QGA bootstrap ran, `source`, `resolvedSource` and the SHA-256 of the downloaded MSI, otherwise `null`. The bootstrap resolves `BSOD_DET__QEMU_GA_MSI_URL` (default: the official `latest-qemu-ga/qemu-ga-x86_64.msi` alias) hop by hop over HTTPS on the same host; the alias redirects to plain `http://`, which is never requested
-- Neither artifact has a published checksum: the SHA-256 values are audit records, not publisher attestation (the NotMyFault signature is)
+- NotMyFault has no published checksum: the SHA-256 values are audit records, not publisher attestation (its Microsoft signature is)
 Writes all collected VM/storage/config data needed by downstream scripts.
 
 **Environment Variables**:
@@ -232,11 +233,10 @@ Writes all collected VM/storage/config data needed by downstream scripts.
 | `BSOD_DET__SNAPSHOT__CLASS` | Storage snapshot class |
 | `BSOD_DET__COMMAND__TIMEOUT` | Command timeout (default: 30s) |
 | `BSOD_DET__PREFLIGHT__TIMEOUT` | Positive-integer validation only; trigger script currently uses a fixed 1800s preflight timeout |
-| `BSOD_DET__VALIDATE__CRASH_SETTINGS` | Guest validator path (default: `src/scripts/guest/validate-crash-settings.ps1`); `BSOD_DET__CONFIGURE__DUMPS` is a deprecated alias |
+| `BSOD_DET__VALIDATE__CRASH_SETTINGS` | Guest validator path (default: `src/scripts/guest/validate-crash-settings.ps1`); `BSOD_DET__CONFIGURE__DUMPS` is a deprecated alias. The container image presets this variable, so inside the image override it rather than the alias |
 | `BSOD_DET__CRASH_CONTROL__FILE` | Validator configuration (default: `src/data/crash-control.json`) |
-| `BSOD_DET__QEMU_GA_MSI_URL` | QGA bootstrap MSI URL (default: the official `latest-qemu-ga` alias; HTTPS on the same host only) |
 
-**Output**: `recovery-metadata.json` — VM name, namespace, pod, domain, PVC names, storage class, storage size, volume mode, recovery image digest, armed epoch, pre-crash dump inventory, evidence mount details
+**Output**: `recovery-metadata.json` — VM name, namespace, pod, domain, PVC names, storage class, storage size, volume mode, recovery image digest, armed epoch, pre-crash dump inventory, evidence mount details, `artifacts.notMyFault`
 
 ---
 

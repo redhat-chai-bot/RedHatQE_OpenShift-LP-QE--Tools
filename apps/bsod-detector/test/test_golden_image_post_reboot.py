@@ -75,9 +75,9 @@ def RunHarness(testCase, mode, functionName='', calls=None, scriptPath=SCRIPT, e
             testCase.fail('pwsh is required (BSOD_DET__TEST__REQUIRE_PWSH=1) but not installed')
         testCase.skipTest('pwsh is not installed')
     result = subprocess.run(
-        [pwsh, '-NoProfile', '-NonInteractive', '-File', str(HARNESS), '-Mode', mode,
-         '-ScriptPath', str(scriptPath), '-FunctionName', functionName, '-CallsJson', json.dumps(calls or []),
-         '-MocksPath', str(mocksPath or '')],
+        [pwsh, '-NoProfile', '-NonInteractive', '-File', str(HARNESS), '-mode', mode,
+         '-scriptPath', str(scriptPath), '-functionName', functionName, '-callsJSON', json.dumps(calls or []),
+         '-mocksPath', str(mocksPath or '')],
         capture_output=True, text=True, timeout=180, check=False)
     if not expectSuccess:
         testCase.assertNotEqual(result.returncode, 0, result.stdout)
@@ -126,8 +126,8 @@ def WriteMainFlowFiles(testCase, tmpDir, helperNames, mocks, startLine=None, moc
 # 'ddfFile' makes C:\DedicatedDump.sys exist and 'record' is the virtio-win ISO record (complete
 # unless it is missing, noHash or http).
 postMainFlowMocks = r'''
-function Read-ArtifactRecord ([string]$Path) {
-    $global:MockLog.Add("Read-ArtifactRecord ${Path}")
+function Read-ArtifactRecord ([string]$path) {
+    $global:MockLog.Add("Read-ArtifactRecord ${path}")
     $kind = @($global:MockState['record'])[0]
     if ($kind -eq 'missing') { return }
     [pscustomobject]@{
@@ -187,7 +187,7 @@ function Remove-Item ($LiteralPath, [switch]$Force, $ErrorAction) {
 }
 function Write-Host ($Object, $ForegroundColor) { $global:MockLog.Add("Write-Host ${Object}") }
 function Write-Error ($Message) { $global:MockLog.Add("Write-Error ${Message}") }
-function Exit-Script ([int]$Code) { $global:MockLog.Add("exit ${Code}") }
+function Exit-Script ([int]$code) { $global:MockLog.Add("exit ${code}") }
 '''
 
 
