@@ -27,7 +27,7 @@ Detect, capture, and analyze Blue Screen of Death (BSOD) events on Windows VMs r
    └─────┬──────┘     └────────┬────────┘     └──────────┬─────────┘
          │                     │                          │
    QGA ping             virtctl memory-dump          guestfs-ntfs pod
-   validate settings    VNC screenshot               guestfish NTFS mount
+   crash settings       VNC screenshot               guestfish NTFS mount
    recovery-metadata    domain.xml / host-signals    tar stream → evidence dir
 ```
 
@@ -752,16 +752,16 @@ tail -30 $run/watcher.log
 trigger-bsod-intentional.sh
   │
   ├── Phase 1a: Pre-cleanup — delete stale DVs/PVCs from previous failed runs
+  ├── Phase 1b: Validate notmyfaultc64.exe binary exists on host
   ├── Phase 2:  preflight-rhov.sh
   │               ├── Auto-create memory-dump PVC if missing
   │               ├── Auto-create evidence PVC if missing
   │               ├── QGA ping (5 retries)
-  │               ├── Read-only crash-setting validation (validate-crash-settings.ps1);
-  │               │   --require-trigger stages the latest NotMyFault and records its SHA-256
+  │               ├── Crash dump registry validation (rebootRequired=false)
   │               └── Write recovery-metadata.json
   ├── Phase 2b: Add pvpanic device via QMP + pre-capture domain.xml + vmi-spec.json
-  ├── Phase 2c: Confirm the staged NotMyFault recorded by preflight (no host-local copy)
-  ├── Phase 3:  Guest cleanup — remove a stale MEMORY.DMP
+  ├── Phase 2c: Upload notmyfaultc64.exe to VM via QGA
+  ├── Phase 3:  Guest cleanup — remove stale MEMORY.DMP and Minidump files
   ├── Phase 4:  watch-crash.sh (background)
   │               ├── Poll QGA every 5s → BSOD detected
   │               ├── Capture domain-bsod.xml at crash moment (always overwrites)
@@ -806,7 +806,7 @@ NTFS partitions are discovered dynamically. The extractor consumes only `--metad
 
 The retained extractor maps raw `/pagefile.sys` to the archive member `MEMORY.DMP`. Naming raw bytes this way does not convert, parse or validate a Windows crash dump.
 
-No actual MEMORY.DMP (or historical DedicatedDump.sys) extraction or dump conversion is enabled. Small (mini) dumps are not part of this flow: the VM stays frozen after the simulated crash (`AutoReboot=0`) and evidence comes from the KubeVirt memory capture and offline disk extraction. JSON/parser/checksum generation is removed; Python reliability and watcher verdict changes remain deferred.
+No actual MEMORY.DMP/DedicatedDump.sys/Minidump extraction or dump conversion is enabled. JSON/parser/checksum generation is removed; Python reliability and watcher verdict changes remain deferred.
 
 **Primary memory artifact when capture succeeds:** `vm-memory.elf.tar.gz`. API, storage, export and download failures can prevent it from being produced. Developers may attempt offline conversion with `elf2dmp` for WinDbg/Volatility.
 
@@ -900,6 +900,6 @@ apps/bsod-detector/
 | `BSOD_DET__READY__TIMEOUT` | No | `300` | Watcher readiness timeout |
 | `BSOD_DET__PREFLIGHT__TIMEOUT` | No | `300` | Positive-integer validation only; trigger currently uses a fixed 1800s preflight timeout |
 | `BSOD_DET__GUEST_FS__CTR_IMG` | No | Pinned nightly tag | `virtctl guestfs` image; no legacy fallback |
-| `BSOD_DET__VALIDATE__CRASH_SETTINGS` | No | `src/scripts/guest/validate-crash-settings.ps1` | Read-only guest validator run by preflight; `BSOD_DET__CONFIGURE__DUMPS` is a deprecated alias, and any file not named `validate-crash-settings.ps1` is refused |
-| `BSOD_DET__CRASH_CONTROL__FILE` | No | `src/data/crash-control.json` | Validator configuration |
+| `BSOD_DET__CRASH_CONTROL__FILE` | No | `src/data/crash-control.json` | crash-control.json that the current preflight passes to `configure-dumps.ps1` (`BSOD_DET__CONFIGURE__DUMPS`); that script is replaced by `validate-crash-settings.ps1`, which the host preflight has not adopted yet |
+| `BSOD_DET__QEMU_GA_MSI_URL` | No | `latest-virtio/qemu-ga-x86_64.msi` on fedorapeople.org | MSI that preflight uploads when the guest agent does not answer |
 | `BSOD_RECOVERY_IMAGE` | No | — | Digest-pinned recovery image |

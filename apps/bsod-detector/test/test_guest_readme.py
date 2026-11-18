@@ -132,7 +132,10 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn('Get-AuthenticodeSignature -LiteralPath $path', script)
         self.assertIn("-cnotcontains 'O=Microsoft Corporation'", script)
         self.assertIn('exactly `Microsoft Corporation`', self.readme)
-        self.assertIn('`artifacts.notMyFault`', self.readme)
+        # The README documents the validator's caller contract, not the separately maintained host preflight.
+        self.assertIn('a caller should stop when `matchesRecommended` is false', self.readme)
+        self.assertIn('Callers should pass `-stageNotMyFault` only for intentional crash runs', self.readme)
+        self.assertNotRegex(self.readme, r'(host preflight|preflight-rhov\.sh`?) (passes|stops|records|rejects|runs)|artifacts\.notMyFault')
 
 
 if __name__ == '__main__':

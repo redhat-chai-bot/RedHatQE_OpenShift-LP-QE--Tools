@@ -600,8 +600,8 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(summaryCall[summaryCall.index('--out') + 1], providedOut)
                 case.AssertDeleted()
 
-    def test_Recovery_DirectoryAliasWithExistingOutputsReachesExtraction(self) -> None:
-        for staleName in ('MEMORY.DMP', 'guestFS_sda3', 'events.json',
+    def test_directory_alias_existing_outputs_reach_extraction(self):
+        for staleName in ('MEMORY.DMP', 'Minidump', 'guestFS_sda3', 'events.json',
                           'extraction-summary.json', 'checksums.sha256'):
             with self.subTest(staleName=staleName):
                 case = ArchiveRecoveryTests('test_archive_contains_only_requested_files_and_validator_remains_deferred')
@@ -611,7 +611,7 @@ class RecoveryTests(unittest.TestCase):
                 alias.symlink_to(case.out, target_is_directory=True)
                 case.metadata['outputDir'] = str(alias)
                 stale = case.out / staleName
-                stale.mkdir() if staleName == 'guestFS_sda3' else stale.write_text('preserve-stale')
+                stale.mkdir() if staleName in ('Minidump', 'guestFS_sda3') else stale.write_text('preserve-stale')
                 if stale.is_dir():
                     (stale / 'watcher-note.txt').write_text('preserve-watcher')
                 result = case.RunRecovery()
