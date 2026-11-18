@@ -902,5 +902,4 @@ apps/bsod-detector/
 | `BSOD_DET__GUEST_FS__CTR_IMG` | No | Pinned nightly tag | `virtctl guestfs` image; no legacy fallback |
 | `BSOD_DET__VALIDATE__CRASH_SETTINGS` | No | `src/scripts/guest/validate-crash-settings.ps1` | Read-only guest validator run by preflight; `BSOD_DET__CONFIGURE__DUMPS` is a deprecated alias, and any file not named `validate-crash-settings.ps1` is refused |
 | `BSOD_DET__CRASH_CONTROL__FILE` | No | `src/data/crash-control.json` | Validator configuration |
-| `BSOD_DET__QEMU_GA_MSI_URL` | No | Official `latest-qemu-ga` alias | QGA bootstrap MSI; resolved over HTTPS on the same host, SHA-256 recorded in `artifacts.qemuGaMsi` |
 | `BSOD_RECOVERY_IMAGE` | No | — | Digest-pinned recovery image |

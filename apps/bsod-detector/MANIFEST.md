@@ -60,7 +60,7 @@ A catalog of what ships in this tool and why each file is kept.
 
 | File | Description |
 |---|---|
-| `validate-crash-settings.ps1` | Read-only comparison of the guest's CrashControl settings with `crash-control.json` (no writes or reboot); with `-StageNotMyFault` stages the latest NotMyFault and reports its SHA-256. |
+| `validate-crash-settings.ps1` | Read-only comparison of the guest's CrashControl settings with `crash-control.json` (no writes or reboot); with `-stageNotMyFault` stages the latest NotMyFault and reports its SHA-256. |
 | `clear-dumps.ps1` | Delete existing dumps before a test run. |
 
 ---
