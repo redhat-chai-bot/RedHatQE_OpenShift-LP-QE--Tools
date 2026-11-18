@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
 load test-helper
 
 setup() {
@@ -14,21 +15,52 @@ setup() {
 EOF
   CLEAN_LOG="$BATS_TMPDIR/clean-dmesg.txt"
   printf '[1] boot line\n[2] nothing interesting\n' > "$CLEAN_LOG"
+  DOMAIN_XML_UNMITIGATED="$BATS_TMPDIR/domain-unmitigated.xml"
+  cat > "$DOMAIN_XML_UNMITIGATED" <<'EOF'
+<domain>
+  <features>
+    <hyperv>
+      <tlbflush state='on'/>
+      <ipi state='on'/>
+      <vapic state='on'/>
+      <spinlocks state='on'/>
+      <stimer state='on'/>
+    </hyperv>
+  </features>
+</domain>
+EOF
+  DOMAIN_XML_MITIGATED="$BATS_TMPDIR/domain-mitigated.xml"
+  cat > "$DOMAIN_XML_MITIGATED" <<'EOF'
+<domain>
+  <features>
+    <hyperv>
+      <tlbflush state='off'/>
+      <ipi state='off'/>
+      <vapic state='on'/>
+    </hyperv>
+  </features>
+</domain>
+EOF
 }
 
 teardown() {
   teardown_temp
 }
 
+# xtrace goes to stderr; keep $output as clean JSON for jq assertions.
+run_host_signals() {
+  run --separate-stderr bash "$SCRIPT" "$@"
+}
+
 @test "host-signals detects split-lock traps" {
-  run bash "$SCRIPT" --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm
+  run_host_signals --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.splitLockDetected')" = "true" ]
   [ "$(echo "$output" | jq -r '.kernelSignals[] | select(.id=="split-lock-trap") | .count')" -eq 3 ]
 }
 
 @test "host-signals classifies kernel vs user trap addresses" {
-  run bash "$SCRIPT" --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm
+  run_host_signals --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm
   [ "$status" -eq 0 ]
   kernel=$(echo "$output" | jq '[.kernelSignals[] | select(.id=="split-lock-trap") | .matches[] | select(.addressSpace=="kernel")] | length')
   user=$(echo "$output" | jq '[.kernelSignals[] | select(.id=="split-lock-trap") | .matches[] | select(.addressSpace=="user")] | length')
@@ -37,7 +69,7 @@ teardown() {
 }
 
 @test "host-signals extracts kvm thread and trap address" {
-  run bash "$SCRIPT" --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm
+  run_host_signals --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm
   [ "$status" -eq 0 ]
   thread=$(echo "$output" | jq -r '.kernelSignals[] | select(.id=="split-lock-trap") | .matches[0].kvmThread')
   addr=$(echo "$output" | jq -r '.kernelSignals[] | select(.id=="split-lock-trap") | .matches[0].trapAddress')
@@ -46,26 +78,26 @@ teardown() {
 }
 
 @test "host-signals reports no split-lock on a clean log" {
-  run bash "$SCRIPT" --log-file "$CLEAN_LOG" --vm no-such-vm
+  run_host_signals --log-file "$CLEAN_LOG" --vm no-such-vm
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.splitLockDetected')" = "false" ]
 }
 
 @test "host-signals links split-lock signal to bugcheck 0x00020001" {
-  run bash "$SCRIPT" --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm
+  run_host_signals --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm
   [ "$status" -eq 0 ]
   related=$(echo "$output" | jq -r '.kernelSignals[] | select(.id=="split-lock-trap") | .relatedBugCheck')
   [ "$related" = "0x00020001" ]
 }
 
 @test "host-signals emits valid JSON with required top-level keys" {
-  run bash "$SCRIPT" --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm
+  run_host_signals --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.ok and (.kernelSignals|type=="array") and (.hyperv|type=="object") and (.assessment|type=="array")'
 }
 
 @test "host-signals does not claim enlightenments enabled when XML is unreadable" {
-  run bash "$SCRIPT" --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm
+  run_host_signals --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm
   [ "$status" -eq 0 ]
   # With no domain XML, must not assert the unmitigated-config claim.
   matched=$(echo "$output" | jq '[.assessment[] | select(contains("enlightenments are enabled"))] | length')
@@ -73,6 +105,43 @@ teardown() {
 }
 
 @test "host-signals exits non-zero on missing log file" {
-  run bash "$SCRIPT" --log-file "/nonexistent/log.txt" --vm no-such-vm
+  run_host_signals --log-file "/nonexistent/log.txt" --vm no-such-vm
   [ "$status" -eq 2 ]
+}
+
+@test "host-signals reads Hyper-V features from --domain-xml" {
+  run_host_signals --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm --domain-xml "$DOMAIN_XML_UNMITIGATED"
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.hyperv.features[] | select(.name=="tlbflush") | .state')" = "on" ]
+  [ "$(echo "$output" | jq -r '.hyperv.features[] | select(.name=="ipi") | .state')" = "on" ]
+  [ "$(echo "$output" | jq -r '.hyperv.features[] | select(.name=="synictimer") | .state')" = "on" ]
+  [ "$(echo "$output" | jq -r '.hyperv.mitigationApplied')" = "false" ]
+}
+
+@test "host-signals reports mitigation when tlbflush and ipi are off" {
+  run_host_signals --log-file "$CLEAN_LOG" --vm no-such-vm --domain-xml "$DOMAIN_XML_MITIGATED"
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.hyperv.mitigationApplied')" = "true" ]
+  matched=$(echo "$output" | jq '[.assessment[] | select(contains("Mitigation appears applied"))] | length')
+  [ "$matched" -eq 1 ]
+}
+
+@test "host-signals correlates unmitigated Hyper-V with split-lock traps" {
+  run_host_signals --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm --domain-xml "$DOMAIN_XML_UNMITIGATED"
+  [ "$status" -eq 0 ]
+  matched=$(echo "$output" | jq '[.assessment[] | select(contains("enlightenments are enabled"))] | length')
+  [ "$matched" -eq 1 ]
+}
+
+@test "host-signals exits non-zero on missing domain XML" {
+  run_host_signals --log-file "$SPLIT_LOCK_LOG" --vm no-such-vm --domain-xml "/nonexistent/domain.xml"
+  [ "$status" -eq 2 ]
+}
+
+@test "host-signals help prints usage" {
+  run_host_signals --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"usage:"* ]]
+  [[ "$output" == *"--log-file"* ]]
+  [[ "$output" == *"--domain-xml"* ]]
 }
