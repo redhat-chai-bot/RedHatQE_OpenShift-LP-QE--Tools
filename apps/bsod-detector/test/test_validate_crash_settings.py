@@ -340,6 +340,16 @@ class HostCallerTests(unittest.TestCase):
                         self.assertNotIn(' -L', line)
                         self.assertRegex(line, r'https://\S+$')
 
+    def test_container_image_ships_the_validator_under_the_names_preflight_reads(self):
+        dockerfile = (APP_DIR.parents[1] / 'image' / 'container' / 'bsod-detector' / 'Dockerfile').read_text(encoding='utf-8')
+        self.assertIn('COPY apps/bsod-detector/src/scripts/guest/validate-crash-settings.ps1 '
+                      '/usr/share/bsod-detector/guest/validate-crash-settings.ps1', dockerfile)
+        self.assertIn('BSOD_DET__VALIDATE__CRASH_SETTINGS=/usr/share/bsod-detector/guest/validate-crash-settings.ps1', dockerfile)
+        self.assertIn('BSOD_DET__CRASH_CONTROL__FILE=/usr/share/bsod-detector/data/crash-control.json', dockerfile)
+        self.assertNotRegex(dockerfile, r'configure-dumps|BSOD_CONFIGURE_DUMPS|[Mm]ini[Dd]ump')
+        for name in ('BSOD_DET__VALIDATE__CRASH_SETTINGS', 'BSOD_DET__CRASH_CONTROL__FILE'):
+            self.assertIn('${' + name + ':-', self.preflight)
+
     def test_trigger_uses_the_staged_latest_notmyfault_without_a_host_copy(self):
         self.assertNotRegex(self.trigger, r'nmfBin|nmfExpectedSize|put "\$\{nmfBin\}"|[Mm]ini[Dd]ump|minidumpCount')
         self.assertIn('--require-trigger', self.trigger)
