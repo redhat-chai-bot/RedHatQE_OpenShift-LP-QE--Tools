@@ -17,9 +17,10 @@ GUEST_DIR = APP_DIR / 'src' / 'scripts' / 'guest'
 README = GUEST_DIR / 'README.md'
 PRE_SCRIPT = GUEST_DIR / 'golden-image-pre-reboot.ps1'
 POST_SCRIPT = GUEST_DIR / 'golden-image-post-reboot.ps1'
-CONFIGURE_SCRIPT = GUEST_DIR / 'configure-dumps.ps1'
+VALIDATOR_SCRIPT = GUEST_DIR / 'validate-crash-settings.ps1'
 DATA_FILE = APP_DIR / 'src' / 'data' / 'crash-control.json'
 CLEANUP_PATHS = ('C:\\Temp\\virtio-win.iso', 'C:\\Temp\\virtio-win.iso.download')
+ISO_RECORD_PATH = 'C:\\ProgramData\\bsod-detector\\virtio-win-iso.json'
 PAGEFILE_FORMULA = 'Round((RAM bytes + 257MB) / 1MB, 0)'
 
 
@@ -45,7 +46,9 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn('src/scripts/crash-injector/trigger-bsod-intentional.sh', self.readme)
         self.assertIn('intentionally leave the Windows defaults, because the intended test flow does not restart a VM after a simulated crash', self.readme)
         self.assertIn('`src/scripts/host/watch-crash.sh` still starts the VM again after extracting evidence unless it runs with `--no-restart`', self.readme)
-        self.assertIn('### Pinned virtio-win ISO', self.readme)
+        self.assertIn('### Latest virtio-win ISO and its record', self.readme)
+        self.assertIn('it is not a publisher attestation', self.readme)
+        self.assertIn(f'`{ISO_RECORD_PATH}`', self.readme)
         self.assertIn('must not have more RAM than the VM that prepared it', self.readme)
         self.assertIn('C:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /shutdown /quiet', self.readme)
         for path in CLEANUP_PATHS:
@@ -54,15 +57,20 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn('pageFile.requiredMB', self.readme)
         self.assertIn('initial and maximum sizes of at least `requiredMB`', self.readme)
         self.assertIn('| `-StageNotMyFault` |', self.readme)
-        self.assertIn('watch runs, default apply and `-VerifyOnly` never download', self.readme)
-        self.assertIn('The script stages nothing unless the caller passes `-StageNotMyFault`', self.readme)
+        self.assertIn('normal validation never downloads or stages anything', self.readme)
+        self.assertIn('Never runs NotMyFault, crashes or reboots the guest', self.readme)
         self.assertIn('they do not constitute a successful Windows execution or crash-dump test', self.readme)
-        self.assertNotIn('If the recommendation includes `DedicatedDumpFile`', self.readme)
+
+    def test_no_stale_script_dump_or_pin_claims(self):
+        # The configuration script, minidump support and the pinned ISO are gone from the frozen-VM flow.
+        self.assertNotRegex(self.readme, r'(?i)configure-dumps|minidump|smalldump|small memory dump|-VerifyOnly|rebootRequired')
+        self.assertNotRegex(self.readme, r'(?i)\bpinned\b|archive-virtio/|virtio-win-[0-9]+\.[0-9]+')
+        self.assertIsNone(re.search(r'\b[0-9A-Fa-f]{64}\b', self.readme))
 
     def test_no_unsupported_caller_or_consumer_claims(self):
         # Claims that no code in this repository supports: an unconditional preflight forwarding
         # claim, a pending runner update, and a consumer that always discards its VMs.
-        self.assertNotRegex(self.readme, r'preflight-rhov\.sh` passes `-StageNotMyFault`')
+        self.assertNotRegex(self.readme, r'preflight-rhov\.sh` passes `-StageNotMyFault`(?! only with `--require-trigger`)')
         self.assertNotIn('does not pass it yet, and its update is pending', self.readme)
         self.assertNotIn('src/scripts/bsod-pipeline/bsod-runner.sh', self.readme)
         self.assertNotIn('each pytest run tears down its VM', self.readme)
@@ -82,11 +90,13 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn('Exit codes 0, 1641 and 3010 are reported as success', self.readme)
         self.assertIn('AutomaticManagedPagefile = $false', pre)
         self.assertNotIn('-Name AutomaticManagedPagefile -Value 0', pre)
-        # The README documents exactly the virtio-win build and digest the script pins.
-        isoURL = re.search(r"(?m)^\$isoURL\s*=\s*'([^']+)'", pre).group(1)
-        isoSHA256 = re.search(r"(?m)^\$isoSHA256\s*=\s*'([0-9a-f]{64})'", pre).group(1)
-        self.assertIn(f'`{isoURL}`', self.readme)
-        self.assertIn(f'`{isoSHA256}`', self.readme)
+        # The README documents the alias and the record path the scripts use; neither script pins a digest.
+        isoAliasURL = re.search(r"(?m)^\$isoAliasURL\s*=\s*'([^']+)'", pre).group(1)
+        self.assertIn(f'`{isoAliasURL}`', self.readme)
+        for script in (pre, post):
+            self.assertIn(f"$isoRecordPath = '{ISO_RECORD_PATH}'", script)
+            self.assertIsNone(re.search(r'\b[0-9A-Fa-f]{64}\b', script))
+        self.assertIn('**virtio-win ISO record:**', self.readme)
         # Memory is validated before any change; an old dump file only warns before, and refuses sealing after, the reboot.
         self.assertLess(pre.index('if (-not ($ramBytes -gt 0)) {'), pre.index("New-Item -ItemType Directory -Force -Path 'C:\\Temp'"))
         self.assertIn("reads the guest's physical memory size first", self.readme)
@@ -95,28 +105,31 @@ class GuestReadmeTests(unittest.TestCase):
         self.assertIn("$ErrorActionPreference = 'Continue'", post)
         self.assertIn('C:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /shutdown /quiet', post)
 
-    def test_readme_matches_configure_dumps(self):
-        script = CONFIGURE_SCRIPT.read_text(encoding='utf-8')
-        self.assertIn('function Test-PageFileAdequate', script, 'include the configure-dumps.ps1 change')
+    def test_readme_matches_validate_crash_settings(self):
+        script = VALIDATOR_SCRIPT.read_text(encoding='utf-8')
+        self.assertIn('function Test-PageFileAdequate', script, 'include the validate-crash-settings.ps1 change')
         data = json.loads(DATA_FILE.read_text(encoding='utf-8'))
         self.assertNotIn('DedicatedDumpFile', data['recommended']['values'])
+        self.assertIn('DedicatedDumpFile', data['recommended']['absentValues'])
+        self.assertIn('`recommended.absentValues`', self.readme)
         self.assertIn('requiredMB = $requiredMB', script)
         self.assertIn('[Console]::Error.WriteLine', script)
-        self.assertIn('no longer recommends it', self.readme)
+        # Read-only: no registry, CIM or file-system write outside the NotMyFault staging directory.
+        self.assertNotRegex(script, r'(?i)Set-ItemProperty|New-ItemProperty|Remove-ItemProperty|Set-CimInstance|Restart-Computer')
+        self.assertIn('(read-only)', self.readme)
         self.assertIn('[switch]$StageNotMyFault', script)
-        self.assertIn("if ($IsVerifyOnly) { return 'skipped: -VerifyOnly is read-only' }", script)
-        # DedicatedDumpFile exclusion, exit code 4 and the signature check are documented as implemented.
-        self.assertIn("if ($prop.Name -ne 'DedicatedDumpFile')", script)
-        self.assertIn('It ignores a `DedicatedDumpFile` entry', self.readme)
-        self.assertIn('Fail "cannot write CrashControl at ${regPath}: $($_.Exception.Message)" 4', script)
+        self.assertIn("$notMyFault = [ordered]@{ status = 'not requested' }", script)
+        self.assertIn('`{ "status": "not requested" }` without `-StageNotMyFault`', self.readme)
+        # DedicatedDumpFile is a required absence; exit codes 2 and 4 and the signature check are documented as implemented.
+        self.assertIn('always `DedicatedDumpFile`, as `must be absent`', self.readme)
+        self.assertIn("Fail \"Unknown dump type '${type}'. Valid: $($typeNames -join ', ').\" 2", script)
+        self.assertIn('Fail "NotMyFault could not be staged: $($notMyFault.problem)" 4', script)
+        self.assertIn('exits with code 2', self.readme)
         self.assertIn('exits with code 4', self.readme)
         self.assertIn('Get-AuthenticodeSignature -LiteralPath $Path', script)
         self.assertIn("-cnotcontains 'O=Microsoft Corporation'", script)
-        self.assertIn('`Get-AuthenticodeSignature` reports `Valid`', self.readme)
-        self.assertIn('notmyfaultc64.exe.untrusted', self.readme)
-        self.assertIn('exits with code 5', self.readme)
-        # Whichever preflight version is present, the script help must not claim that it passes the switch.
-        self.assertIn('Nothing passes this switch implicitly', script)
+        self.assertIn('exactly `Microsoft Corporation`', self.readme)
+        self.assertIn('`artifacts.notMyFault`', self.readme)
 
 
 if __name__ == '__main__':

@@ -25,10 +25,12 @@ SCRIPT = GUEST_DIR / 'golden-image-pre-reboot.ps1'
 PARTNER_SCRIPT = GUEST_DIR / 'golden-image-post-reboot.ps1'
 HARNESS = Path(__file__).resolve().parent / 'fixtures' / 'ps-function-harness.ps1'
 DATA_FILE = APP_DIR / 'src' / 'data' / 'crash-control.json'
-# The pinned virtio-win build. The digest is the SHA-256 recorded for this ISO in the official
-# virtio-win-0.1.302-1.noarch.rpm header; the ISO inside that RPM and the direct download match it.
-PINNED_ISO_URL = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-0.1.302.iso'
-PINNED_ISO_SHA256 = '303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d'
+# The latest-virtio alias and a sample resolved release (any version: nothing is hardcoded in the script).
+ALIAS_URL = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso'
+RESOLVED_URL = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-9.9.9-1/virtio-win-9.9.9.iso'
+OLDER_URL = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-9.9.8-1/virtio-win-9.9.8.iso'
+RECORD_PATH = 'C:\\ProgramData\\bsod-detector\\virtio-win-iso.json'
+DOWNLOAD_SHA256 = 'CD' * 32
 OTHER_SHA256 = 'AB' * 32
 
 # Mock cmdlets for Set-FixedPagefile; they exist only inside the harness's empty runspace.
@@ -157,7 +159,7 @@ function Remove-ItemProperty ([string]$Path, [string]$Name, $ErrorAction) { $glo
 function New-Item ([string]$ItemType, [switch]$Force, [string]$Path) { $global:MockLog.Add("New-Item ${Path}") }
 function Out-Null { process { } }
 function Enable-TLS12 { $global:MockLog.Add('Enable-TLS12') }
-function Get-FileHash ([string]$LiteralPath, [string]$Algorithm) {
+function Get-FileHash ([string]$LiteralPath, [string]$Algorithm, $ErrorAction) {
     $global:MockLog.Add("Get-FileHash ${LiteralPath} ${Algorithm}")
     $key = if ($LiteralPath -like '*.download') { 'downloadHash' } else { 'cacheHash' }
     [pscustomobject]@{ Hash = "$(@($global:MockState[$key])[0])" }
@@ -172,8 +174,24 @@ function Get-Item ([string]$Path, $ErrorAction) {
     }
     [pscustomobject]@{ FullName = $Path }
 }
-function Save-ISOdownload ([string]$URL, [string]$Path) {
-    $global:MockLog.Add("Save-ISOdownload ${URL} ${Path}")
+function Resolve-OfficialHTTPS ([string]$URL, [string]$OfficialHost) {
+    $global:MockLog.Add("Resolve-OfficialHTTPS ${URL} ${OfficialHost}")
+    $resolved = @($global:MockState['resolved'])[0]
+    if ($resolved -eq 'error') { throw 'redirect from the alias leaves fedorapeople.org' }
+    $resolved
+}
+function Read-ArtifactRecord ([string]$Path) {
+    $global:MockLog.Add("Read-ArtifactRecord ${Path}")
+    if (-not $global:MockState['record']) { return }
+    $source, $sha256 = "$(@($global:MockState['record'])[0])" -split '\|', 2
+    [pscustomobject]@{ resolvedSource = $source; sha256 = $sha256 }
+}
+function Write-ArtifactRecord ([string]$Path, $Record) {
+    $global:MockLog.Add("Write-ArtifactRecord ${Path} source=$($Record['source']) resolvedSource=$($Record['resolvedSource']) version=$($Record['version']) sha256=$($Record['sha256']) sizeBytes=$($Record['sizeBytes'])")
+    if ($global:MockState['recordFails'] -contains 'true') { throw 'Access to the path is denied.' }
+}
+function Save-HTTPSdownload ([string]$URL, [string]$Path) {
+    $global:MockLog.Add("Save-HTTPSdownload ${URL} ${Path}")
     if ($global:MockState['downloadFails'] -contains 'true') { throw 'The operation has timed out' }
     $global:MockState['existing'] = @($global:MockState['existing']) + $Path
 }
@@ -230,27 +248,33 @@ class PreRebootStaticTests(unittest.TestCase):
         self.assertIn('$pagefileSizeMB = Get-PagefileSizeMB $ramBytes', self.text)
         self.assertIsNone(re.search(r'\)\s*\+\s*257\b', self.text))
 
-    def test_iso_is_pinned_and_verified_before_use(self):
-        self.assertIn(f"$isoURL    = '{PINNED_ISO_URL}'", self.text)
-        self.assertIn(f"$isoSHA256 = '{PINNED_ISO_SHA256}'", self.text)
-        self.assertNotRegex(self.text, r"(?i)\$isoURL\s*=\s*'[^']*(latest|stable)-virtio")
-        self.assertNotRegex(self.text, r'(?i)Last-Modified|HttpWebRequest')
-        # The download is verified before it replaces the cache.
-        verify = self.text.index('if (-not (Test-ISOhash $isoTmpPath $isoSHA256))')
-        self.assertLess(self.text.index('Save-ISOdownload $isoURL $isoTmpPath'), verify)
-        self.assertLess(verify, self.text.index('Move-Item -Path $isoTmpPath -Destination $isoPath'))
-        self.assertIn('(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -eq $ExpectedSHA256', self.text)
+    def test_iso_is_the_resolved_latest_release_with_a_recorded_hash(self):
+        self.assertIn(f"$isoAliasURL   = '{ALIAS_URL}'", self.text)
+        self.assertIn("$isoURL = Resolve-OfficialHTTPS $isoAliasURL 'fedorapeople.org'", self.text)
+        self.assertIn(f"$isoRecordPath = '{RECORD_PATH.replace(chr(92) * 2, chr(92))}'", self.text)
+        # No hardcoded version or digest, no plain-HTTP request and no Last-Modified decision.
+        self.assertIsNone(re.search(r'\b[0-9A-Fa-f]{64}\b', self.text))
+        self.assertNotRegex(self.text, r'virtio-win-[0-9]+\.[0-9]+|archive-virtio/|stable-virtio|Last-Modified')
+        code = '\n'.join(line for line in self.text.splitlines() if not line.lstrip().startswith('#'))
+        self.assertNotIn('http://', code)  # comments explain that the alias redirects to plain http://
+        # The hash is calculated from the download, recorded only after the move, and called an audit record.
+        self.assertLess(self.text.index('Save-HTTPSdownload $isoURL $isoTmpPath'), self.text.index('$isoSHA256 = (Get-FileHash -LiteralPath $isoTmpPath -Algorithm SHA256 -ErrorAction Stop).Hash'))
+        self.assertLess(self.text.index('Move-Item -Path $isoTmpPath -Destination $isoPath'), self.text.index('Write-ArtifactRecord $isoRecordPath'))
+        self.assertIn('audit record, not publisher verification', self.text)
+        self.assertNotIn('MinidumpDir', self.text)
 
     def test_iso_download_goes_through_a_temporary_file(self):
-        self.assertIn('Save-ISOdownload $isoURL $isoTmpPath', self.text)
-        self.assertIn('(New-Object System.Net.WebClient).DownloadFile($URL, $Path)', self.text)
+        self.assertIn('Save-HTTPSdownload $isoURL $isoTmpPath', self.text)
+        # The shared download (identical in validate-crash-settings.ps1) does not follow redirects.
+        self.assertIn('$request.AllowAutoRedirect = $false', self.text)
+        self.assertNotIn('WebClient', self.text)
         self.assertIn('Move-Item -Path $isoTmpPath -Destination $isoPath -Force -ErrorAction Stop', self.text)
-        self.assertNotIn('Save-ISOdownload $isoURL $isoPath', self.text)
+        self.assertNotIn('Save-HTTPSdownload $isoURL $isoPath', self.text)
 
     def test_memory_is_validated_before_any_side_effect(self):
         mainFlow = self.text[self.text.index('# The memory size is read before any change'):]
         guard = mainFlow.index('if (-not ($ramBytes -gt 0)) {')
-        for sideEffect in ("New-Item -ItemType Directory -Force -Path 'C:\\Temp'", 'Enable-TLS12\n', 'Save-ISOdownload',
+        for sideEffect in ("New-Item -ItemType Directory -Force -Path 'C:\\Temp'", 'Enable-TLS12\n', 'Save-HTTPSdownload',
                            'Mount-DiskImage', 'Start-Process', 'Set-ItemProperty', 'Set-FixedPagefile $pagefileSizeMB', 'Restart-Computer'):
             self.assertLess(guard, mainFlow.index(sideEffect), sideEffect)
         self.assertEqual(self.text.count('TotalPhysicalMemory -as [int64]'), 1)
@@ -327,17 +351,57 @@ class PreRebootPowerShellTests(unittest.TestCase):
         iso = 'C:\\Temp\\virtio-win.iso'
         cases = [
             ({'existing': []}, False),                                                  # missing: not hashed
-            ({'existing': [iso], 'cacheHash': [PINNED_ISO_SHA256.upper()]}, True),      # match (Get-FileHash is upper case)
+            ({'existing': [iso], 'cacheHash': [DOWNLOAD_SHA256.upper()]}, True),        # match (Get-FileHash is upper case)
             ({'existing': [iso], 'cacheHash': [OTHER_SHA256]}, False),                  # mismatch
         ]
         with tempfile.TemporaryDirectory() as tmpDir:
             mocks = Path(tmpDir) / 'mocks.ps1'
             mocks.write_text(preMainFlowMocks, encoding='ascii')
             results = RunHarness(self, 'mockcall', 'Test-ISOhash',
-                                 [{'state': state, 'args': [iso, PINNED_ISO_SHA256]} for state, _ in cases], mocksPath=mocks)
+                                 [{'state': state, 'args': [iso, DOWNLOAD_SHA256.lower()]} for state, _ in cases], mocksPath=mocks)
         self.assertEqual([result['output'] for result in results], [[str(expected)] for _, expected in cases])
         self.assertFalse([entry for entry in results[0]['log'] if entry.startswith('Get-FileHash')])
         self.assertIn(f'Get-FileHash {iso} SHA256', results[1]['log'])
+
+    def test_artifact_record_round_trip(self):
+        # The two record helpers only touch the path they are given, so they run with real cmdlets in
+        # a fresh pwsh on files in a temporary directory (the rest of the script is never executed).
+        definitions = [RunHarness(self, 'definition', name) for name in ('Read-ArtifactRecord', 'Write-ArtifactRecord')]
+        self.assertTrue(all(definition['found'] for definition in definitions))
+        with tempfile.TemporaryDirectory() as tmpDir:
+            record = Path(tmpDir) / 'ProgramData' / 'virtio-win-iso.json'
+            corrupt = Path(tmpDir) / 'corrupt.json'
+            corrupt.write_text('{ not json', encoding='ascii')
+            probe = Path(tmpDir) / 'probe.ps1'
+            probe.write_text('\n'.join(definition['text'] for definition in definitions) + f"""
+Set-StrictMode -Version Latest
+Write-ArtifactRecord '{record}' ([ordered]@{{ schema = 1; resolvedSource = '{RESOLVED_URL}'; version = '9.9.9'; sha256 = '{DOWNLOAD_SHA256}' }})
+$read = Read-ArtifactRecord '{record}'
+# Under the default error preference a failed write must still throw: first the parent is a file,
+# then the record path is an existing directory (a failed Set-Content).
+$writeFailure = 'written'
+try {{ Write-ArtifactRecord '{corrupt / 'record.json'}' ([ordered]@{{ schema = 1 }}) }} catch {{ $writeFailure = 'threw' }}
+$contentFailure = 'written'
+try {{ Write-ArtifactRecord '{Path(tmpDir) / 'ProgramData'}' ([ordered]@{{ schema = 1 }}) }} catch {{ $contentFailure = 'threw' }}
+[ordered]@{{
+    read = $read
+    missing = @(Read-ArtifactRecord '{Path(tmpDir) / 'missing.json'}').Count
+    corrupt = @(Read-ArtifactRecord '{corrupt}').Count
+    writeFailure = $writeFailure
+    contentFailure = $contentFailure
+}} | ConvertTo-Json -Compress
+""", encoding='ascii')
+            RunHarness(self, 'parse', scriptPath=probe)  # skips or fails like the other checks without pwsh
+            result = subprocess.run([shutil.which('pwsh'), '-NoProfile', '-NonInteractive', '-File', str(probe)],
+                                    capture_output=True, text=True, timeout=120, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            stored = record.read_bytes()
+        output = json.loads(result.stdout)
+        self.assertEqual((output['missing'], output['corrupt'], output['writeFailure'], output['contentFailure']), (0, 0, 'threw', 'threw'))
+        self.assertEqual({key: output['read'][key] for key in ('schema', 'resolvedSource', 'version', 'sha256')},
+                         {'schema': 1, 'resolvedSource': RESOLVED_URL, 'version': '9.9.9', 'sha256': DOWNLOAD_SHA256})
+        self.assertRegex(output['read']['recordedUTC'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d')
+        stored.decode('ascii')  # ASCII, as written for Windows PowerShell 5.1
 
     def test_installer_success_codes(self):
         codes = [0, 1641, 3010, 1, 1603, None]
@@ -369,9 +433,11 @@ class PreRebootMainFlowTests(unittest.TestCase):
     """
 
     HELPERS = ['Get-PagefileSizeMB', 'Test-ISOhash', 'Test-InstallerSuccess', 'Set-FixedPagefile']
-    MOCKED_HELPERS = ['Enable-TLS12', 'Save-ISOdownload']
-    VALID = {'memory': ['17179869184'], 'existing': [], 'ddf': ['present'], 'downloadHash': [PINNED_ISO_SHA256.upper()]}
-    SIDE_EFFECTS = ('New-Item', 'Enable-TLS12', 'Get-FileHash', 'Save-ISOdownload', 'Move-Item', 'Remove-Item',
+    MOCKED_HELPERS = ['Enable-TLS12', 'Save-HTTPSdownload', 'Get-HTTPSredirectTarget', 'Get-HTTPSresponseHead', 'Resolve-OfficialHTTPS',
+                      'Read-ArtifactRecord', 'Write-ArtifactRecord']
+    VALID = {'memory': ['17179869184'], 'existing': [], 'ddf': ['present'], 'downloadHash': [DOWNLOAD_SHA256], 'resolved': [RESOLVED_URL]}
+    SIDE_EFFECTS = ('New-Item', 'Enable-TLS12', 'Resolve-OfficialHTTPS', 'Read-ArtifactRecord', 'Write-ArtifactRecord', 'Get-FileHash',
+                    'Save-HTTPSdownload', 'Move-Item', 'Remove-Item',
                     'Get-DiskImage', 'Mount-DiskImage', 'Start-Process', 'pnputil', 'Dismount-DiskImage', 'Set-Service',
                     'Start-Service', 'Set-ItemProperty', 'Remove-ItemProperty', 'Set-CimInstance', 'Start-Sleep', 'Restart-Computer')
 
@@ -407,9 +473,13 @@ class PreRebootMainFlowTests(unittest.TestCase):
         self.assertEqual(written, expected)
         self.assertIn('Remove-ItemProperty DedicatedDumpFile ErrorAction=Stop', log)
         self.assertIn('Set-ItemProperty PagingFiles=C:\\pagefile.sys 16641 16641 MultiString ErrorAction=Stop', log)
-        self.assertIn(f'Save-ISOdownload {PINNED_ISO_URL} C:\\Temp\\virtio-win.iso.download', log)
+        self.assertIn(f'Resolve-OfficialHTTPS {ALIAS_URL} fedorapeople.org', log)
+        self.assertIn(f'Save-HTTPSdownload {RESOLVED_URL} C:\\Temp\\virtio-win.iso.download', log)
+        self.assertIn(f'Write-ArtifactRecord {RECORD_PATH} source={ALIAS_URL} resolvedSource={RESOLVED_URL} version=9.9.9 '
+                      f'sha256={DOWNLOAD_SHA256} sizeBytes=734003200', log)
         order = [next(index for index, line in enumerate(log) if line.startswith(prefix))
-                 for prefix in ('Save-ISOdownload', 'Get-FileHash C:\\Temp\\virtio-win.iso.download SHA256', 'Move-Item', 'Mount-DiskImage', 'Start-Process', 'Set-Service', 'Set-ItemProperty CrashDumpEnabled',
+                 for prefix in ('Resolve-OfficialHTTPS', 'Save-HTTPSdownload', 'Get-FileHash C:\\Temp\\virtio-win.iso.download SHA256', 'Move-Item',
+                                'Write-ArtifactRecord', 'Mount-DiskImage', 'Start-Process', 'Set-Service', 'Set-ItemProperty CrashDumpEnabled',
                                 'Set-ItemProperty PagingFiles', 'Restart-Computer')]
         self.assertEqual(order, sorted(order))
 
@@ -427,49 +497,56 @@ class PreRebootMainFlowTests(unittest.TestCase):
                 self.assertTrue(self.Starting(log, message), log)
                 self.assertEqual(self.Starting(log, 'Start-Process', 'pnputil', 'Set-ItemProperty', 'Restart-Computer'), [])
 
-    def testAlreadyMountedVerifiedISOisReused(self):
-        log = self.RunScript([{'mounted': ['true'], 'existing': ['C:\\Temp\\virtio-win.iso'], 'cacheHash': [PINNED_ISO_SHA256.upper()]}])[0]
-        self.assertEqual(self.Starting(log, 'Mount-DiskImage', 'Save-ISOdownload', 'Move-Item'), [])
-        self.assertEqual(self.Starting(log, 'Dismount-DiskImage'), ['Dismount-DiskImage C:\\Temp\\virtio-win.iso'])  # only after installing
-        self.assertTrue(self.Starting(log, 'Start-Process msiexec.exe /i E:\\guest-agent\\qemu-ga-x86_64.msi'), log)
+    def testRecordedLatestCacheIsReusedWithoutDownload(self):
+        for state in ({}, {'mounted': ['true']}):
+            with self.subTest(state=state):
+                log = self.RunScript([dict(state, existing=['C:\\Temp\\virtio-win.iso'], record=[f'{RESOLVED_URL}|{OTHER_SHA256}'],
+                                           cacheHash=[OTHER_SHA256])])[0]
+                self.assertIn(f'Write-Host OK: cached virtio-win ISO is the latest release and matches its recorded SHA-256 {OTHER_SHA256}', log)
+                self.assertEqual(self.Starting(log, 'Save-HTTPSdownload', 'Move-Item', 'Write-ArtifactRecord'), [])
+                self.assertEqual(log[-1], 'Restart-Computer')
+
+    def testNewerReleaseOrChangedCacheIsDownloadedAgain(self):
+        cases = [
+            {'existing': ['C:\\Temp\\virtio-win.iso'], 'record': [f'{OLDER_URL}|{OTHER_SHA256}'], 'cacheHash': [OTHER_SHA256]},          # newer latest release
+            {'existing': ['C:\\Temp\\virtio-win.iso'], 'record': [f'{RESOLVED_URL}|{OTHER_SHA256}'], 'cacheHash': [DOWNLOAD_SHA256]},    # cache changed since recorded
+            {'record': [f'{RESOLVED_URL}|{OTHER_SHA256}']},                                              # record without cache
+        ]
+        for state, log in zip(cases, self.RunScript(cases)):
+            with self.subTest(state=state):
+                self.assertIn(f'Save-HTTPSdownload {RESOLVED_URL} C:\\Temp\\virtio-win.iso.download', log)
+                self.assertLess(log.index('Move-Item C:\\Temp\\virtio-win.iso.download C:\\Temp\\virtio-win.iso'),
+                                next(index for index, line in enumerate(log) if line.startswith('Write-ArtifactRecord')))
+                self.assertEqual(log[-1], 'Restart-Computer')
+
+    def testOldRecordIsRemovedBeforeANewDownload(self):
+        log = self.RunScript([{'existing': ['C:\\Temp\\virtio-win.iso', RECORD_PATH.replace(chr(92) * 2, chr(92))],
+                               'record': [f'{OLDER_URL}|{OTHER_SHA256}'], 'cacheHash': [OTHER_SHA256]}])[0]
+        removal = log.index('Remove-Item ' + RECORD_PATH.replace(chr(92) * 2, chr(92)))
+        self.assertLess(removal, next(index for index, line in enumerate(log) if line.startswith('Save-HTTPSdownload')))
         self.assertEqual(log[-1], 'Restart-Computer')
 
-    def testVerifiedCacheIsReusedWithoutDownload(self):
-        log = self.RunScript([{'existing': ['C:\\Temp\\virtio-win.iso'], 'cacheHash': [PINNED_ISO_SHA256.upper()]}])[0]
-        self.assertIn(f'Write-Host OK: cached virtio-win ISO matches the pinned SHA-256 {PINNED_ISO_SHA256}', log)
-        self.assertEqual(self.Starting(log, 'Save-ISOdownload', 'Move-Item'), [])
-        self.assertEqual(log[-1], 'Restart-Computer')
-
-    def testMismatchedCacheIsReplacedByAVerifiedDownload(self):
-        log = self.RunScript([{'existing': ['C:\\Temp\\virtio-win.iso'], 'cacheHash': [OTHER_SHA256]}])[0]
-        self.assertIn('Write-Host WARN: the cached virtio-win ISO does not match the pinned SHA-256 - replacing it', log)
-        self.assertLess(log.index('Get-FileHash C:\\Temp\\virtio-win.iso.download SHA256'),
-                        log.index('Move-Item C:\\Temp\\virtio-win.iso.download C:\\Temp\\virtio-win.iso'))
-        self.assertEqual(log[-1], 'Restart-Computer')
-
-    def testMountedMismatchedCacheIsDismountedBeforeItIsReplaced(self):
-        log = self.RunScript([{'mounted': ['true'], 'existing': ['C:\\Temp\\virtio-win.iso'], 'cacheHash': [OTHER_SHA256]}])[0]
+    def testMountedOlderCacheIsDismountedBeforeItIsReplaced(self):
+        log = self.RunScript([{'mounted': ['true'], 'existing': ['C:\\Temp\\virtio-win.iso'], 'record': [f'{OLDER_URL}|{OTHER_SHA256}'], 'cacheHash': [OTHER_SHA256]}])[0]
         dismount = log.index('Dismount-DiskImage C:\\Temp\\virtio-win.iso')
         self.assertLess(log.index('Get-FileHash C:\\Temp\\virtio-win.iso.download SHA256'), dismount)
         self.assertLess(dismount, log.index('Move-Item C:\\Temp\\virtio-win.iso.download C:\\Temp\\virtio-win.iso'))
         self.assertEqual(log[-1], 'Restart-Computer')
 
-    def testMismatchedDownloadStopsBeforeInstalling(self):
-        for state in ({}, {'existing': ['C:\\Temp\\virtio-win.iso'], 'cacheHash': [OTHER_SHA256]}):
+    def testResolutionDownloadOrRecordFailureStopsBeforeInstalling(self):
+        cases = [
+            ({'resolved': ['error']}, 'Write-Error FAIL: cannot resolve the latest virtio-win ISO over HTTPS: redirect from the alias leaves fedorapeople.org'),
+            ({'downloadFails': ['true']}, 'Write-Error FAIL: the latest virtio-win ISO could not be downloaded and recorded: The operation has timed out'),
+            ({'recordFails': ['true']}, 'Write-Error FAIL: the latest virtio-win ISO could not be downloaded and recorded: Access to the path is denied.'),
+            ({'downloadFails': ['true'], 'existing': ['C:\\Temp\\virtio-win.iso'], 'record': [f'{OLDER_URL}|{OTHER_SHA256}'], 'cacheHash': [OTHER_SHA256]},
+             'Write-Error FAIL: the latest virtio-win ISO could not be downloaded and recorded'),
+        ]
+        for (state, message), log in zip(cases, self.RunScript([state for state, _ in cases])):
             with self.subTest(state=state):
-                log = self.RunScript([dict(state, downloadHash=[OTHER_SHA256])])[0]
                 self.assertEqual(log[-1], 'exit 1', log)
-                self.assertTrue(self.Starting(log, f'Write-Error FAIL: no virtio-win ISO matching the pinned SHA-256 is available: the download does not match the pinned SHA-256 {PINNED_ISO_SHA256}'), log)
-                self.assertIn('Remove-Item C:\\Temp\\virtio-win.iso.download', log)
-                self.assertEqual(self.Starting(log, 'Move-Item', 'Get-DiskImage', 'Start-Process', 'Set-ItemProperty', 'Restart-Computer'), [])
-
-    def testDownloadFailureStopsWithoutFallingBackToAnUnverifiedCache(self):
-        for state in ({}, {'existing': ['C:\\Temp\\virtio-win.iso'], 'cacheHash': [OTHER_SHA256]}):
-            with self.subTest(state=state):
-                log = self.RunScript([dict(state, downloadFails=['true'])])[0]
-                self.assertEqual(log[-1], 'exit 1', log)
-                self.assertTrue(self.Starting(log, 'Write-Error FAIL: no virtio-win ISO matching the pinned SHA-256 is available: The operation has timed out'), log)
-                self.assertEqual(self.Starting(log, 'Move-Item', 'Get-DiskImage', 'Set-ItemProperty', 'Restart-Computer'), [])
+                self.assertTrue(self.Starting(log, message), log)
+                self.assertEqual(self.Starting(log, 'Get-DiskImage', 'Mount-DiskImage', 'Start-Process', 'pnputil', 'Set-ItemProperty', 'Restart-Computer'), [])
+        self.assertEqual(self.Starting(self.RunScript([{'resolved': ['error']}])[0], 'Save-HTTPSdownload', 'Read-ArtifactRecord'), [])
 
     def testAbsentDedicatedDumpFileIsLeftAloneAndAnOldDumpFileOnlyWarns(self):
         log = self.RunScript([{'ddf': [], 'existing': ['C:\\DedicatedDump.sys']}])[0]
