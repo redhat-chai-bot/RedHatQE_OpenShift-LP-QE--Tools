@@ -28,7 +28,7 @@ Environment:
     BSOD_EVIDENCE_VOLUME_KIND, BSOD_DET__EVIDENCE__STORAGE_ID, BSOD_DET__MEMORY__DUMP_PVC,
     BSOD_DET__SNAPSHOT__CLASS, BSOD_DET__GUEST_AGENT__BIN (default: python3 ../host/guest-agent.py),
     BSOD_DET__READY__TIMEOUT (300), BSOD_DET__PREFLIGHT__TIMEOUT (1800)  Optional overrides.
-    The watcher's own settings (e.g. BSOD_DET__ARMED__TIMEOUT, default 3600) still apply.
+    The required watcher ../host/watch-crash.sh keeps its own settings (e.g. BSOD_DET__ARMED__TIMEOUT, default 3600).
 useMsg-EOF
 set -euxo pipefail; shopt -s inherit_errexit
 umask 077
@@ -36,6 +36,7 @@ umask 077
 typeset scrDir=''; scrDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 typeset scrName="${BASH_SOURCE[0]##*/}"
 typeset hostDir="${scrDir}/../host"
+typeset watcherBin="${hostDir}/watch-crash.sh"
 typeset mode='' crashType='' watcherPID=''
 typeset vm="${BSOD_DET__VM__NAME:-}" ns="${BSOD_DET__NAMESPACE:-}"
 typeset evidenceRoot="${BSOD_DET__EVIDENCE__DIR:-/mnt/persistent-bsod-evidence}"
@@ -106,6 +107,8 @@ esac
 if [ "${mode}" = intentional ] && [ "${BSOD_DET__CONFIRM_TARGET:-}" != "${vm}" ]; then
     Die "BSOD_DET__CONFIRM_TARGET must be set to '${vm}' to authorize crashing this VM (got: '${BSOD_DET__CONFIRM_TARGET:-<unset>}')"
 fi
+# The watcher starts only after preflight, the domain patch and the guest dump cleanup: check it before any of them.
+[[ -f "${watcherBin}" && -r "${watcherBin}" ]] || Die "required watcher ${watcherBin} is missing or not a readable file"
 
 typeset runID=''; runID="$(date -u +%Y%m%dT%H%M%SZ)-${mode}-$$-${RANDOM}"
 typeset outDir="${evidenceRoot}/${runID}"
@@ -167,7 +170,7 @@ fi
 
 typeset -a watchArgArr=("${commonArgArr[@]}" --recovery-image "${recoveryImage}" --ready-file "${readyFile}" --no-restart)
 [ "${mode}" = watch ] || watchArgArr+=(--intentional)
-bash "${hostDir}/bsod-watcher.sh" "${watchArgArr[@]}" &
+bash "${watcherBin}" "${watchArgArr[@]}" &
 watcherPID="$!"
 
 typeset -i es=0 readyDeadline=$((SECONDS + readyTimeout))
