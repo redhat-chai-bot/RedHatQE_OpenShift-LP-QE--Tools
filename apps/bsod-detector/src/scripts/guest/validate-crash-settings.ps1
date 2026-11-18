@@ -49,7 +49,8 @@
                       "archiveSHA256": "...", "sha256": "...", "version": "...", "signer": "...", "stagedPath": "..." }
     }
     On failure: { "ok": false, "error": "...", "script": "validate-crash-settings.ps1" } with exit code
-    2 (unknown dump type) or 4 (NotMyFault could not be staged; the host preflight then stops).
+    2 (unknown dump type) or 4 (NotMyFault could not be staged; the full result above is emitted with
+    ok = false and the error, so settings mismatches stay visible; the host preflight then stops).
     A missing data file is a terminating error. A settings mismatch is reported in the JSON, not
     through the exit code.
 #>
@@ -62,8 +63,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Fail ([string]$Message, [int]$ExitCode) {
-    [ordered]@{ ok = $false; error = $Message; script = 'validate-crash-settings.ps1' } | ConvertTo-Json
+# Emits failure JSON and exits. Given a validation result, emits that result with ok = false and the
+# error added, so a NotMyFault staging failure still reports the settings mismatches and page file.
+function Fail ([string]$Message, [int]$ExitCode, $Result) {
+    if ($null -eq $Result) { $Result = [ordered]@{ ok = $false; error = $Message; script = 'validate-crash-settings.ps1' } }
+    $Result['ok'] = $false
+    $Result['error'] = $Message
+    $Result | ConvertTo-Json -Depth 12
     exit $ExitCode
 }
 
@@ -335,10 +341,9 @@ $isPfAdequate = Test-PageFileAdequate $pfEntries $requiredMB
 $notMyFault = [ordered]@{ status = 'not requested' }
 if ($StageNotMyFault) {
     $notMyFault = Invoke-NotMyFaultStaging 'https://download.sysinternals.com/files/NotMyFault.zip'
-    if ($notMyFault.status -ne 'staged') { Fail "NotMyFault could not be staged: $($notMyFault.problem)" 4 }
 }
 
-[ordered]@{
+$result = [ordered]@{
     ok                 = $true
     action             = 'validated'
     script             = 'validate-crash-settings.ps1'
@@ -350,4 +355,6 @@ if ($StageNotMyFault) {
     matchesRecommended = ($mismatches.Count -eq 0)
     pageFile           = [ordered]@{ configured = $pfConfigured; adequate = $isPfAdequate; requiredMB = $requiredMB }
     notMyFault         = $notMyFault
-} | ConvertTo-Json -Depth 12
+}
+if ($StageNotMyFault -and $notMyFault.status -ne 'staged') { Fail "NotMyFault could not be staged: $($notMyFault.problem)" 4 $result }
+$result | ConvertTo-Json -Depth 12
