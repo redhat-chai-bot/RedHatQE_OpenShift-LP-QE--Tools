@@ -34,13 +34,6 @@ function Cleanup () {
   true
 }
 function OnSignal () { typeset status="${1:?}"; exit "${status}"; }
-# configure-dumps.ps1 arguments; NotMyFault is staged on the guest only for an intentional trigger.
-function ConfigureDumpsArgs () {
-  typeset -n argArr="${1:?}"; typeset isTriggerRequired="${2:?}"
-  argArr=(-DataFile 'C:\Windows\Temp\crash-control.json')
-  ((isTriggerRequired == 0)) || argArr+=(-StageNotMyFault)
-  true
-}
 trap Cleanup EXIT
 trap 'OnSignal 130' INT
 trap 'OnSignal 143' TERM
@@ -300,10 +293,9 @@ if ((pingOk == 0)); then
 fi
 [[ "${pingOk}" == 1 ]] || Die 'qemu guest agent ping failed after 5 retries (bootstrap attempted)'
 
-typeset -a configureArgArr=(); ConfigureDumpsArgs configureArgArr "${requireTrigger}"
 typeset cfg=''; cfg="$(RunTimed 120 "${guestAgent[@]}" psfile "${configureScript}" \
   --companion "${crashControlFile}" 'C:\Windows\Temp\crash-control.json' -- \
-  "${configureArgArr[@]}")" || Die 'guest crash-dump configuration failed'
+  -DataFile 'C:\Windows\Temp\crash-control.json')" || Die 'guest crash-dump configuration failed'
 # rebootRequired must be false — CrashDumpEnabled and DedicatedDumpFile only take effect
 # after reboot; arming with stale settings means dumps will be zero-filled.
 jq -e '.ok == true and .matchesRecommended == true and .current.AutoReboot == 0 and .pageFile.adequate == true' <<<"${cfg}" >/dev/null || Die "guest CrashControl/pagefile prerequisites failed validation: ${cfg}"
@@ -312,7 +304,7 @@ jq -e '.rebootRequired == false' <<<"${cfg}" >/dev/null || Die "guest dump confi
 typeset guestChecks=''; guestChecks="$(RunTimed 60 "${guestAgent[@]}" exec powershell.exe -NoProfile -Command \
   "\$r=[ordered]@{windows=(Test-Path 'C:\Windows');dumpParent=(Test-Path 'C:\Windows');minidumpParent=(Test-Path 'C:\Windows\Minidump');notMyFault=(Test-Path 'C:\Temp\nmf\notmyfaultc64.exe')}; \$r|ConvertTo-Json -Compress")" || Die 'guest diagnostic path verification failed'
 jq -e '.windows == true and .dumpParent == true and .minidumpParent == true' <<<"${guestChecks}" >/dev/null || Die 'required guest dump paths are missing'
-((requireTrigger == 0)) || jq -e '.notMyFault == true' <<<"${guestChecks}" >/dev/null || Die 'NotMyFault binary C:\Temp\nmf\notmyfaultc64.exe is missing (staging with -StageNotMyFault failed; see stderr)'
+((requireTrigger == 0)) || jq -e '.notMyFault == true' <<<"${guestChecks}" >/dev/null || Die 'reviewed NotMyFault binary is missing'
 
 # Pre-crash inventory: records existing dump files so post-crash comparison can identify new ones.
 typeset inventory=''; inventory="$(RunTimed 60 "${guestAgent[@]}" exec powershell.exe -NoProfile -Command \
