@@ -15,7 +15,7 @@ The descriptions below document what the scripts in this directory do; they do n
 - The pre-reboot script uses Windows disk-image, driver-management, service, registry, and CIM operations. Its preferred VirtIO driver paths are for Windows 11 AMD64; it falls back to a recursive AMD64 INF search.
 - The pre-reboot script reads the guest's physical memory size first and stops with exit code 1, before any change, if it cannot be read or is not positive.
 - The pre-reboot script needs network access to resolve and download the latest VirtIO ISO (a cached copy is reused only when it is that same latest release and matches its recorded SHA-256). It stops with exit code 1, before installing anything or changing registry settings, if the latest ISO cannot be resolved, downloaded and recorded.
-- `validate-crash-settings.ps1` requires a readable configuration JSON file. It downloads NotMyFault (network access) only with `-StageNotMyFault`, and then always fetches the current release; normal validation never downloads or stages anything.
+- `validate-crash-settings.ps1` requires a readable configuration JSON file. It downloads NotMyFault (network access) only with `-stageNotMyFault`, and then always fetches the current release; normal validation never downloads or stages anything.
 - The pre-reboot script configures a pagefile sized to the RAM of the VM it runs on plus 257 MB. Ensure the guest's C: volume has room for it; the script does not check free disk space.
 - VMs cloned from the golden image must not have more RAM than the VM that prepared it: `validate-crash-settings.ps1` computes the requirement from the RAM of the VM it runs on and then reports the page file as not adequate, which the host preflight rejects. Images prepared by older versions of these scripts (a 4096 MB page file and a `DedicatedDumpFile`) are not adequate either and must be rebuilt.
 - The intended test flow does not restart a VM after a simulated crash, so the golden image is meant for disposable test VMs. The current `src/scripts/host/watch-crash.sh` still starts the VM again after extracting evidence unless it runs with `--no-restart`; aligning the watcher with the intended flow is a separate, planned change.
@@ -157,11 +157,13 @@ Read-only run-time check of the guest's crash-dump settings, run by the host `pr
 
 | Parameter | Meaning |
 |---|---|
-| `-DumpType <string>` | Validates against another key of the configuration's `crashDumpTypes`. Defaults to `recommended.crashDumpType`. |
-| `-StageNotMyFault` | For an intentional crash run only: downloads and stages the current NotMyFault (see below). Off by default; normal validation never downloads or stages anything. |
-| `-DataFile <string>` | Path to the required configuration JSON. Supply it when running outside the expected repository layout. |
+| `-dumpType <string>` | Validates against another key of the configuration's `crashDumpTypes`. Defaults to `recommended.crashDumpType`. |
+| `-stageNotMyFault` | For an intentional crash run only: downloads and stages the current NotMyFault (see below). Off by default; normal validation never downloads or stages anything. |
+| `-dataFile <string>` | Path to the required configuration JSON. Supply it when running outside the expected repository layout. |
 
-**Configuration dependency:** The script expects `crash-control.json`. Without `-DataFile`, it resolves three levels above its script directory and looks for `src\data\crash-control.json`. The configuration supplies `registryPath`, `recommended.crashDumpType`, `recommended.values`, `recommended.absentValues`, `crashDumpTypes.<selected type>.CrashDumpEnabled`, and `pageFile.path` / `pageFile.value`. The configuration file is [`src/data/crash-control.json`](../../data/crash-control.json); it is data, not an additional script.
+Parameter names are camelCase. PowerShell binds parameter names case-insensitively, so callers that still pass `-DataFile`, `-StageNotMyFault` or `-DumpType` keep working; the golden-image scripts' function parameters follow the same camelCase convention.
+
+**Configuration dependency:** The script expects `crash-control.json`. Without `-dataFile`, it resolves three levels above its script directory and looks for `src\data\crash-control.json`. The configuration supplies `registryPath`, `recommended.crashDumpType`, `recommended.values`, `recommended.absentValues`, `crashDumpTypes.<selected type>.CrashDumpEnabled`, and `pageFile.path` / `pageFile.value`. The configuration file is [`src/data/crash-control.json`](../../data/crash-control.json); it is data, not an additional script.
 
 ### Usage
 
@@ -169,13 +171,13 @@ These examples use a placeholder path that must be replaced with the actual conf
 
 ```powershell
 # Compare the live settings with the configuration's recommendation (read-only).
-.\validate-crash-settings.ps1 -DataFile '<path-to-configuration-json>'
+.\validate-crash-settings.ps1 -dataFile '<path-to-configuration-json>'
 
 # Compare against another dump type present in the configuration.
-.\validate-crash-settings.ps1 -DumpType '<configured-dump-type-key>' -DataFile '<path-to-configuration-json>'
+.\validate-crash-settings.ps1 -dumpType '<configured-dump-type-key>' -dataFile '<path-to-configuration-json>'
 
 # Intentional crash run: also stage the latest NotMyFault.
-.\validate-crash-settings.ps1 -StageNotMyFault -DataFile '<path-to-configuration-json>'
+.\validate-crash-settings.ps1 -stageNotMyFault -dataFile '<path-to-configuration-json>'
 ```
 
 ### Checks
@@ -189,7 +191,7 @@ These examples use a placeholder path that must be replaced with the actual conf
 
 A mismatch does not change the exit code: the JSON reports it, and `preflight-rhov.sh` stops the run when `matchesRecommended` is false, `AutoReboot` is not 0 or the page file is not adequate. The fix is to rebuild or correct the golden image; nothing is changed at run time.
 
-### NotMyFault staging (`-StageNotMyFault`)
+### NotMyFault staging (`-stageNotMyFault`)
 
 - Removes any earlier `C:\Temp\nmf\notmyfaultc64.exe` first; an existing copy is never reused.
 - Resolves `https://download.sysinternals.com/files/NotMyFault.zip` over HTTPS (a redirect may only stay on that host), downloads it and extracts it.
@@ -198,7 +200,7 @@ A mismatch does not change the exit code: the JSON reports it, and `preflight-rh
 - Reports `source`, `resolvedSource`, `archiveSHA256`, `sha256` (of the executable), `version` (file version), `signer` and `stagedPath`. No hash is published for NotMyFault: the SHA-256 values record what was downloaded; the signature is the publisher check.
 - Never runs NotMyFault, crashes or reboots the guest. A staging failure exits with code 4 and still emits the full result (settings mismatches, page file, the failed `notMyFault` record) with `ok` set to `false` and an `error`; the host preflight then stops the run and prints it.
 
-The host `preflight-rhov.sh` passes `-StageNotMyFault` only with `--require-trigger` and records the reported values in `recovery-metadata.json` (`artifacts.notMyFault`). Watch runs do not pass it.
+The host `preflight-rhov.sh` passes `-stageNotMyFault` only with `--require-trigger` and records the reported values in `recovery-metadata.json` (`artifacts.notMyFault`). Watch runs do not pass it.
 
 ### Pagefile reporting
 
@@ -222,6 +224,6 @@ The normal output is one JSON object with:
 | `pageFile.configured` | Configured pagefile entries joined by `; `, or `null`. |
 | `pageFile.adequate` | Boolean, see above. |
 | `pageFile.requiredMB` | RAM + 257 MB in MB, or `null` when RAM cannot be read or is not positive. |
-| `notMyFault` | `{ "status": "not requested" }` without `-StageNotMyFault`; otherwise the staging record above. |
+| `notMyFault` | `{ "status": "not requested" }` without `-stageNotMyFault`; otherwise the staging record above. |
 
 An unknown dump type emits `{ "ok": false, "error": "...", "script": "validate-crash-settings.ps1" }` and exits with code 2; a failed NotMyFault staging emits the normal result with `ok: false` and `error` added (so settings mismatches stay visible) and exits with code 4. A missing configuration is a terminating error.
