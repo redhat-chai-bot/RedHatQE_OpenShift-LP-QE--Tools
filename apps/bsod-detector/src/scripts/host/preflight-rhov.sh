@@ -8,11 +8,7 @@ umask 077
 
 typeset scriptDir=''; scriptDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 typeset appDir=''; appDir="$(cd "${scriptDir}/../../.." && pwd)"
-# BSOD_DET__VALIDATE__CRASH_SETTINGS overrides the read-only guest validator path.
-# BSOD_DET__CONFIGURE__DUMPS is a deprecated alias for externally managed CI; it must name a copy of
-# validate-crash-settings.ps1 (any other file name is refused before it runs, and the output must
-# come from that validator). There is no fallback to the former configuration script.
-typeset validatorScript="${BSOD_DET__VALIDATE__CRASH_SETTINGS:-${BSOD_DET__CONFIGURE__DUMPS:-${appDir}/src/scripts/guest/validate-crash-settings.ps1}}"
+typeset configureScript="${BSOD_DET__CONFIGURE__DUMPS:-${appDir}/src/scripts/guest/configure-dumps.ps1}"
 typeset crashControlFile="${BSOD_DET__CRASH_CONTROL__FILE:-${appDir}/src/data/crash-control.json}"
 typeset ns=''; typeset vm=''; typeset outDir=''; typeset metadataFile=''; typeset runId=''
 typeset snapClass="${BSOD_DET__SNAPSHOT__CLASS:-}"; typeset recoveryImage="${BSOD_DET__RECOVERY__IMAGE:-}"
@@ -38,43 +34,6 @@ function Cleanup () {
   true
 }
 function OnSignal () { typeset status="${1:?}"; exit "${status}"; }
-# validate-crash-settings.ps1 arguments; the latest NotMyFault is staged only for an intentional trigger.
-function ValidatorArgs () {
-  typeset -n argArr="${1:?}"; typeset isTriggerRequired="${2:?}"
-  argArr=(-DataFile 'C:\Windows\Temp\crash-control.json')
-  ((isTriggerRequired == 0)) || argArr+=(-StageNotMyFault)
-  true
-}
-# Prints the final HTTPS URL behind an official download alias without letting curl follow
-# redirects: every hop must stay on the given host, and a plain http:// location on that host is
-# requested over HTTPS (the fedorapeople.org latest aliases redirect to http://).
-function ResolveOfficialHTTPS () {
-  typeset url="${1:?}"; typeset host="${2:?}"; typeset reply=''; typeset location=''; typeset -i hop=0
-  for ((hop = 0; hop < 5; hop++)); do
-    [[ "${url}" == "https://${host}/"* ]] || return 1
-    reply="$(RunTimed 30 curl --proto '=https' -sSI -o /dev/null -w '%{http_code} %{redirect_url}' "${url}")" || return 1
-    location="${reply#* }"
-    if [[ -z "${location}" ]]; then
-      [[ "${reply%% *}" == 200 ]] || return 1
-      printf '%s\n' "${url}"; return 0
-    fi
-    [[ "${reply%% *}" == 3?? ]] || return 1
-    [[ "${location}" == "http://${host}/"* ]] && location="https://${location#http://}"
-    url="${location}"
-  done
-  return 1
-}
-# True when the JSON is a validate-crash-settings.ps1 result that matches the golden image.
-function ValidationAccepted () {
-  jq -e '.script == "validate-crash-settings.ps1" and .action == "validated" and .ok == true and
-    .matchesRecommended == true and .current.AutoReboot == 0 and .pageFile.adequate == true' <<<"${1:?}" >/dev/null 2>&1
-}
-# True when the validator staged NotMyFault from the official HTTPS host with both SHA-256 values.
-function NotMyFaultStaged () {
-  jq -e '.notMyFault.status == "staged" and (.notMyFault.sha256 | test("^[0-9A-Fa-f]{64}$")) and
-    (.notMyFault.archiveSHA256 | test("^[0-9A-Fa-f]{64}$")) and
-    (.notMyFault.resolvedSource | startswith("https://download.sysinternals.com/"))' <<<"${1:?}" >/dev/null 2>&1
-}
 trap Cleanup EXIT
 trap 'OnSignal 130' INT
 trap 'OnSignal 143' TERM
@@ -115,7 +74,7 @@ for tool in oc virtctl jq python3 sha256sum findmnt timeout realpath sync; do Re
 for helper in guest-agent.py reliability.py extract--guest-os--crash-info.sh collect-host-signals.sh parse-dump-header.sh; do
   [[ -r "${scriptDir}/${helper}" ]] || Die "required helper missing: ${scriptDir}/${helper}"
 done
-[[ -r "${validatorScript}" && -r "${crashControlFile}" ]] || Die 'guest validation inputs are missing'
+[[ -r "${configureScript}" && -r "${crashControlFile}" ]] || Die 'guest configuration inputs are missing'
 RunTimed 10 python3 -c 'import Evtx.Evtx' || Die 'python-evtx is missing or cannot be imported'
 RunTimed 10 python3 -c 'import volatility3' || Die 'volatility3 is missing — install with: pip install volatility3'
 RunTimed 10 virtctl memory-dump get --help >/dev/null || Die 'virtctl does not provide memory-dump get'
@@ -288,26 +247,17 @@ Cleanup
 export BSOD_DET__NAMESPACE="${ns}" BSOD_DET__VM__NAME="${vm}" BSOD_DET__POD__NAME="${pod}" BSOD_DET__DOMAIN__NAME="${dom}"
 
 # Bootstrap QGA if the service is installed but not responding.
-# Uploads and installs the latest qemu-ga-x86_64.msi via virsh qemu-agent-command (no SSH required).
+# Uploads and installs qemu-ga-x86_64.msi via virsh qemu-agent-command (no SSH required).
 # Only works if QGA binary is present in the VM — cannot install from scratch without it.
-# The alias is resolved to its HTTPS archive location and the SHA-256 of the downloaded file is
-# recorded in qemuGaMsi (no checksum or signature file is published for it; audit record only).
-typeset qemuGaMsi='null'
 function BootstrapQGA () {
-  typeset msiUrl="${BSOD_DET__QEMU_GA_MSI_URL:-https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-qemu-ga/qemu-ga-x86_64.msi}"
-  typeset msiHost="${msiUrl#https://}"; msiHost="${msiHost%%/*}"
+  typeset msiUrl="${BSOD_DET__QEMU_GA_MSI_URL:-https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/qemu-ga-x86_64.msi}"
   typeset msiLocal; msiLocal="$(mktemp /tmp/qemu-ga-bootstrap-XXXXXX.msi)"
   echo "preflight-rhov: QGA not responding — attempting qemu-ga bootstrap via guest-agent.py" >&2
-  typeset msiResolved=''
-  if ! msiResolved="$(ResolveOfficialHTTPS "${msiUrl}" "${msiHost}")" || \
-     ! RunTimed 120 curl --proto '=https' --proto-redir '=https' -fsSL -o "${msiLocal}" "${msiResolved}"; then
-    echo "preflight-rhov: WARN: qemu-ga MSI download failed from ${msiUrl} (HTTPS on ${msiHost} only)" >&2
+  if ! RunTimed 120 curl -fsSL -o "${msiLocal}" "${msiUrl}"; then
+    echo "preflight-rhov: WARN: qemu-ga MSI download failed from ${msiUrl}" >&2
     rm -f "${msiLocal}"; return 1
   fi
-  typeset msiSha=''; msiSha="$(sha256sum "${msiLocal}" | cut -d' ' -f1)"
-  qemuGaMsi="$(jq -cn --arg source "${msiUrl}" --arg resolvedSource "${msiResolved}" --arg sha256 "${msiSha}" \
-    '{source:$source,resolvedSource:$resolvedSource,sha256:$sha256,verification:"SHA-256 calculated from the downloaded file; no published checksum"}')"
-  echo "preflight-rhov: qemu-ga MSI downloaded from ${msiResolved} ($(du -h "${msiLocal}" | cut -f1), sha256 ${msiSha})" >&2
+  echo "preflight-rhov: qemu-ga MSI downloaded ($(du -h "${msiLocal}" | cut -f1))" >&2
   if ! RunTimed 180 "${guestAgent[@]}" put "${msiLocal}" 'C:\Temp\qemu-ga-x86_64.msi' 2>/dev/null; then
     echo "preflight-rhov: WARN: guest-agent.py put failed — QGA service may not be present in the VM" >&2
     rm -f "${msiLocal}"; return 1
@@ -343,34 +293,22 @@ if ((pingOk == 0)); then
 fi
 [[ "${pingOk}" == 1 ]] || Die 'qemu guest agent ping failed after 5 retries (bootstrap attempted)'
 
-# Read-only validation: the guest's crash settings must already match crash-control.json (the
-# golden image configures them; nothing is changed or rebooted here). With --require-trigger the
-# validator also stages the latest NotMyFault and reports its source and SHA-256.
-[[ -z "${BSOD_DET__CONFIGURE__DUMPS:-}" || -n "${BSOD_DET__VALIDATE__CRASH_SETTINGS:-}" ]] || \
-  echo 'preflight-rhov: WARN: BSOD_DET__CONFIGURE__DUMPS is deprecated; set BSOD_DET__VALIDATE__CRASH_SETTINGS' >&2
-[[ "${validatorScript##*/}" == validate-crash-settings.ps1 ]] || \
-  Die "refusing to run ${validatorScript}: the guest validator must be validate-crash-settings.ps1"
-typeset -a validatorArgArr=(); ValidatorArgs validatorArgArr "${requireTrigger}"
-typeset validation=''; validation="$(RunTimed 300 "${guestAgent[@]}" psfile "${validatorScript}" \
+typeset cfg=''; cfg="$(RunTimed 120 "${guestAgent[@]}" psfile "${configureScript}" \
   --companion "${crashControlFile}" 'C:\Windows\Temp\crash-control.json' -- \
-  "${validatorArgArr[@]}")" || Die "guest crash-setting validation failed: ${validation}"
-ValidationAccepted "${validation}" || \
-  Die "guest crash settings do not match the golden image (nothing was changed; rebuild or fix the golden image): $(jq -c '{mismatches,pageFile}' <<<"${validation}" 2>/dev/null || printf '%s' "${validation}")"
-typeset notMyFault='null'
-if ((requireTrigger)); then
-  NotMyFaultStaged "${validation}" || \
-    Die "the latest NotMyFault was not staged: $(jq -c .notMyFault <<<"${validation}" 2>/dev/null)"
-  notMyFault="$(jq -c '.notMyFault | .sha256 |= ascii_downcase | .archiveSHA256 |= ascii_downcase' <<<"${validation}")"
-fi
+  -DataFile 'C:\Windows\Temp\crash-control.json')" || Die 'guest crash-dump configuration failed'
+# rebootRequired must be false — CrashDumpEnabled and DedicatedDumpFile only take effect
+# after reboot; arming with stale settings means dumps will be zero-filled.
+jq -e '.ok == true and .matchesRecommended == true and .current.AutoReboot == 0 and .pageFile.adequate == true' <<<"${cfg}" >/dev/null || Die "guest CrashControl/pagefile prerequisites failed validation: ${cfg}"
+jq -e '.rebootRequired == false' <<<"${cfg}" >/dev/null || Die "guest dump configuration requires a reboot before arming — do: virtctl stop ${vm} -n ${ns} && virtctl start ${vm} -n ${ns}, then re-run"
 
 typeset guestChecks=''; guestChecks="$(RunTimed 60 "${guestAgent[@]}" exec powershell.exe -NoProfile -Command \
-  "\$r=[ordered]@{windows=(Test-Path 'C:\Windows');dumpParent=(Test-Path 'C:\Windows');notMyFault=(Test-Path 'C:\Temp\nmf\notmyfaultc64.exe')}; \$r|ConvertTo-Json -Compress")" || Die 'guest diagnostic path verification failed'
-jq -e '.windows == true and .dumpParent == true' <<<"${guestChecks}" >/dev/null || Die 'required guest dump paths are missing'
-((requireTrigger == 0)) || jq -e '.notMyFault == true' <<<"${guestChecks}" >/dev/null || Die 'staged NotMyFault binary is missing'
+  "\$r=[ordered]@{windows=(Test-Path 'C:\Windows');dumpParent=(Test-Path 'C:\Windows');minidumpParent=(Test-Path 'C:\Windows\Minidump');notMyFault=(Test-Path 'C:\Temp\nmf\notmyfaultc64.exe')}; \$r|ConvertTo-Json -Compress")" || Die 'guest diagnostic path verification failed'
+jq -e '.windows == true and .dumpParent == true and .minidumpParent == true' <<<"${guestChecks}" >/dev/null || Die 'required guest dump paths are missing'
+((requireTrigger == 0)) || jq -e '.notMyFault == true' <<<"${guestChecks}" >/dev/null || Die 'reviewed NotMyFault binary is missing'
 
-# Pre-crash inventory: records an existing MEMORY.DMP so post-crash comparison can identify a new one.
+# Pre-crash inventory: records existing dump files so post-crash comparison can identify new ones.
 typeset inventory=''; inventory="$(RunTimed 60 "${guestAgent[@]}" exec powershell.exe -NoProfile -Command \
-  "\$p=@('C:\Windows\MEMORY.DMP'); \$r=@(\$p|? {Test-Path \$_}|% {\$i=Get-Item \$_; [ordered]@{path=\$i.FullName;size=\$i.Length;mtime=([DateTimeOffset]\$i.LastWriteTimeUtc).ToUnixTimeSeconds()}}); ConvertTo-Json -InputObject \$r -Compress")" || Die 'cannot inventory pre-existing guest dumps'
+  "\$p=@('C:\Windows\MEMORY.DMP')+(Get-ChildItem 'C:\Windows\Minidump\*.dmp' -ErrorAction SilentlyContinue|% FullName); \$r=@(\$p|? {Test-Path \$_}|% {\$i=Get-Item \$_; [ordered]@{path=\$i.FullName;size=\$i.Length;mtime=([DateTimeOffset]\$i.LastWriteTimeUtc).ToUnixTimeSeconds()}}); ConvertTo-Json -InputObject \$r -Compress")" || Die 'cannot inventory pre-existing guest dumps'
 jq -e 'if type=="array" then all(.[]; (.path|type)=="string" and (.size|type)=="number" and (.mtime|type)=="number") elif . == null then true else false end' <<<"${inventory}" >/dev/null || Die 'guest dump inventory is invalid'
 [[ "$(jq -r type <<<"${inventory}")" == array ]] || inventory='[]'
 
@@ -386,12 +324,11 @@ jq -n --arg runId "${runId}" --arg outputDir "${outDir}" --arg namespace "${ns}"
   --arg mountTarget "${mountTarget}" --arg mountSource "${mountSource}" --arg mountFs "${mountFs}" \
   --arg mountDevice "${mountDevice}" --arg mountKind "${evidenceKind}" --arg mountId "${evidenceId}" \
   --argjson armedEpoch "${armedEpoch}" --argjson inventory "${inventory}" \
-  --argjson notMyFault "${notMyFault}" --argjson qemuGaMsi "${qemuGaMsi}" \
   '{schema:2,runId:$runId,outputDir:$outputDir,namespace:$namespace,vm:$vm,launcherPod:$pod,domain:$domain,node:$node,
     guestPvc:$guestPvc,diskName:$diskName,diskTarget:$diskTarget,memoryDumpPvc:$memoryDumpPvc,
     snapshotClass:$snapshotClass,storageClass:$storageClass,storageProvisioner:$storageProvisioner,
     storageSize:$storageSize,volumeMode:$volumeMode,recoveryImage:$recoveryImage,recoveryImageContract:"bash+guestfish-v1",
-    armedEpoch:$armedEpoch,preCrashInventory:$inventory,artifacts:{notMyFault:$notMyFault,qemuGaMsi:$qemuGaMsi},
+    armedEpoch:$armedEpoch,preCrashInventory:$inventory,
     evidenceMount:{target:$mountTarget,source:$mountSource,fsType:$mountFs,device:$mountDevice,kind:$mountKind,id:$mountId}}' > "${temporary}"
 chmod 0600 "${temporary}"; mv -f "${temporary}" "${metadataFile}"
 

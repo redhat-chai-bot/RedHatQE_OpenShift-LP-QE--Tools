@@ -41,11 +41,11 @@ case "$1" in
   ping) exit 0 ;;
   psfile)
     if [[ -n "${CFG_JSON:-}" ]]; then printf '%s\n' "$CFG_JSON"
-    else echo '{"script":"validate-crash-settings.ps1","action":"validated","ok":true,"matchesRecommended":true,"mismatches":[],"current":{"AutoReboot":0},"pageFile":{"adequate":true},"notMyFault":{"status":"staged","source":"https://download.sysinternals.com/files/NotMyFault.zip","resolvedSource":"https://download.sysinternals.com/files/NotMyFault.zip","sha256":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","archiveSHA256":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"}}'
+    else echo '{"ok":true,"matchesRecommended":true,"current":{"AutoReboot":0},"pageFile":{"adequate":true},"rebootRequired":false}'
     fi ;;
   exec)
     if [[ "$*" == *Get-ChildItem* ]]; then echo '[]'
-    else echo '{"windows":true,"dumpParent":true,"notMyFault":true}'
+    else echo '{"windows":true,"dumpParent":true,"minidumpParent":true,"notMyFault":true}'
     fi ;;
   *) exit 91 ;;
 esac
@@ -118,8 +118,8 @@ run_preflight() {
   [ "$status" -ne 0 ]; [[ "$output" == *'exact target of a distinct non-root mount'* ]]
   rm -rf "$EVIDENCE_ROOT/fixture-run-001"; unset MOUNT_TARGET
   echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"
-  CFG_JSON='{"script":"validate-crash-settings.ps1","action":"validated","ok":true,"matchesRecommended":true,"mismatches":[],"current":{"AutoReboot":0},"pageFile":{"adequate":null},"notMyFault":{"status":"staged","sha256":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","archiveSHA256":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"}}'; run_preflight
-  [ "$status" -ne 0 ]; [[ "$output" == *'guest crash settings do not match the golden image'* ]]
+  CFG_JSON='{"ok":true,"matchesRecommended":true,"current":{"AutoReboot":0},"pageFile":{"adequate":null},"rebootRequired":false}'; run_preflight
+  [ "$status" -ne 0 ]; [[ "$output" == *'CrashControl/pagefile prerequisites failed validation'* ]]
   rm -rf "$EVIDENCE_ROOT/fixture-run-001"; unset CFG_JSON
   PREFLIGHT_EXTRA=(--disk-target vdb); run_preflight
   [ "$status" -ne 0 ]; [[ "$output" == *'does not map uniquely'* ]]
@@ -192,6 +192,7 @@ case "$1" in
     if [[ "$all" == *guestfish* && "$all" == *'download /Windows/'* ]]; then exit 0; fi
     if [[ "$all" == *'/bin/bash -ceu'* ]]; then [[ "${MISSING_GUESTFISH:-0}" == 0 ]]; exit; fi
     if [[ "$all" == *' stat '* ]]; then printf 'size: 96\nmtime: 200\n'; exit 0; fi
+    if [[ "$all" == *' ls /Windows/Minidump'* ]]; then exit 0; fi
     if [[ "$all" == *'download /Windows/MEMORY.DMP'* ]]; then
       "$REAL_PYTHON" -c 'import os,struct,sys; d=bytearray(8192); d[:8]=b"PAGEDU64"; struct.pack_into("<I",d,0x38,int(os.environ.get("DUMP_CODE","10"),0)); sys.stdout.buffer.write(d)'; exit 0
     fi

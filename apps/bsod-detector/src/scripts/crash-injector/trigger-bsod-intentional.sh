@@ -70,8 +70,12 @@ for resource in "dv/${memoryDumpDv}" "pvc/${memoryDumpPvc}" "dv/${evidenceDv}" "
     echo "trigger-bsod-intentional: WARN: ${resource} cleanup skipped (may not exist or is in use)"
 done
 
-# Phase 2: Preflight validation - verify cluster state, VM existence, mount points and the guest's
-# crash settings (read-only); --require-trigger makes the guest validator stage the latest NotMyFault.
+# Phase 1b: validate NotMyFault binary exists on host (upload happens after preflight in Phase 2b)
+typeset nmfBin="${scriptDir}/notmyfaultc64.exe"
+[[ -f "${nmfBin}" ]] || Die "notmyfaultc64.exe not found at ${nmfBin} — add it to crash-injector/"
+typeset nmfExpectedSize; nmfExpectedSize="$(stat -c%s "${nmfBin}")"
+
+# Phase 2: Preflight validation - verify cluster state, VM existence, and mount points are valid
 mkdir "${outDir}" || Die "cannot create unique run directory ${outDir}"
 timeout --signal=TERM --kill-after=5 1800 "${hostDir}/preflight-rhov.sh" --ns "${ns}" --vm "${vm}" --out "${outDir}" --metadata "${metadataFile}" --run-id "${runId}" \
   --evidence-mount "${evidenceRoot}" --evidence-volume-kind "${evidenceKind}" --evidence-storage-id "${evidenceId}" \
@@ -121,18 +125,31 @@ timeout --signal=TERM --kill-after=5 15 oc --request-timeout=10s get vmi "${vm}"
   echo "trigger-bsod-intentional: vmi-spec.json captured (always available via Kubernetes API)" || \
   echo "trigger-bsod-intentional: WARN: vmi-spec.json capture failed (non-fatal)"
 
-# Phase 2c: NotMyFault was staged by preflight (fresh download of the latest release, Microsoft
-# signature checked); there is no host-local copy or upload. Its source and SHA-256 are recorded
-# in the metadata (artifacts.notMyFault).
-jq -e '.artifacts.notMyFault.status == "staged"' "${metadataFile}" >/dev/null || Die 'preflight did not record a staged NotMyFault'
-echo "trigger-bsod-intentional: NotMyFault $(jq -r '.artifacts.notMyFault.version // "unknown version"' "${metadataFile}") staged from $(jq -r .artifacts.notMyFault.resolvedSource "${metadataFile}") (sha256 $(jq -r .artifacts.notMyFault.sha256 "${metadataFile}"))"
+# Phase 2c: Upload NotMyFault binary — runs after preflight so QGA is confirmed working
+# Skipped if binary already present with correct size (golden image pre-installs it).
+typeset nmfGuestSize; nmfGuestSize="$(timeout --signal=TERM --kill-after=5 15 python3 "${hostDir}/guest-agent.py" exec powershell.exe -NoProfile -Command \
+  "(Get-Item 'C:\Temp\nmf\notmyfaultc64.exe' -ErrorAction SilentlyContinue)?.Length" 2>/dev/null || true)"
+if [[ "${nmfGuestSize}" == *"${nmfExpectedSize}"* ]]; then
+  echo "trigger-bsod-intentional: NotMyFault present with correct size (${nmfExpectedSize} bytes) — skipping upload"
+else
+  echo "trigger-bsod-intentional: NotMyFault missing or wrong size (guest=${nmfGuestSize}, expected=${nmfExpectedSize}) — uploading..."
+  timeout --signal=TERM --kill-after=5 60 python3 "${hostDir}/guest-agent.py" exec powershell.exe -NoProfile -Command \
+    "New-Item -ItemType Directory -Force -Path 'C:\Temp\nmf' | Out-Null" || Die 'cannot create C:\Temp\nmf on guest'
+  timeout --signal=TERM --kill-after=5 120 python3 "${hostDir}/guest-agent.py" put "${nmfBin}" 'C:\Temp\nmf\notmyfaultc64.exe' || Die 'NotMyFault upload to guest failed'
+  typeset nmfActualSize; nmfActualSize="$(timeout --signal=TERM --kill-after=5 15 python3 "${hostDir}/guest-agent.py" exec powershell.exe -NoProfile -Command \
+    "(Get-Item 'C:\Temp\nmf\notmyfaultc64.exe').Length" 2>/dev/null || true)"
+  [[ "${nmfActualSize}" == *"${nmfExpectedSize}"* ]] || Die "NotMyFault upload corrupted: expected ${nmfExpectedSize} bytes, got ${nmfActualSize}"
+  timeout --signal=TERM --kill-after=5 15 python3 "${hostDir}/guest-agent.py" exec powershell.exe -NoProfile -Command \
+    "Unblock-File -Path 'C:\Temp\nmf\notmyfaultc64.exe' -ErrorAction SilentlyContinue" 2>/dev/null || true
+  echo "trigger-bsod-intentional: NotMyFault uploaded and unblocked (${nmfExpectedSize} bytes)"
+fi
 
-# Phase 3: Guest cleanup - ensure no stale MEMORY.DMP from a previous run exists on the VM
-# This prevents false positives from an old dump: we must verify empty state BEFORE injecting crash
+# Phase 3: Guest cleanup - ensure no stale dumps from previous runs exist on the VM
+# This prevents false positives from old dumps: we must verify empty state BEFORE injecting crash
 typeset cleanupResult=''
 cleanupResult="$(timeout --signal=TERM --kill-after=5 60 python3 "${hostDir}/guest-agent.py" exec powershell.exe -NoProfile -Command \
-  "Remove-Item 'C:\Windows\MEMORY.DMP' -Force -ErrorAction SilentlyContinue; [ordered]@{memory=(Test-Path 'C:\Windows\MEMORY.DMP')}|ConvertTo-Json -Compress")" || Die 'guest dump cleanup command failed or timed out'
-jq -e '.memory == false' <<<"${cleanupResult}" >/dev/null || Die "guest dump cleanup could not be proven: ${cleanupResult}"
+  "Remove-Item 'C:\Windows\MEMORY.DMP' -Force -ErrorAction SilentlyContinue; Remove-Item 'C:\Windows\Minidump\*.dmp' -Force -ErrorAction SilentlyContinue; [ordered]@{memory=(Test-Path 'C:\Windows\MEMORY.DMP');minidumpCount=@(Get-ChildItem 'C:\Windows\Minidump\*.dmp' -ErrorAction SilentlyContinue).Count}|ConvertTo-Json -Compress")" || Die 'guest dump cleanup command failed or timed out'
+jq -e '.memory == false and .minidumpCount == 0' <<<"${cleanupResult}" >/dev/null || Die "guest dump cleanup could not be proven: ${cleanupResult}"
 
 # Phase 4: Start watcher in background - watches for crash occurrence and captures dumps/logs
 bash "${hostDir}/watch-crash.sh" \

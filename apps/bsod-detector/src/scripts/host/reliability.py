@@ -216,7 +216,26 @@ def _validate_elf(path: Path, data: bytes, inner_size: int = 0) -> bool:
 def _validate_dump(path: Path, data: bytes) -> tuple[bool, str]:
     if data.startswith(b"PAGEDU64"):
         return path.stat().st_size >= 0x2000, "windows-pagedu64"
-    # Only full kernel dumps are evidence in the frozen-VM flow; small (mini) dumps are not accepted.
+    if data.startswith(b"MDMP"):
+        if len(data) < 32:
+            return False, "windows-minidump"
+        stream_count, directory_rva = struct.unpack_from("<II", data, 8)
+        directory_end = directory_rva + stream_count * 12
+        if not (stream_count > 0 and 32 <= directory_rva and directory_end <= path.stat().st_size):
+            return False, "windows-minidump"
+        with path.open("rb") as stream:
+            stream.seek(directory_rva)
+            directory = stream.read(stream_count * 12)
+        maximum = directory_end
+        for index in range(stream_count):
+            data_size, rva = struct.unpack_from("<II", directory, index * 12 + 4)
+            maximum = max(maximum, rva + data_size)
+        if maximum > path.stat().st_size:
+            return False, "windows-minidump"
+        with path.open("rb") as stream:
+            stream.seek(maximum)
+            trailing = stream.read()
+        return (not trailing or all(byte == 0 for byte in trailing)), "windows-minidump"
     return False, "unknown"
 
 
