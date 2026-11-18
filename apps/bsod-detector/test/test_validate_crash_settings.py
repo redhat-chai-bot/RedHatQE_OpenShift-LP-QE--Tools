@@ -439,6 +439,26 @@ class ValidatorPowerShellTests(unittest.TestCase):
                                 mocksPath=mocks, expectSuccess=False)
             self.assertIn('not an HTTPS URL', output)
 
+    def test_failure_json_keeps_a_validation_result_and_the_exit_code(self):
+        definition = RunHarness(self, 'definition', 'Fail')
+        with tempfile.TemporaryDirectory() as tmpDir:
+            outputs = []
+            for call, code in (("Fail 'NotMyFault could not be staged: download failed' 4 ([ordered]@{ ok = $true; action = 'validated'; "
+                                "script = 'validate-crash-settings.ps1'; mismatches = @([ordered]@{ name = 'AutoReboot'; issue = 'missing' }); "
+                                "matchesRecommended = $false; notMyFault = [ordered]@{ status = 'failed' } })", 4),
+                               ("Fail 'Unknown dump type' 2", 2)):
+                probe = Path(tmpDir) / f'probe{code}.ps1'
+                probe.write_text(f"Set-StrictMode -Version Latest\n{definition['text']}\n{call}\n'not reached'\n", encoding='ascii')
+                result = subprocess.run([shutil.which('pwsh'), '-NoProfile', '-NonInteractive', '-File', str(probe)],
+                                        capture_output=True, text=True, timeout=120, check=False)
+                self.assertEqual(result.returncode, code, result.stderr)
+                outputs.append(json.loads(result.stdout))
+        staging, unknown = outputs
+        self.assertEqual((staging['ok'], staging['error'], staging['action']), (False, 'NotMyFault could not be staged: download failed', 'validated'))
+        self.assertEqual(staging['mismatches'], [{'name': 'AutoReboot', 'issue': 'missing'}])
+        self.assertEqual(staging['notMyFault'], {'status': 'failed'})
+        self.assertEqual(unknown, {'ok': False, 'error': 'Unknown dump type', 'script': 'validate-crash-settings.ps1'})
+
     def test_download_refuses_plain_http_and_never_follows_redirects(self):
         definition = RunHarness(self, 'definition', 'Save-HTTPSdownload')
         self.assertIn('$request.AllowAutoRedirect = $false', definition['text'])
@@ -569,7 +589,11 @@ def MainFlowMocks():
 function Out-Null { process { } }
 function Write-StdErr ([string]$Message) { $global:MockLog.Add("stderr ${Message}") }
 function Write-FlowError ($Message) { $global:MockLog.Add("error ${Message}") }
-function Fail ([string]$Message, [int]$ExitCode) { $global:MockLog.Add("fail ${ExitCode} ${Message}"); throw 'script-exit' }
+function Fail ([string]$Message, [int]$ExitCode, $Result) {
+    $global:MockLog.Add("fail ${ExitCode} ${Message}")
+    if ($null -ne $Result) { $Result | ConvertTo-Json -Depth 12 }
+    throw 'script-exit'
+}
 function Read-CrashControlData ([string]$Path) {
     $global:MockLog.Add("Read-CrashControlData ${Path}")
     $crashControl = @{}; $global:FakeKinds = @{}
@@ -690,7 +714,16 @@ class ValidatorMainFlowTests(unittest.TestCase):
         self.assertIn(f'staging {NMF_SOURCE}', staged)
         self.assertIn(' nmf=staged ', self.Json(staged))
         self.assertIn('fail 4 NotMyFault could not be staged: signature status NotSigned, signer none', failed)
-        self.assertIsNone(self.Json(failed))
+        self.assertIn(' nmf=failed ', self.Json(failed))
+
+    def testStagingFailureKeepsTheSettingsMismatchesVisible(self):
+        state = {'stage': ['true'], 'stagingFails': ['true'],
+                 'crashControl': [entry for entry in GOLDEN_IMAGE if not entry.startswith('AutoReboot')], 'pagingFiles': ['?:\\pagefile.sys']}
+        log = self.RunScript([state])[0]
+        self.assertIn('fail 4 NotMyFault could not be staged: signature status NotSigned, signer none', log)
+        self.assertIn(' match=False issues=AutoReboot:missing adequate=False ', self.Json(log))
+        self.assertIn(' nmf=failed ', self.Json(log))
+        self.assertLess(log.index(next(line for line in log if line.startswith('fail 4'))), log.index(self.Json(log)))
 
     def testUnknownDumpTypeAndInvalidMemory(self):
         unknown = self.RunScript([{'dumpType': ['small']}])[0]
