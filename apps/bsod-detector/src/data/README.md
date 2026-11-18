@@ -1,7 +1,9 @@
 # Data — source-of-truth lookups
 
-Shared lookup tables. Scripts **read** these; they never inline or duplicate the
-values. If a table is wrong, fix it here once and every consumer picks it up.
+Shared lookup tables. Host scripts and `validate-crash-settings.ps1` **read** these at run time.
+The golden-image scripts run standalone on the guest, so they carry the CrashControl values of
+`crash-control.json` inline; `test_golden_image_pre_reboot.py` and `test_golden_image_post_reboot.py`
+fail when those copies drift from the table. If a table is wrong, fix it here and in any inline copy.
 
 ## Consumer context
 
