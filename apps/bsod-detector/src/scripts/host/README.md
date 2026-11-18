@@ -60,8 +60,9 @@ These scripts manage the full BSOD detection and artifact extraction pipeline or
 - Die if watcher exits before publishing readiness
 
 **Phase 4 — Inject BSOD** (`notmyfaultc64.exe`)
-- Calls `guest-agent.py exec-crash notmyfaultc64.exe /accepteula /crash <crashType>`
-- Waits up to 90s for QGA to confirm crash delivery (disconnect = success)
+- Calls `guest-agent.py exec-crash 'C:\Temp\nmf\notmyfaultc64.exe' /accepteula /crash <crashType>`
+- Waits up to `BSOD_TRIGGER_CONFIRM_TIMEOUT` seconds (default 45) for QGA to confirm crash delivery (disconnect = success);
+  the caller's outer `timeout 90` bounds the whole call, including the launch and the final status poll
 
 **Phase 5 — Wait for completion**
 - Waits for watcher background process to exit
@@ -307,33 +308,82 @@ guest-fs--crash-info--<partition>.tgz  (archive members: Windows/System32/winevt
 
 ### `guest-agent.py`
 
-**Purpose**: Tunnel PowerShell commands into Windows VM via qemu-guest-agent.
+**Purpose**: Run commands in the Windows guest through the qemu-guest-agent (QGA), without SSH or guest credentials.
 
-**How it works**:
+**How it works**: a KubeVirt VM is not reachable over SSH without extra network configuration, but `virsh` inside the VM's
+virt-launcher Pod talks to the QGA. Each agent call is one `oc exec`, and `guest-exec` programs run in the guest as
+`nt authority\system` (fully elevated):
 ```
-guest-agent.py <cmd>
-  → oc exec virt-launcher-pod
-    → virsh qemu-agent-command <domain> '<QMP JSON>'
-      → qemu-guest-agent (Windows)
-        → PowerShell / program execution
+oc --request-timeout=<t>s exec -n <namespace> <virt-launcher-pod> -- \
+    virsh qemu-agent-command --timeout <t> <domain> '<QMP JSON>'
+  → qemu-guest-agent (Windows)
+    → PowerShell / program execution
 ```
 
-**Environment Variables** (re-read at resolve time, not just import time):
+**Usage** (running `guest-agent.py` without arguments prints a short usage summary and exits 2):
+```
+guest-agent.py ping
+guest-agent.py exec <program> [args...]
+guest-agent.py exec-crash <program> [args...]
+guest-agent.py put <localPath> <guestPath>
+guest-agent.py psfile <local.ps1> [<psArgs...>]
+guest-agent.py psfile <local.ps1> [--companion <localPath> <guestPath>]... [-- <psArgs...>]
+```
+
+| Subcommand | Behavior and agent timeouts |
+|---|---|
+| `ping` | `guest-ping` (10s); prints the agent reply (`{}`) |
+| `exec` | `guest-exec` (300s), then a `guest-exec-status` poll (300s) every 3s for up to 600s. Status-poll errors are retried until 10s or less of the window remain; a failed launch or exhausted retries exit 1. Relays the program's stdout/stderr and exits with its exit code |
+| `exec-crash` | `guest-exec` (20s) must return a PID, then a status poll (5s) every second for `BSOD_TRIGGER_CONFIRM_TIMEOUT` seconds (default 45). An agent error after the launch is the expected crash signal: it prints `{"disconnected": true, "message": "...", "pid": <pid>}` and exits 0. A failed launch exits 1 and is never reported as a disconnect; a program that exits first is relayed like `exec`; one still running at the end of the window exits 124 |
+| `put` | `guest-file-open` (300s), one `guest-file-write` (600s) per 64 KiB chunk (about 85 KiB of base64, which keeps each `oc exec` argument within the argument-size limit), `guest-file-close` (300s, also after a failed write). Logs progress every 50 MiB and prints `wrote <bytes> bytes -> <guestPath>` |
+| `psfile` | Uploads the script to `C:\Windows\Temp\<file name>` (`/` and `\` separators both work), then each companion to its explicit guest path, then runs `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <script> [args]` like `exec` (600s window). Script arguments follow the script directly; after `--companion` entries, `--` starts them |
+
+**Target resolution** (once per invocation; nothing is shared between runs):
+1. Values set in the environment take precedence.
+2. A `<namespace>_<vm>` domain name supplies a missing namespace or VM name (Kubernetes names never contain `_`).
+3. A still-missing VM name is discovered with `oc get vmi` (in the namespace when known, otherwise `-A`); exactly one
+   VirtualMachineInstance must be in scope.
+4. The namespace must be known by then. The domain defaults to `<namespace>_<vm>`, and the Pod to the first Pod in the
+   namespace whose name starts with `virt-launcher-<vm>-` (`oc get pod -o name`).
+
+Discovery reads use `oc --request-timeout=20s` (25s local limit), and any failed read (missing client, expired login,
+timeout) counts as empty output. Target problems therefore print an actionable `guest-agent: <message>` error (with
+several VirtualMachineInstances in scope, the candidates follow on indented lines), for example
+`guest-agent: no VirtualMachineInstance found; set BSOD_DET__VM__NAME (and BSOD_DET__NAMESPACE)`, and exit 1 before any
+agent call.
+
+**Environment Variables** (read once per invocation):
 
 | Variable | Purpose |
 |---|---|
-| `BSOD_DET__VM__NAME` | Target VM name |
+| `BSOD_DET__VM__NAME` | Target VM name (the only VMI in scope is used if unset) |
 | `BSOD_DET__NAMESPACE` | Kubernetes namespace |
 | `BSOD_DET__POD__NAME` | Virt-launcher pod (auto-resolved if unset) |
 | `BSOD_DET__DOMAIN__NAME` | Libvirt domain name (auto-derived as `<ns>_<vm>`) |
+| `BSOD_TRIGGER_CONFIRM_TIMEOUT` | `exec-crash` confirmation window in seconds (default 45); predates the `BSOD_DET__` naming convention |
 
-**Subcommands**:
-- `ping` — QGA liveness check
-- `exec <program> [args]` — run and wait for output
-- `exec-crash <program> [args]` — run crash command (handles disconnect as success)
-- `psfile <local.ps1> [--companion ...] [-- args]` — upload and run PowerShell script
-- `put <local> <guestpath>` — upload file
-- `get <guestpath> <local>` — download file
+**Exit Status**:
+
+| Status | Meaning |
+|---|---|
+| guest code | `exec`, `exec-crash` and `psfile` exit with the low 8 bits of the guest exit code, which the script does not remap: `0xC0000005` exits 5, a multiple of 256 such as `0x100` exits 0 (success), and a code can coincide with a status below |
+| 0 | `ping`/`put` succeeded, or `exec-crash` observed the expected agent loss |
+| 1 | Target error, agent error, or another unhandled error (unreadable local file, non-integer `BSOD_TRIGGER_CONFIRM_TIMEOUT`, `exec`/`psfile` status-poll errors until the end of the window); unhandled errors print a traceback |
+| 2 | Usage error: no or unknown subcommand, missing program or script, missing `put` local or guest path, malformed `--companion` list |
+| 124 | The guest program did not exit within its wait window |
+| 125 | The guest reported an exit without an exit code |
+
+**Examples** (the forms used by `trigger-bsod-intentional.sh` and `preflight-rhov.sh`, which wrap every call in `timeout`):
+```bash
+export BSOD_DET__NAMESPACE=windows-bsod BSOD_DET__VM__NAME=win2022
+guest-agent.py ping
+guest-agent.py put notmyfaultc64.exe 'C:\Temp\nmf\notmyfaultc64.exe'
+guest-agent.py exec powershell.exe -NoProfile -Command \
+  "(Get-Item 'C:\Temp\nmf\notmyfaultc64.exe' -ErrorAction SilentlyContinue)?.Length"
+guest-agent.py psfile configure-dumps.ps1 --companion crash-control.json 'C:\Windows\Temp\crash-control.json' -- \
+  -DataFile 'C:\Windows\Temp\crash-control.json'
+guest-agent.py exec-crash 'C:\Temp\nmf\notmyfaultc64.exe' /accepteula /crash <crashType>
+```
 
 ---
 
@@ -446,7 +496,7 @@ trigger-bsod-intentional.sh
   │    ├─ RestartVM
   │    └─ write evidence-summary.json
   │
-  └─ Inject BSOD via guest-agent.py exec-crash notmyfaultc64.exe /crash <type> after watcher readiness
+  └─ Inject BSOD via guest-agent.py exec-crash C:\Temp\nmf\notmyfaultc64.exe /accepteula /crash <type> after watcher readiness
 ```
 
 ## Environment Variable Convention
@@ -594,51 +644,46 @@ Output, when its stage succeeds: `guest-fs--crash-info--<partition>.tgz`. It may
 
 ### guest-agent.py
 
-**Purpose**: Tunnel PowerShell commands into Windows VM via QEMU Guest Agent.
+**Purpose**: Tunnel PowerShell commands into Windows VM via QEMU Guest Agent. Usage, timeouts, target resolution and exit
+statuses are described in the [script overview](#guest-agentpy) above.
 
 #### Key Functions
 
 | Function | Purpose |
 |----------|---------|
-| `_oc()` | Execute OpenShift CLI command, return stdout or empty string |
-| `_resolve_pod()` | Find virt-launcher pod for a given VM in namespace |
-| `resolve_target()` | Auto-detect and populate NS, VM, POD, DOM from cluster; re-reads environment variables |
-| `agent()` | Send QEMU agent command via virsh; return response payload JSON |
-| `guest_exec()` | Execute program in guest; optionally wait for completion |
-| `guest_exec_crash()` | Execute crash program; handle disconnect as success |
-| `guest_put()` | Upload local file to guest (512KB chunks via base64) |
-| `guest_get()` | Download guest file (1MB chunks, seek-based retries); auto-compress large files |
-| `_print_exec_result()` | Output guest command results (stdout, stderr); return exit code |
-| `_psfile_args()` | Parse companion file uploads and PowerShell arguments |
-| `main()` | Parse CLI commands and dispatch to above functions |
+| `TargetError` | Raised when the guest target cannot be identified unambiguously |
+| `GuestTarget` | Immutable resolved namespace, VM, virt-launcher Pod and libvirt domain |
+| `RunOC()` | Execute a bounded OpenShift CLI read, return stdout or empty string |
+| `FindLauncherPod()` | Find virt-launcher pod for a given VM in namespace |
+| `Log()` | Write one diagnostic line to STDERR |
+| `ExitedResult()` | Decode an exited guest-exec-status reply into exit code, stdout and stderr |
+| `GuestAgent.FromEnvironment()` | Create a client from the `BSOD_DET__*` target variables |
+| `GuestAgent.ResolveTarget()` | Resolve namespace, VM, Pod and domain once; cache the `GuestTarget` on that instance |
+| `GuestAgent.SendCommand()` | Send QEMU agent command via virsh; return the decoded `return` payload |
+| `GuestAgent.LaunchProgram()` | Start a guest program with captured output; return its PID |
+| `GuestAgent.GetExecStatus()` | Return the raw guest-exec-status reply for a PID |
+| `GuestAgent.GuestExec()` | Execute program in guest and wait for completion |
+| `GuestAgent.GuestExecCrash()` | Execute crash program; handle disconnect as success |
+| `GuestAgent.GuestPut()` | Upload local file to guest (64 KiB chunks via base64) |
+| `PrintExecResult()` | Output guest command results (stdout, stderr); return exit code |
+| `ParsePSfileArgs()` | Parse companion file uploads and PowerShell arguments |
+| `Main()` | Parse CLI commands and dispatch to above functions |
 
-#### Subcommands
+#### Design Notes
 
-| Command | Purpose |
-|---------|---------|
-| `ping` | QGA liveness check |
-| `exec <prog> [args]` | Run and wait for output |
-| `exec-crash <prog> [args]` | Run crash command (disconnect = success) |
-| `psfile <script.ps1> [--companion LOCAL GUEST -- args]` | Upload + run PowerShell script |
-| `put <local> <guestpath>` | Upload file |
-| `get <guestpath> <local>` | Download file |
-
-#### Environment Variables
-
-- `BSOD_DET__VM__NAME`: Target VM name
-- `BSOD_DET__NAMESPACE`: Kubernetes namespace
-- `BSOD_DET__POD__NAME`: Virt-launcher pod (auto-resolved)
-- `BSOD_DET__DOMAIN__NAME`: Libvirt domain (derived as `<ns>_<vm>` if unset)
-
-#### Communication Path
-
-```
-guest-agent.py <cmd>
-  → oc exec virt-launcher-pod
-    → virsh qemu-agent-command <domain> '<QMP JSON>'
-      → qemu-guest-agent (Windows)
-        → PowerShell / program execution
-```
+- **Target state**: `Main()` builds one `GuestAgent` per invocation from the environment. The resolved `GuestTarget` is
+  cached on that instance only, and only after a complete resolution, so a failed resolution is retried; the module holds
+  no mutable state.
+- **Error types**: `TargetError` (configuration) deliberately does not derive from `RuntimeError`. `RuntimeError` means an
+  agent or transport failure: `GuestExec()` retries it during status polling (a failed launch is not retried and exits 1)
+  and `GuestExecCrash()` treats it, after a confirmed launch, as the crash signal. Keeping the types separate makes this
+  explicit; the target is resolved before any polling starts. `Main()` turns `TargetError` into exit 1.
+- **Discovery reads**: `RunOC()` folds every `oc` failure into empty output, so discovery reports one actionable
+  `TargetError` instead of a client traceback.
+- **Timeouts**: `SendCommand()` passes its timeout to both `oc --request-timeout` and `virsh --timeout`; the local subprocess
+  limit is 5s longer, so virsh reports its own timeout first.
+- **Output decoding**: `ExitedResult()` decodes the base64 `out-data`/`err-data` and replaces undecodable bytes, so a crash
+  tool's partial output is still reported.
 
 ---
 
