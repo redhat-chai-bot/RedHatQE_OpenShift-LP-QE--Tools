@@ -4,20 +4,20 @@ This README documents only these three PowerShell scripts:
 
 - `golden-image-pre-reboot.ps1` — prepares the Windows guest and forces a reboot.
 - `golden-image-post-reboot.ps1` — checks the guest after reboot, before image sealing.
-- `configure-dumps.ps1` — applies or reports configuration-driven crash-dump settings.
+- `validate-crash-settings.ps1` — compares the guest's crash-dump settings with configuration, read-only, and stages the latest NotMyFault for intentional runs.
 
 The descriptions below document what the scripts in this directory do; they do not constitute a successful Windows execution or crash-dump test.
 
 ## Requirements and Execution Order
 
 - Run the golden-image pair inside the Windows guest from an elevated PowerShell session, in the order shown below.
-- Applying settings with `configure-dumps.ps1` also requires Administrator privileges. Its `-VerifyOnly` mode does not enforce elevation.
+- `validate-crash-settings.ps1` changes no settings. Only the golden-image pair configures (pre-reboot) and verifies (post-reboot) them.
 - The pre-reboot script uses Windows disk-image, driver-management, service, registry, and CIM operations. Its preferred VirtIO driver paths are for Windows 11 AMD64; it falls back to a recursive AMD64 INF search.
 - The pre-reboot script reads the guest's physical memory size first and stops with exit code 1, before any change, if it cannot be read or is not positive.
-- The pre-reboot script needs network access to download the pinned VirtIO ISO unless a cached copy with the pinned SHA-256 is already present in `C:\Temp`. It stops with exit code 1, before installing anything or changing registry settings, if no ISO matching the pinned SHA-256 can be obtained.
-- `configure-dumps.ps1` requires a readable configuration JSON file. It downloads NotMyFault (network access, best effort) only in apply mode with `-StageNotMyFault` and only if no trusted copy is present; watch runs, default apply and `-VerifyOnly` never download.
+- The pre-reboot script needs network access to resolve and download the latest VirtIO ISO (a cached copy is reused only when it is that same latest release and matches its recorded SHA-256). It stops with exit code 1, before installing anything or changing registry settings, if the latest ISO cannot be resolved, downloaded and recorded.
+- `validate-crash-settings.ps1` requires a readable configuration JSON file. It downloads NotMyFault (network access) only with `-StageNotMyFault`, and then always fetches the current release; normal validation never downloads or stages anything.
 - The pre-reboot script configures a pagefile sized to the RAM of the VM it runs on plus 257 MB. Ensure the guest's C: volume has room for it; the script does not check free disk space.
-- VMs cloned from the golden image must not have more RAM than the VM that prepared it: `configure-dumps.ps1` computes the requirement from the RAM of the VM it runs on and then reports the page file as not adequate, which the host preflight rejects. Images prepared by older versions of these scripts (a 4096 MB page file and a `DedicatedDumpFile`) are not adequate either and must be rebuilt.
+- VMs cloned from the golden image must not have more RAM than the VM that prepared it: `validate-crash-settings.ps1` computes the requirement from the RAM of the VM it runs on and then reports the page file as not adequate, which the host preflight rejects. Images prepared by older versions of these scripts (a 4096 MB page file and a `DedicatedDumpFile`) are not adequate either and must be rebuilt.
 - The intended test flow does not restart a VM after a simulated crash, so the golden image is meant for disposable test VMs. The current `src/scripts/host/watch-crash.sh` still starts the VM again after extracting evidence unless it runs with `--no-restart`; aligning the watcher with the intended flow is a separate, planned change.
 
 ```powershell
@@ -30,7 +30,7 @@ The descriptions below document what the scripts in this directory do; they do n
 
 Do not seal if the post-reboot script reports `FAIL` or exits with code 1. It prints a sealing command after its checks pass and its cleanup succeeds, but does not execute that command itself.
 
-`configure-dumps.ps1` is a separate apply/verify operation, not an additional mandatory step in the golden-image pair. Its desired values come from its configuration, so they can differ from the fixed golden-image settings.
+`validate-crash-settings.ps1` is the run-time check the host preflight runs before arming a crash test, not a step of the golden-image pair; it never repairs a mismatch. Its desired values come from its configuration, so they can differ from the fixed golden-image settings.
 
 ## 1. golden-image-pre-reboot.ps1
 
@@ -44,11 +44,9 @@ Part 1 of golden-image preparation. It has no declared parameters. Run it as Adm
 
 1. Reads physical RAM through `Win32_ComputerSystem.TotalPhysicalMemory` and computes the page file size. A failed query or a missing, non-numeric or non-positive size reports `FAIL` and exits with code 1 before any of the following steps.
 2. Creates `C:\Temp` if needed and adds TLS 1.2 to the protocols the process allows. `C:\Temp` is fixed on purpose: the ISO cache must survive the reboot and be found by the post-reboot script, which may run under another account than this one (a per-user `$env:TEMP` would differ).
-3. Uses one pinned virtio-win build, 0.1.302-1:
-   `https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-0.1.302.iso`
-   with SHA-256 `303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d` (see "Pinned virtio-win ISO" below).
-4. Reuses the cached `C:\Temp\virtio-win.iso` only if its SHA-256 matches the pinned digest. A missing or mismatching cache (for example an ISO left by an older version of this script) is replaced by a verified download.
-5. Downloads with `System.Net.WebClient` to `C:\Temp\virtio-win.iso.download`, checks its SHA-256, and only then moves it over the cache. A cached ISO that is still mounted from an interrupted run is dismounted before it is replaced. A failed download, a mismatching digest or a failed move attempts to delete the downloaded file and exits with code 1 before anything is installed; the script never falls back to an unverified copy.
+3. Resolves the official alias `https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso` to the current release hop by hop over HTTPS on fedorapeople.org. The alias redirects to plain `http://`; only the host and path of such a location are used and they are requested over HTTPS. A redirect to another host or an error stops the script with exit code 1. No version or digest is hardcoded.
+4. Reuses the cached `C:\Temp\virtio-win.iso` only when the record `C:\ProgramData\bsod-detector\virtio-win-iso.json` names that same resolved URL and the cache still matches the SHA-256 recorded there. Otherwise it downloads the latest ISO.
+5. Removes the old record, then downloads the resolved HTTPS URL to `C:\Temp\virtio-win.iso.download` without following redirects (`Save-HTTPSdownload`, shared with `validate-crash-settings.ps1`; a redirect or any status other than 200 fails), calculates its SHA-256, dismounts an older cache that is still mounted, moves the download over the cache and writes the record (see "Latest virtio-win ISO and its record"). A failed download, hash, move or record write exits with code 1 before anything is installed; a partial download is deleted (best effort), and without a record the next run downloads again.
 6. Mounts the ISO (an ISO still mounted by an interrupted run is reused); a failed mount or a missing drive letter reports `FAIL` and exits with code 1 before anything is installed. Runs the x86_64 QEMU Guest Agent MSI quietly, waiting for completion and requesting no installer-initiated restart. Exit codes 0, 1641 and 3010 are reported as success; any other code (or none) is reported as a warning, and the guest-agent service check in step 10 decides.
 7. Attempts to install both VirtIO storage drivers with `pnputil /add-driver ... /install`:
    - VirtIO block: preferred relative path `viostor\w11\amd64\viostor.inf`.
@@ -57,7 +55,7 @@ Part 1 of golden-image preparation. It has no declared parameters. Run it as Adm
    - Exit codes 0, 1641 and 3010 are accepted as success (pnputil normally returns 0 or 3010); other codes are reported as warnings (the post-reboot script checks the driver store).
    - If no INF is found, prints a warning and skips that driver.
 8. Notes that SATA uses the Windows inbox `storahci` driver; it does not install it.
-9. Unmounts the ISO and keeps it in `C:\Temp` for re-runs, where it is reused only while its SHA-256 still matches. The post-reboot script removes it once all of its checks pass.
+9. Unmounts the ISO and keeps it in `C:\Temp` for re-runs, where it is reused only while it is the latest release and matches its recorded SHA-256. The post-reboot script removes it once all of its checks pass.
 10. Checks for the `QEMU-GA` service, requests Automatic startup, and attempts to start it if it is not Running. After a start attempt, waits three seconds and queries the service again. A missing service or a service still not Running causes an explicit exit with code 1.
 11. Writes the CrashControl settings listed below and removes the `DedicatedDumpFile` registry value if present (an absent value is left alone). A failed write reports `FAIL` and exits with code 1 before the page file change and the reboot. If an old `C:\DedicatedDump.sys` file exists, prints a warning without deleting it; the post-reboot script refuses to seal while it exists.
 12. Writes the pagefile registry configuration listed below.
@@ -75,7 +73,6 @@ Registry path: `HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl`.
 | `Overwrite` | DWORD | `1` |
 | `LogEvent` | DWORD | `1` |
 | `DumpFile` | ExpandString | `%SystemRoot%\MEMORY.DMP` |
-| `MinidumpDir` | ExpandString | `%SystemRoot%\Minidump` |
 | `DedicatedDumpFile` | Removed | No dedicated-dump value is retained by this script |
 
 ### Pagefile configuration
@@ -83,18 +80,18 @@ Registry path: `HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl`.
 Dumps are written through the page file only (no `DedicatedDumpFile`). Any system-managed or other page file configuration is replaced by one fixed page file:
 
 - Uses the physical RAM read in step 1 (`Win32_ComputerSystem.TotalPhysicalMemory`).
-- Calculates the size once with `Get-PagefileSizeMB`: `Round((RAM bytes + 257MB) / 1MB, 0)`. The post-reboot script and `configure-dumps.ps1` use the identical function with the RAM of the VM they run on: on the VM that prepared the image their minimum equals the configured size, while a VM with more RAM gets a larger requirement.
+- Calculates the size once with `Get-PagefileSizeMB`: `Round((RAM bytes + 257MB) / 1MB, 0)`. The post-reboot script and `validate-crash-settings.ps1` use the identical function with the RAM of the VM they run on: on the VM that prepared the image their minimum equals the configured size, while a VM with more RAM gets a larger requirement.
 - If Windows manages the page file automatically, turns that off through the documented read/write `Win32_ComputerSystem.AutomaticManagedPagefile` property (`Set-CimInstance`).
 - Replaces `PagingFiles` under `HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management` with exactly one MultiString entry, `C:\pagefile.sys <sizeMB> <sizeMB>`, dropping any other entries.
 - Uses equal initial and maximum sizes.
 - Does not delete or create page files directly: Windows applies the configuration on reboot. The post-reboot script checks the running system.
 - If the CIM change or the registry write fails, the script reports `FAIL` and exits with code 1 before the reboot.
 
-### Pinned virtio-win ISO
+### Latest virtio-win ISO and its record
 
-The pre-reboot script pins virtio-win 0.1.302-1, the build that both `stable-virtio` and `latest-virtio` pointed to on 2026-11-17 (CHANGELOG: "Update to virtio-win-prewhql-0.1-302"), and checks its SHA-256 before use. The virtio-win download site publishes no detached signature or signed digest for the ISO: its `CHECKSUM` file lists only MD5 sums of the RPMs, the yum repository uses `gpgcheck=0`, and the 0.1.302-1 RPM carries no signature. The pinned digest is the SHA-256 that the official `virtio-win-0.1.302-1.noarch.rpm` records for `virtio-win-0.1.302.iso` in its header (its MD5 matches the published `CHECKSUM`); the ISO extracted from that RPM and the direct download hash to the same value. Authenticity therefore rests on HTTPS to fedorapeople.org, and the versioned archive URL is used because the unversioned links redirect to plain HTTP. The digest is checked before the ISO is mounted; the script assumes a single trusted operator on the guest during preparation (`C:\Temp` is writable by local users).
+The pre-reboot script always uses the release that the official `latest-virtio` alias currently points to. The virtio-win download site publishes no checksum or signature for the ISO (its `CHECKSUM` file lists only MD5 sums of the RPMs, and its yum repository uses `gpgcheck=0`). The SHA-256 is therefore calculated from the downloaded file and kept as an audit record of what was installed; it is not a publisher attestation, and authenticity rests on HTTPS to fedorapeople.org.
 
-To move to another build, update the URL and the digest together after verifying the new digest the same way.
+The record `C:\ProgramData\bsod-detector\virtio-win-iso.json` (schema 1) holds `artifact`, `source` (the alias), `resolvedSource` (the HTTPS release URL), `version` (from the release file name), `sha256`, `sizeBytes`, `verification` and `recordedUTC`. It stays in the image when the post-reboot script removes the ISO cache. The script assumes a single trusted operator on the guest during preparation (`C:\Temp` is writable by local users).
 
 ### Settings not managed by these scripts
 
@@ -121,8 +118,9 @@ This is primarily a verification script. It also requests Automatic startup for 
 3. **CrashControl DWORDs:** Compares these five values against the golden-image expectations: `CrashDumpEnabled=7`, `AutoReboot=0`, `AlwaysKeepMemoryDump=1`, `Overwrite=1`, and `LogEvent=1`. Any mismatch marks failure.
 4. **Dedicated dump setting:** Reads `DedicatedDumpFile`. A nonempty value marks failure; a missing or empty value follows the success branch. The stated golden-image policy is for the value to be absent.
 5. **Old dedicated dump file:** If `C:\DedicatedDump.sys`, created by older preparation scripts, still exists, marks failure: the file is unused but would be sealed into the image. The script does not delete it; remove it manually once the `DedicatedDumpFile` value is gone and the VM has rebooted (Windows can hold the file open until then), and re-run.
-6. **Pagefile management:** Reads `Win32_ComputerSystem` with `-ErrorAction Stop`. A failed query or a missing or non-positive `TotalPhysicalMemory` marks failure, and neither pagefile check can then pass. Otherwise automatic management still enabled marks failure. This reads the same CIM property the pre-reboot script sets.
-7. **Active pagefile:** Reads `Win32_PageFileUsage` for C: entries and checks that `AllocatedBaseSize` is at least `Get-PagefileSizeMB` of the RAM — the same `Round((RAM bytes + 257MB) / 1MB, 0)` the pre-reboot script configured. Reports allocation and current usage on success. An undersized or missing active pagefile marks failure.
+6. **virtio-win ISO record:** Reads `C:\ProgramData\bsod-detector\virtio-win-iso.json`. A missing record, or one without an HTTPS `resolvedSource` and a SHA-256, marks failure; otherwise prints the source, version and SHA-256. The record is not removed by the cleanup.
+7. **Pagefile management:** Reads `Win32_ComputerSystem` with `-ErrorAction Stop`. A failed query or a missing or non-positive `TotalPhysicalMemory` marks failure, and neither pagefile check can then pass. Otherwise automatic management still enabled marks failure. This reads the same CIM property the pre-reboot script sets.
+8. **Active pagefile:** Reads `Win32_PageFileUsage` for C: entries and checks that `AllocatedBaseSize` is at least `Get-PagefileSizeMB` of the RAM — the same `Round((RAM bytes + 257MB) / 1MB, 0)` the pre-reboot script configured. Reports allocation and current usage on success. An undersized or missing active pagefile marks failure.
 
 ### Result, cleanup and sealing
 
@@ -145,71 +143,66 @@ The command is printed only. Sealing remains a separate operator action.
 ### Verification boundaries
 
 - No pvpanic or boot recovery check is performed (see "Settings not managed by these scripts").
-- `DumpFile` and `MinidumpDir` are written by part 1 but are not checked by this script.
+- `DumpFile` is written by part 1 but is not checked by this script.
 - It does not verify that configured pagefile initial and maximum sizes match; it checks automatic-management state and the active allocation threshold.
 - It does not trigger a BSOD, verify a generated dump, or produce JSON. Passing these checks is not an end-to-end crash-dump validation.
 
-## 3. configure-dumps.ps1
+## 3. validate-crash-settings.ps1
 
 ### Purpose
 
-Applies recommended crash-dump registry settings from configuration, or reports current values with `-VerifyOnly`. It runs in the Windows guest and uses strict mode with terminating error preference.
-
-Unlike the golden-image pair, its registry path, recommended values, dump-type mapping, and pagefile registry lookup come from configuration rather than a fixed built-in settings table.
+Read-only run-time check of the guest's crash-dump settings, run by the host `preflight-rhov.sh` before a crash test is armed. It compares `crash-control.json` with the live registry and reports every difference. It never writes the registry, CIM or page file, never repairs a mismatch, and never reboots or crashes the guest. The golden-image pair owns the configuration: part 1 writes it and part 2 verifies it before sealing.
 
 ### Parameters
 
 | Parameter | Meaning |
 |---|---|
-| `-DumpType <string>` | Selects a key from the configuration's `crashDumpTypes`. Defaults to `recommended.crashDumpType`. Valid names depend on the supplied configuration; they are not hard-coded in the script. |
-| `-VerifyOnly` | Reads and compares current settings without registry changes or NotMyFault staging, even with `-StageNotMyFault`. |
-| `-StageNotMyFault` | Apply mode only: stage a trusted NotMyFault in `C:\Temp\nmf` for an intentional crash run. Off by default. |
+| `-DumpType <string>` | Validates against another key of the configuration's `crashDumpTypes`. Defaults to `recommended.crashDumpType`. |
+| `-StageNotMyFault` | For an intentional crash run only: downloads and stages the current NotMyFault (see below). Off by default; normal validation never downloads or stages anything. |
 | `-DataFile <string>` | Path to the required configuration JSON. Supply it when running outside the expected repository layout. |
 
-**Configuration dependency:** The script expects `crash-control.json`. Without `-DataFile`, it resolves three levels above its script directory and looks for `src\data\crash-control.json`. The configuration supplies `registryPath`, `recommended.crashDumpType`, `recommended.values`, `crashDumpTypes.<selected type>.CrashDumpEnabled`, and `pageFile.path` / `pageFile.value`. The configuration file is [`src/data/crash-control.json`](../../data/crash-control.json); it is data, not an additional script.
+**Configuration dependency:** The script expects `crash-control.json`. Without `-DataFile`, it resolves three levels above its script directory and looks for `src\data\crash-control.json`. The configuration supplies `registryPath`, `recommended.crashDumpType`, `recommended.values`, `recommended.absentValues`, `crashDumpTypes.<selected type>.CrashDumpEnabled`, and `pageFile.path` / `pageFile.value`. The configuration file is [`src/data/crash-control.json`](../../data/crash-control.json); it is data, not an additional script.
 
 ### Usage
 
-Run apply mode from an elevated PowerShell session. These examples use a placeholder path that must be replaced with the actual configuration location:
+These examples use a placeholder path that must be replaced with the actual configuration location:
 
 ```powershell
-# Apply the configuration's recommended dump type and registry values.
-.\configure-dumps.ps1 -DataFile '<path-to-configuration-json>'
+# Compare the live settings with the configuration's recommendation (read-only).
+.\validate-crash-settings.ps1 -DataFile '<path-to-configuration-json>'
 
-# Report current settings without changing them.
-.\configure-dumps.ps1 -VerifyOnly -DataFile '<path-to-configuration-json>'
+# Compare against another dump type present in the configuration.
+.\validate-crash-settings.ps1 -DumpType '<configured-dump-type-key>' -DataFile '<path-to-configuration-json>'
 
-# Override the dump type with a key present in the configuration.
-.\configure-dumps.ps1 -DumpType '<configured-dump-type-key>' -DataFile '<path-to-configuration-json>'
+# Intentional crash run: also stage the latest NotMyFault.
+.\validate-crash-settings.ps1 -StageNotMyFault -DataFile '<path-to-configuration-json>'
 ```
 
-### Apply mode
+### Checks
 
 1. Reads and parses the configuration and validates the selected dump-type name.
-2. Builds the desired registry values from `recommended.values`, replacing `CrashDumpEnabled` with the selected type's numeric value. It ignores a `DedicatedDumpFile` entry, which an older configuration may still contain, and writes a `WARN` line to stderr instead of writing that value.
-3. Requires an Administrator token; otherwise emits failure JSON and exits with code 3.
-4. Sets `rebootRequired` when the current `CrashDumpEnabled` differs from the selected value or a `DedicatedDumpFile` value is present; both take effect only after a reboot.
-5. Creates the configured registry path if needed.
-6. Removes an existing `DedicatedDumpFile` value (dumps go through the page file only; the current `crash-control.json` no longer recommends it). An absent value is left alone; a value that cannot be removed, or any other CrashControl write error, emits failure JSON and exits with code 4. Then writes all desired values. Strings use ExpandString and numeric values use DWORD.
-7. Only with `-StageNotMyFault`: keeps an existing `C:\Temp\nmf\notmyfaultc64.exe` only if it is trusted; otherwise downloads the Sysinternals NotMyFault archive (adding TLS 1.2 to the allowed protocols), extracts it, deletes the archive, checks the extracted executable and only then unblocks it. A copy is trusted only when `Get-AuthenticodeSignature` reports `Valid` and the signer certificate's organization is `Microsoft Corporation`, the publisher of the Sysinternals tools; this is a publisher check, not a pinned hash, and it depends on the guest trusting the certificate chain. An untrusted cached or downloaded copy is renamed to `notmyfaultc64.exe.untrusted` (replacing an earlier quarantined copy; it is never run), so an untrusted download leaves no executable at the fixed path. If such a rename fails, the script emits failure JSON and exits with code 5 instead of leaving the untrusted file in place. `C:\Temp\nmf` is the fixed path the host scripts check through the guest agent. A failure or a replaced copy is written to stderr as a `WARN` line and does not change the JSON on stdout. Without the switch nothing is downloaded. The script does not execute NotMyFault or trigger a crash.
+2. Builds the desired values from `recommended.values`, replacing `CrashDumpEnabled` with the selected type's value. A `DedicatedDumpFile` entry, which an older configuration may still contain, is not a desired value; it is checked as a required absence and a `WARN` line goes to stderr.
+3. Reports the registry key as `key missing` if `registryPath` does not exist.
+4. For every desired value, reports `missing`, `wrong type` (strings must be ExpandString and numbers DWord, as the golden image writes them) or `wrong value` (environment variables are expanded on both sides before comparing).
+5. Reports every name in `recommended.absentValues`, and always `DedicatedDumpFile`, as `must be absent` when it exists.
+6. Reports page file adequacy (below).
 
-   The script stages nothing unless the caller passes `-StageNotMyFault`. A caller that then requires the binary, such as `preflight-rhov.sh --require-trigger` (which checks that the file exists), fails unless it passed the switch or a copy is already present. Watch runs must not pass it.
-8. Reads the desired registry values back, compares them, reports pagefile configuration, and emits JSON.
+A mismatch does not change the exit code: the JSON reports it, and `preflight-rhov.sh` stops the run when `matchesRecommended` is false, `AutoReboot` is not 0 or the page file is not adequate. The fix is to rebuild or correct the golden image; nothing is changed at run time.
 
-### Verify-only mode
+### NotMyFault staging (`-StageNotMyFault`)
 
-- Still requires the configuration and validates the dump-type name.
-- Does not perform the Administrator check used by apply mode.
-- Does not modify registry settings, download anything, or stage NotMyFault.
-- Sets `action` to `verified`, `applied` to `null`, and `rebootRequired` to `false`.
-- Reports a `DedicatedDumpFile` value that is still present in `dedicatedDumpFile` and counts it as a mismatch.
-- Compares the live values against the selected desired configuration. Environment variables are expanded on both sides before comparison; missing values do not match.
+- Removes any earlier `C:\Temp\nmf\notmyfaultc64.exe` first; an existing copy is never reused.
+- Resolves `https://download.sysinternals.com/files/NotMyFault.zip` over HTTPS (a redirect may only stay on that host), downloads it and extracts it.
+- Requires a valid Authenticode signature on `notmyfaultc64.exe` whose signer's organization is exactly `Microsoft Corporation`. An untrusted or missing executable is deleted, never staged.
+- Moves the verified executable to `C:\Temp\nmf\notmyfaultc64.exe` and removes the archive and extraction folder.
+- Reports `source`, `resolvedSource`, `archiveSHA256`, `sha256` (of the executable), `version` (file version), `signer` and `stagedPath`. No hash is published for NotMyFault: the SHA-256 values record what was downloaded; the signature is the publisher check.
+- Never runs NotMyFault, crashes or reboots the guest. A staging failure emits failure JSON and exits with code 4; the host preflight then stops the run.
 
-### Pagefile reporting and reboot behavior
+The host `preflight-rhov.sh` passes `-StageNotMyFault` only with `--require-trigger` and records the reported values in `recovery-metadata.json` (`artifacts.notMyFault`). Watch runs do not pass it.
 
-The script reads pagefile registry entries from the configured location and joins them with `; ` for reporting. It reads physical RAM (read-only) and computes `pageFile.requiredMB` with `Get-PagefileSizeMB`, the golden-image size. `pageFile.adequate` is true only when an entry on `C:` has initial and maximum sizes of at least `requiredMB` (a dump is written into the space allocated at boot); system-managed (`?:\pagefile.sys` or `0 0` sizes), missing, smaller or other-drive page files, and an unreadable, missing or non-positive RAM size, report `false` (never `null`; the host preflight requires `true`). `requiredMB` follows the RAM of the VM being checked, so a VM with more RAM than the golden image was prepared with reports `false`.
+### Pagefile reporting
 
-The script does not resize the pagefile (that belongs to `golden-image-pre-reboot.ps1`), check active kernel allocation, or verify free disk space. It does not reboot. Verify-only mode reports `rebootRequired` as `false` and does not infer whether an earlier reboot is pending.
+The script reads the pagefile registry entries from the configured location and joins them with `; ` for reporting. It reads physical RAM and computes `pageFile.requiredMB` with `Get-PagefileSizeMB`, the golden-image size. `pageFile.adequate` is true only when an entry on `C:` has initial and maximum sizes of at least `requiredMB`; system-managed (`?:\pagefile.sys` or `0 0` sizes), missing, smaller or other-drive page files, and an unreadable, missing or non-positive RAM size, report `false`. `requiredMB` follows the RAM of the VM being checked, so a VM with more RAM than the golden image was prepared with reports `false`. The script does not resize the pagefile or check the active kernel allocation.
 
 ### JSON output and errors
 
@@ -217,18 +210,18 @@ The normal output is one JSON object with:
 
 | Field | Meaning |
 |---|---|
-| `ok` | `true` when execution reaches the normal output block; not proof that settings match or a dump can be written. |
-| `action` | `applied` or `verified`. |
+| `ok` | `true` when execution reaches the normal output block; not proof that settings match. |
+| `action` | Always `validated`. |
+| `script` | `validate-crash-settings.ps1`. |
 | `requestedDumpType` | The selected configuration key. |
-| `applied` | Desired values written in apply mode; `null` in verify-only mode. |
-| `current` | Live registry values for the desired keys. |
-| `dedicatedDumpFile` | The live `DedicatedDumpFile` value, or `null` when absent. |
-| `matchesRecommended` | Whether all desired keys match, including the selected dump-type override, and no `DedicatedDumpFile` value is present. |
-| `rebootRequired` | Whether apply mode detected a different `CrashDumpEnabled` or removed a `DedicatedDumpFile` value. |
+| `registryPath` | The CrashControl key that was read. |
+| `desired` | Values the configuration requires. |
+| `current` | Live values for the desired keys and the required absences (`null` when missing). |
+| `mismatches` | One entry per difference: `name`, `issue` (`key missing`, `missing`, `wrong type`, `wrong value`, `must be absent`), `expected`, `actual`, `expectedType`, `actualType`. |
+| `matchesRecommended` | `true` when `mismatches` is empty. |
 | `pageFile.configured` | Configured pagefile entries joined by `; `, or `null`. |
-| `pageFile.adequate` | Boolean: a `C:` entry with initial and maximum sizes of at least `requiredMB` is configured (see above). |
-| `pageFile.requiredMB` | RAM + 257 MB in MB (`Get-PagefileSizeMB`), or `null` when RAM cannot be read or is not positive. |
+| `pageFile.adequate` | Boolean, see above. |
+| `pageFile.requiredMB` | RAM + 257 MB in MB, or `null` when RAM cannot be read or is not positive. |
+| `notMyFault` | `{ "status": "not requested" }` without `-StageNotMyFault`; otherwise the staging record above. |
 
-An unknown dump type emits `{ "ok": false, "error": "...", "script": "configure-dumps.ps1" }` and exits with code 2. A non-elevated apply attempt emits the same failure shape and exits with code 3, a CrashControl write or `DedicatedDumpFile` removal error exits with code 4, and an untrusted NotMyFault copy that cannot be renamed away exits with code 5. A missing configuration is a terminating error; other uncaught parsing errors are not wrapped by the explicit failure-JSON helper.
-
-A settings mismatch or inadequate pagefile does not itself cause an explicit failure exit: inspect `matchesRecommended` and `pageFile.adequate`, not only `ok`. Likewise, successful normal output does not establish that the best-effort NotMyFault staging succeeded; check stderr for its `WARN` line.
+An unknown dump type emits `{ "ok": false, "error": "...", "script": "validate-crash-settings.ps1" }` and exits with code 2; a failed NotMyFault staging emits the same failure shape and exits with code 4. A missing configuration is a terminating error.
