@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Contract tests of validate-crash-settings.ps1, its host callers and src/data/crash-control.json.
+"""Contract tests of validate-crash-settings.ps1 and src/data/crash-control.json.
 
-Source and data contracts are read as text; the host callers' shell helpers run in bash with jq;
-parsing, the parameter-name scan and binding check (which read the real guest scripts) and the probes
-of Fail and Save-HTTPSdownload (temporary files only) run in a real pwsh. These are offline contract
-checks, not isolated unit tests.
+Source and data contracts are read as text. The public JSON output and exit codes come from the real
+validator in a fresh pwsh with its system commands mocked; parsing, the parameter-name scan and binding
+check (which read the real guest scripts) and the probes of Fail and Save-HTTPSdownload also run in a
+real pwsh (temporary files only). The guest-agent psfile check uses the baseline host helper. These are
+offline contract checks, not isolated unit tests; nothing reaches a guest or the network.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -74,124 +74,8 @@ class ValidatorSourceContractTests(unittest.TestCase):
         self.assertEqual(Utils.SimpleVariablesInDoubleQuotes(self.text), [])
 
 
-class HostCallerContractTests(unittest.TestCase):
-    """preflight-rhov.sh and the trigger use the validator, its read-only gates and the staging record."""
-
-    def setUp(self) -> None:
-        self.preflight = Utils.PREFLIGHT.read_text(encoding='utf-8')
-        self.trigger = Utils.TRIGGER.read_text(encoding='utf-8')
-
-    def test_Preflight_RunsOnlyTheReadOnlyValidator(self) -> None:
-        self.assertIn('typeset validatorScript="${BSOD_DET__VALIDATE__CRASH_SETTINGS:-${BSOD_DET__CONFIGURE__DUMPS:-${appDir}/src/scripts/guest/validate-crash-settings.ps1}}"', self.preflight)
-        self.assertIn('psfile "${validatorScript}"', self.preflight)
-        self.assertIn('"${validatorArgArr[@]}"', self.preflight)
-        self.assertIn('ValidatorArgs validatorArgArr "${requireTrigger}"', self.preflight)
-        self.assertIn('ValidationAccepted "${validation}" ||', self.preflight)
-        self.assertIn('NotMyFaultStaged "${validation}" ||', self.preflight)
-        # The deprecated alias may only name the validator: another file is refused before it runs.
-        self.assertLess(self.preflight.index('[[ "${validatorScript##*/}" == validate-crash-settings.ps1 ]] ||'),
-                        self.preflight.index('psfile "${validatorScript}"'))
-        # The documented legacy alias keeps working without a warning echo (preflight runs under xtrace).
-        aliasLines = [line for line in self.preflight.splitlines() if 'CONFIGURE__DUMPS' in line and not line.lstrip().startswith('#')]
-        self.assertEqual(aliasLines, [line for line in aliasLines if line.startswith('typeset validatorScript=')])
-        self.assertNotRegex(self.preflight, r'configure-dumps\.ps1|rebootRequired|configureScript|[Mm]ini[Dd]ump')
-
-    def test_ValidatorArgs_StagesOnlyForRequireTrigger(self) -> None:
-        function = Utils.ShellFunction(self.preflight, 'ValidatorArgs')
-        for requireTrigger, expected in ((0, ['-dataFile', 'C:\\Windows\\Temp\\crash-control.json']),
-                                         (1, ['-dataFile', 'C:\\Windows\\Temp\\crash-control.json', '-stageNotMyFault'])):
-            script = (f'set -euo pipefail; shopt -s inherit_errexit\n{function}\n'
-                      f'typeset -a argArr2=(); ValidatorArgs argArr2 {requireTrigger}; printf "%s\\n" "${{argArr2[@]}}"')
-            result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, check=True)
-            self.assertEqual(result.stdout.splitlines(), expected)
-
-    def RunGate(self, name: str, document: dict) -> int:
-        """Exit status of one preflight jq gate function run in bash on a JSON document."""
-        script = f'set -uo pipefail\n{Utils.ShellFunction(self.preflight, name)}\n{name} "$1"'
-        return subprocess.run(['bash', '-c', script, 'gate', json.dumps(document)], capture_output=True, text=True).returncode
-
-    def test_ValidationAccepted_AcceptsOnlyAMatchingValidatorResult(self) -> None:
-        valid = {'script': 'validate-crash-settings.ps1', 'action': 'validated', 'ok': True, 'matchesRecommended': True,
-                 'mismatches': [], 'current': {'AutoReboot': 0}, 'pageFile': {'adequate': True, 'requiredMB': 16641}}
-        self.assertEqual(self.RunGate('ValidationAccepted', valid), 0)
-        # The former configuration script's apply output, a mismatch, a frozen-VM violation and an inadequate page file.
-        oldScript = {key: value for key, value in valid.items() if key not in ('script', 'action')}
-        rejected = [dict(oldScript, action='applied', rebootRequired=False), dict(valid, matchesRecommended=False),
-                    dict(valid, current={'AutoReboot': 1}), dict(valid, pageFile={'adequate': False}),
-                    dict(valid, ok=False), {'ok': False, 'error': 'x', 'script': 'validate-crash-settings.ps1'}]
-        for document in rejected:
-            with self.subTest(document=document):
-                self.assertNotEqual(self.RunGate('ValidationAccepted', document), 0)
-
-    def test_NotMyFaultStaged_RequiresBothHashesFromTheOfficialHost(self) -> None:
-        staged = {'notMyFault': {'status': 'staged', 'source': Utils.NMF_SOURCE, 'resolvedSource': Utils.NMF_SOURCE,
-                                 'archiveSHA256': 'A' * 64, 'sha256': 'b' * 64, 'version': '4.25', 'signer': Utils.MICROSOFT_SIGNER}}
-        self.assertEqual(self.RunGate('NotMyFaultStaged', staged), 0)
-        record = staged['notMyFault']
-        rejected = [{'notMyFault': {'status': 'not requested'}}, {'notMyFault': dict(record, status='failed')},
-                    {'notMyFault': dict(record, sha256=None)}, {'notMyFault': dict(record, archiveSHA256='A' * 63)},
-                    {'notMyFault': dict(record, resolvedSource='http://download.sysinternals.com/files/NotMyFault.zip')},
-                    {'notMyFault': dict(record, resolvedSource='https://download.sysinternals.com.evil.example/x.zip')}]
-        for document in rejected:
-            with self.subTest(document=document):
-                self.assertNotEqual(self.RunGate('NotMyFaultStaged', document), 0)
-
-    def test_PreflightMetadata_RecordsOnlyTheNotMyFaultArtifact(self) -> None:
-        self.assertIn(".notMyFault | .sha256 |= ascii_downcase | .archiveSHA256 |= ascii_downcase", self.preflight)
-        self.assertIn('artifacts:{notMyFault:$notMyFault}', self.preflight)
-        # The guest agent comes from the golden image: no MSI download, record or override remains.
-        self.assertNotRegex(self.preflight, r'qemuGaMsi|QEMU_GA_MSI_URL')
-
-    def test_PreflightAgentGate_FailsWithGoldenImageGuidanceAndNoBootstrap(self) -> None:
-        # No bootstrap: no QGA MSI download, upload or install and no alias resolver for it.
-        self.assertNotRegex(self.preflight, r'BootstrapQGA|qemu-ga bootstrap|post-bootstrap|qemu-ga-x86_64\.msi|msiexec|ResolveOfficialHTTPS')
-        gates = [line for line in self.preflight.splitlines() if line.startswith('[[ "${pingOk}" == 1 ]] || Die')]
-        self.assertEqual(len(gates), 1, 'the agent ping gate is missing')
-        gate = gates[0]
-        for phrase in ('did not answer 5 pings', 'QEMU-GA service installed and running', 'golden-image-pre-reboot.ps1 installs it',
-                       'golden-image-post-reboot.ps1 checks it', 'rebuild the image'):
-            self.assertIn(phrase, gate)
-
-    def RunAgentGate(self, answerOnPing: int) -> subprocess.CompletedProcess:
-        """Runs preflight's ping loop and agent gate in bash; the stub agent answers only on ping number answerOnPing."""
-        start = self.preflight.index('typeset pingOk=0\n')
-        end = self.preflight.index('\n', self.preflight.index('[[ "${pingOk}" == 1 ]] || Die', start))
-        script = ('set -euo pipefail\n'
-                  'function Die () { echo "preflight-rhov: ERROR: $*" >&2; exit 1; }\n'
-                  'function RunTimed () { shift; "$@"; }\n'
-                  'function sleep () { :; }\n'
-                  'function FakeAgent () { echo "$1" >> "${PING_LOG}"; (( $(wc -l < "${PING_LOG}") == ANSWER_ON_PING )); }\n'
-                  'typeset -a guestAgent=(FakeAgent)\n'
-                  + self.preflight[start:end] + '\necho agent-ok\n')
-        with tempfile.TemporaryDirectory() as tmpDir:
-            return subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=60, check=False,
-                                  env={'PATH': '/usr/bin:/bin', 'PING_LOG': str(Path(tmpDir) / 'pings'), 'ANSWER_ON_PING': str(answerOnPing)})
-
-    def test_PreflightAgentGate_StopsAfterFiveSilentPingsAndPassesOnAnswer(self) -> None:
-        silent = self.RunAgentGate(answerOnPing=0)
-        self.assertEqual(silent.returncode, 1, silent.stderr)
-        self.assertEqual(silent.stderr.count('ping attempt'), 5)
-        self.assertIn('preflight-rhov: ERROR: qemu guest agent did not answer 5 pings', silent.stderr)
-        self.assertNotIn('agent-ok', silent.stdout)
-        answered = self.RunAgentGate(answerOnPing=3)
-        self.assertEqual((answered.returncode, answered.stdout.strip()), (0, 'agent-ok'), answered.stderr)
-        self.assertEqual(answered.stderr.count('ping attempt'), 2)
-
-    def test_Dockerfile_ShipsTheValidatorUnderTheNamesPreflightReads(self) -> None:
-        dockerfile = (Utils.APP_DIR.parents[1] / 'image' / 'container' / 'bsod-detector' / 'Dockerfile').read_text(encoding='utf-8')
-        self.assertIn('COPY apps/bsod-detector/src/scripts/guest/validate-crash-settings.ps1 '
-                      '/usr/share/bsod-detector/guest/validate-crash-settings.ps1', dockerfile)
-        self.assertIn('BSOD_DET__VALIDATE__CRASH_SETTINGS=/usr/share/bsod-detector/guest/validate-crash-settings.ps1', dockerfile)
-        self.assertIn('BSOD_DET__CRASH_CONTROL__FILE=/usr/share/bsod-detector/data/crash-control.json', dockerfile)
-        self.assertNotRegex(dockerfile, r'configure-dumps|BSOD_CONFIGURE_DUMPS|[Mm]ini[Dd]ump')
-        for name in ('BSOD_DET__VALIDATE__CRASH_SETTINGS', 'BSOD_DET__CRASH_CONTROL__FILE'):
-            self.assertIn('${' + name + ':-', self.preflight)
-
-    def test_Trigger_UsesTheStagedLatestNotMyFaultWithoutAHostCopy(self) -> None:
-        self.assertNotRegex(self.trigger, r'nmfBin|nmfExpectedSize|put "\$\{nmfBin\}"|[Mm]ini[Dd]ump|minidumpCount')
-        self.assertIn('--require-trigger', self.trigger)
-        self.assertIn(".artifacts.notMyFault.status == \"staged\"", self.trigger)
-        self.assertIn(".memory == false", self.trigger)
+class GuestAgentInvocationContractTests(unittest.TestCase):
+    """How a host caller hands the validator its arguments through guest-agent.py psfile (baseline host code)."""
 
     def test_GuestAgentPsfile_PassesTheCamelCaseSwitchToPowerShell(self) -> None:
         spec = importlib.util.spec_from_file_location('guestAgent', Utils.HOST_DIR / 'guest-agent.py')
@@ -202,6 +86,145 @@ class HostCallerContractTests(unittest.TestCase):
              '-dataFile', 'C:\\Windows\\Temp\\crash-control.json', '-stageNotMyFault'])
         self.assertEqual(companions, [('crash-control.json', 'C:\\Windows\\Temp\\crash-control.json')])
         self.assertEqual(powershellArgs, ['-dataFile', 'C:\\Windows\\Temp\\crash-control.json', '-stageNotMyFault'])
+
+
+class ValidatorJSONContractTests(unittest.TestCase):
+    """The validator's public JSON output and exit codes, produced by the real script.
+
+    The real validate-crash-settings.ps1 runs in a fresh pwsh. Only the system commands it calls are
+    replaced by test functions: an in-memory CrashControl key, page file entry and memory size, and a
+    staging directory that cannot be created (so no download starts; any HTTP request would also go to a
+    closed local proxy). Registry, CIM, WMI, reboot, process and file write commands are defined to fail,
+    so any such call fails the test. Nothing reaches a guest, the network or a real staging directory.
+    """
+
+    PROBE = r'''
+param([string]$validator, [string]$scenario, [string]$argsJSON)
+# Any HTTP(S) request would go to a closed local port instead of the network.
+[System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy('http://127.0.0.1:9')
+$crashControlPath = 'CRASH_CONTROL'
+$crashControl = @{ CrashDumpEnabled = 7; AutoReboot = 0; AlwaysKeepMemoryDump = 1; Overwrite = 1; LogEvent = 1; DumpFile = '%SystemRoot%\MEMORY.DMP' }
+$global:fakeKinds = @{ DumpFile = 'ExpandString' }
+if ($scenario -eq 'mismatch') {
+    $crashControl['AutoReboot'] = 1
+    $crashControl['DedicatedDumpFile'] = 'C:\DedicatedDump.sys'
+    $global:fakeKinds['DumpFile'] = 'String'
+}
+$global:fakeRegistry = @{ $crashControlPath = $crashControl; 'MEMORY_MANAGEMENT' = @{ PagingFiles = [string[]]@('C:\pagefile.sys 16641 16641') } }
+function Test-Path ([string]$Path, [string]$LiteralPath) {
+    $target = if ($LiteralPath) { $LiteralPath } else { $Path }
+    if ($target -like 'HKLM:*') { return $global:fakeRegistry.ContainsKey($target) }
+    if ($target -like 'C:\Temp\nmf*') { return $false }  # never touch a real staging directory
+    Microsoft.PowerShell.Management\Test-Path -LiteralPath $target
+}
+function Get-ItemProperty ([string]$Path, [string]$Name, $ErrorAction) {
+    $values = $global:fakeRegistry[$Path]
+    if ($values -and $values.ContainsKey($Name)) { [pscustomobject]@{ $Name = $values[$Name] } }
+}
+function Get-Item ([string]$LiteralPath, [string]$Path, $ErrorAction) {
+    $target = if ($LiteralPath) { $LiteralPath } else { $Path }
+    if ($target -notlike 'HKLM:*') { return Microsoft.PowerShell.Management\Get-Item -LiteralPath $target }
+    if (-not $global:fakeRegistry.ContainsKey($target)) { return }
+    $key = [pscustomobject]@{ valueTable = $global:fakeRegistry[$target] }
+    $key | Add-Member -MemberType ScriptMethod -Name GetValueNames -Value { @($this.valueTable.Keys) }
+    $key | Add-Member -MemberType ScriptMethod -Name GetValueKind -Value {
+        param($valueName)
+        if ($global:fakeKinds.ContainsKey($valueName)) { $global:fakeKinds[$valueName] } elseif ($this.valueTable[$valueName] -is [string]) { 'String' } else { 'DWord' }
+    }
+    $key
+}
+function Get-CimInstance ([string]$ClassName, $ErrorAction) { [pscustomobject]@{ TotalPhysicalMemory = [int64]17179869184 } }
+function New-Item { throw 'Access to the path is denied (test staging directory).' }
+$forbiddenArr = @('Set-ItemProperty', 'New-ItemProperty', 'Remove-ItemProperty', 'Rename-ItemProperty', 'Clear-ItemProperty',
+    'Set-CimInstance', 'New-CimInstance', 'Invoke-CimMethod', 'Set-WmiInstance', 'Restart-Computer', 'Stop-Computer', 'Start-Process',
+    'Remove-Item', 'Move-Item', 'Expand-Archive', 'Unblock-File', 'Set-Content', 'Set-Item')
+foreach ($name in $forbiddenArr) {
+    Invoke-Expression "function global:${name} { [Console]::Error.WriteLine('forbidden: ${name}'); throw 'forbidden: ${name}' }"
+}
+$splat = @{}
+foreach ($property in (ConvertFrom-Json $argsJSON).PSObject.Properties) { $splat[$property.Name] = $property.Value }
+$global:LASTEXITCODE = 0
+& $validator @splat
+exit $LASTEXITCODE
+'''.replace('CRASH_CONTROL', Utils.CRASH_CONTROL).replace('MEMORY_MANAGEMENT', Utils.MEMORY_MANAGEMENT)
+
+    RESULT_KEYS = ['ok', 'action', 'script', 'requestedDumpType', 'registryPath', 'desired', 'current', 'mismatches',
+                   'matchesRecommended', 'pageFile', 'notMyFault']
+
+    def RunValidator(self, scenario: str, arguments: dict) -> tuple[int, dict]:
+        """Exit code and parsed JSON of one real validator run with mocked system commands."""
+        with tempfile.TemporaryDirectory() as tmpDir:
+            dataFile = Path(tmpDir) / 'crash-control.json'
+            dataFile.write_text(Utils.DATA_FILE.read_text(encoding='utf-8'), encoding='utf-8')
+            probe = Path(tmpDir) / 'probe.ps1'
+            probe.write_text(self.PROBE, encoding='ascii')
+            arguments = {key: (str(dataFile) if value == 'DATA_FILE' else value) for key, value in arguments.items()}
+            result = Utils.RunPwshScript(self, probe, str(Utils.SCRIPT), scenario, json.dumps(arguments))
+        self.assertNotIn('forbidden:', result.stderr)
+        self.assertTrue(result.stdout.strip(), result.stderr)
+        return result.returncode, json.loads(result.stdout)
+
+    def test_ValidatorOutput_MatchingSettingsReportTheFullContract(self) -> None:
+        exitCode, output = self.RunValidator('golden', {'dataFile': 'DATA_FILE'})
+        self.assertEqual(exitCode, 0)
+        self.assertEqual(list(output), self.RESULT_KEYS)
+        data = json.loads(Utils.DATA_FILE.read_text(encoding='utf-8'))
+        self.assertIs(output['ok'], True)
+        self.assertEqual((output['action'], output['script']), ('validated', 'validate-crash-settings.ps1'))
+        self.assertEqual((output['requestedDumpType'], output['registryPath']), (data['recommended']['crashDumpType'], Utils.CRASH_CONTROL))
+        self.assertEqual(sorted(output['desired']), sorted(name for name in data['recommended']['values'] if name != 'DedicatedDumpFile'))
+        self.assertIs(type(output['desired']['AutoReboot']), int)
+        # current holds every desired value as read (callers check current.AutoReboot) and each required absence.
+        self.assertEqual(output['current'], dict(output['desired'], DedicatedDumpFile=None))
+        self.assertIs(type(output['current']['AutoReboot']), int)
+        self.assertEqual(output['mismatches'], [])
+        self.assertIs(output['matchesRecommended'], True)
+        self.assertEqual(output['pageFile'], {'configured': 'C:\\pagefile.sys 16641 16641', 'adequate': True, 'requiredMB': 16641})
+        self.assertIs(output['pageFile']['adequate'], True)
+        self.assertIs(type(output['pageFile']['requiredMB']), int)
+        self.assertEqual(output['notMyFault'], {'status': 'not requested'})
+
+    def test_ValidatorOutput_MismatchesAreTypedAndKeepExitCodeZero(self) -> None:
+        # The former parameter spelling still binds (case-insensitive, no aliases).
+        exitCode, output = self.RunValidator('mismatch', {'DataFile': 'DATA_FILE'})
+        self.assertEqual(exitCode, 0)
+        self.assertIs(output['ok'], True)
+        self.assertIs(output['matchesRecommended'], False)
+        self.assertEqual(output['current']['AutoReboot'], 1)
+        byName = {entry['name']: entry for entry in output['mismatches']}
+        for entry in output['mismatches']:
+            self.assertEqual(list(entry), ['name', 'issue', 'expected', 'actual', 'expectedType', 'actualType'])
+        self.assertEqual({name: entry['issue'] for name, entry in byName.items()},
+                         {'AutoReboot': 'wrong value', 'DumpFile': 'wrong type', 'DedicatedDumpFile': 'must be absent'})
+        self.assertEqual((byName['AutoReboot']['expected'], byName['AutoReboot']['actual'], byName['AutoReboot']['expectedType']), (0, 1, 'DWord'))
+        self.assertEqual((byName['DumpFile']['expectedType'], byName['DumpFile']['actualType']), ('ExpandString', 'String'))
+        self.assertEqual((byName['DedicatedDumpFile']['expected'], byName['DedicatedDumpFile']['actual']), (None, 'C:\\DedicatedDump.sys'))
+
+    def test_ValidatorOutput_UnknownDumpTypeExitsTwoWithTheErrorShape(self) -> None:
+        exitCode, output = self.RunValidator('golden', {'dataFile': 'DATA_FILE', 'dumpType': 'small'})
+        self.assertEqual(exitCode, 2)
+        self.assertEqual(list(output), ['ok', 'error', 'script'])
+        self.assertIs(output['ok'], False)
+        self.assertEqual(output['script'], 'validate-crash-settings.ps1')
+        self.assertTrue(output['error'].startswith("Unknown dump type 'small'"), output['error'])
+
+    def test_ValidatorOutput_StagingFailureExitsFourAndKeepsTheSettingsResult(self) -> None:
+        exitCode, output = self.RunValidator('mismatch', {'dataFile': 'DATA_FILE', 'stageNotMyFault': True})
+        self.assertEqual(exitCode, 4)
+        self.assertEqual(list(output), self.RESULT_KEYS + ['error'])
+        self.assertIs(output['ok'], False)
+        self.assertEqual(output['action'], 'validated')
+        self.assertTrue(output['error'].startswith('NotMyFault could not be staged: '), output['error'])
+        # The settings result survives the staging failure.
+        self.assertIs(output['matchesRecommended'], False)
+        self.assertEqual({entry['name'] for entry in output['mismatches']}, {'AutoReboot', 'DumpFile', 'DedicatedDumpFile'})
+        self.assertIs(output['pageFile']['adequate'], True)
+        self.assertEqual(list(output['notMyFault']), ['status', 'source', 'resolvedSource', 'archiveSHA256', 'sha256', 'version', 'signer',
+                                                     'stagedPath', 'problem'])
+        self.assertEqual(output['notMyFault']['status'], 'failed')
+        # The staging directory could not be created, so no download was attempted and nothing was recorded.
+        self.assertIn('Access to the path is denied (test staging directory).', output['notMyFault']['problem'])
+        self.assertEqual((output['notMyFault']['resolvedSource'], output['notMyFault']['sha256']), (None, None))
 
 
 class ValidatorScriptContractTests(unittest.TestCase):

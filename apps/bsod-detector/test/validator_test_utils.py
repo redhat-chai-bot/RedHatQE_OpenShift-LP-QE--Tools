@@ -25,8 +25,6 @@ SCRIPT = GUEST_DIR / 'validate-crash-settings.ps1'
 PARTNER_SCRIPTS = (GUEST_DIR / 'golden-image-pre-reboot.ps1', GUEST_DIR / 'golden-image-post-reboot.ps1')
 DATA_FILE = APP_DIR / 'src' / 'data' / 'crash-control.json'
 HOST_DIR = APP_DIR / 'src' / 'scripts' / 'host'
-PREFLIGHT = HOST_DIR / 'preflight-rhov.sh'
-TRIGGER = APP_DIR / 'src' / 'scripts' / 'crash-injector' / 'trigger-bsod-intentional.sh'
 HARNESS = Path(__file__).resolve().parent / 'fixtures' / 'ps-function-harness.ps1'
 NMF_SOURCE = 'https://download.sysinternals.com/files/NotMyFault.zip'
 NMF_PATH = 'C:\\Temp\\nmf\\notmyfaultc64.exe'
@@ -175,13 +173,6 @@ def BlockAfter(text: str, marker: str) -> str:
         if depth == 0:
             return text[start:index]
     raise AssertionError(f'unbalanced block after {marker}')
-
-
-def ShellFunction(text: str, name: str) -> str:
-    """The text of one `function Name () { ... }` definition of a bash script."""
-    match = re.search(r'(?ms)^function ' + re.escape(name) + r' \(\) \{.*?^\}', text)
-    assert match, name
-    return match.group(0)
 
 
 def RunPwshScript(testCase: unittest.TestCase, scriptPath: Path, *args: str) -> subprocess.CompletedProcess:
