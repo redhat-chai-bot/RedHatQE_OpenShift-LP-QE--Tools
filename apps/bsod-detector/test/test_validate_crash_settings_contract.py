@@ -151,8 +151,31 @@ class HostCallerContractTests(unittest.TestCase):
         for phrase in ('did not answer 5 pings', 'QEMU-GA service installed and running', 'golden-image-pre-reboot.ps1 installs it',
                        'golden-image-post-reboot.ps1 checks it', 'rebuild the image'):
             self.assertIn(phrase, gate)
-        # The ping loop itself is unchanged: five attempts, then the gate stops preflight.
-        self.assertIn('for i in $(seq 1 5); do\n  if RunTimed 15 "${guestAgent[@]}" ping >/dev/null 2>&1; then pingOk=1; break; fi', self.preflight)
+
+    def RunAgentGate(self, answerOnPing: int) -> subprocess.CompletedProcess:
+        """Runs preflight's ping loop and agent gate in bash; the stub agent answers only on ping number answerOnPing."""
+        start = self.preflight.index('typeset pingOk=0\n')
+        end = self.preflight.index('\n', self.preflight.index('[[ "${pingOk}" == 1 ]] || Die', start))
+        script = ('set -euo pipefail\n'
+                  'function Die () { echo "preflight-rhov: ERROR: $*" >&2; exit 1; }\n'
+                  'function RunTimed () { shift; "$@"; }\n'
+                  'function sleep () { :; }\n'
+                  'function FakeAgent () { echo "$1" >> "${PING_LOG}"; (( $(wc -l < "${PING_LOG}") == ANSWER_ON_PING )); }\n'
+                  'typeset -a guestAgent=(FakeAgent)\n'
+                  + self.preflight[start:end] + '\necho agent-ok\n')
+        with tempfile.TemporaryDirectory() as tmpDir:
+            return subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=60, check=False,
+                                  env={'PATH': '/usr/bin:/bin', 'PING_LOG': str(Path(tmpDir) / 'pings'), 'ANSWER_ON_PING': str(answerOnPing)})
+
+    def test_PreflightAgentGate_StopsAfterFiveSilentPingsAndPassesOnAnswer(self) -> None:
+        silent = self.RunAgentGate(answerOnPing=0)
+        self.assertEqual(silent.returncode, 1, silent.stderr)
+        self.assertEqual(silent.stderr.count('ping attempt'), 5)
+        self.assertIn('preflight-rhov: ERROR: qemu guest agent did not answer 5 pings', silent.stderr)
+        self.assertNotIn('agent-ok', silent.stdout)
+        answered = self.RunAgentGate(answerOnPing=3)
+        self.assertEqual((answered.returncode, answered.stdout.strip()), (0, 'agent-ok'), answered.stderr)
+        self.assertEqual(answered.stderr.count('ping attempt'), 2)
 
     def test_Dockerfile_ShipsTheValidatorUnderTheNamesPreflightReads(self) -> None:
         dockerfile = (Utils.APP_DIR.parents[1] / 'image' / 'container' / 'bsod-detector' / 'Dockerfile').read_text(encoding='utf-8')
@@ -172,9 +195,9 @@ class HostCallerContractTests(unittest.TestCase):
 
     def test_GuestAgentPsfile_PassesTheCamelCaseSwitchToPowerShell(self) -> None:
         spec = importlib.util.spec_from_file_location('guestAgent', Utils.HOST_DIR / 'guest-agent.py')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        companions, powershellArgs = module._psfile_args(
+        MUT = importlib.util.module_from_spec(spec)  # guest-agent.py, the module under test
+        spec.loader.exec_module(MUT)
+        companions, powershellArgs = MUT._psfile_args(
             ['--companion', 'crash-control.json', 'C:\\Windows\\Temp\\crash-control.json', '--',
              '-dataFile', 'C:\\Windows\\Temp\\crash-control.json', '-stageNotMyFault'])
         self.assertEqual(companions, [('crash-control.json', 'C:\\Windows\\Temp\\crash-control.json')])

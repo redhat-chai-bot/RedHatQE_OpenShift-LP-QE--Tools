@@ -600,7 +600,7 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(summaryCall[summaryCall.index('--out') + 1], providedOut)
                 case.AssertDeleted()
 
-    def test_directory_alias_existing_outputs_reach_extraction(self):
+    def test_Recovery_DirectoryAliasWithExistingOutputsReachesExtraction(self) -> None:
         for staleName in ('MEMORY.DMP', 'guestFS_sda3', 'events.json',
                           'extraction-summary.json', 'checksums.sha256'):
             with self.subTest(staleName=staleName):
