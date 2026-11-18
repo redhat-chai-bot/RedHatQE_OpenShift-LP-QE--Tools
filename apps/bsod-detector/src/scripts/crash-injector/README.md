@@ -46,9 +46,10 @@ BSOD_DET__CONFIRM_TARGET="win2022-vm-hjoshi1" \
 2. Create run directory: /mnt/persistent-bsod-evidence/{TIMESTAMP}-intentional-{PID}-{RANDOM}/
 3. Run preflight-rhov.sh
    ├─ QGA ping (5 retries)
-   ├─ configure-dumps.ps1 on guest → validate rebootRequired=false
-   └─ Write recovery-metadata.json
-4. Clean stale guest dumps (`MEMORY.DMP`, `Minidump/*.dmp`) and verify they are absent
+   ├─ validate-crash-settings.ps1 on guest (read-only) → settings must match crash-control.json
+   ├─ --require-trigger: the validator stages the latest NotMyFault (fresh download, Microsoft signature check)
+   └─ Write recovery-metadata.json (artifacts.notMyFault: source, resolved source, SHA-256, version)
+4. Clean a stale guest `MEMORY.DMP` and verify it is absent (`AutoReboot=0`: Windows does not reboot itself after the BSOD; the watcher starts the VM again after evidence capture unless it runs with `--no-restart`)
 5. Start `watch-crash.sh` in the background and wait for its run-ID readiness marker
 6. Inject BSOD via guest-agent.py exec-crash notmyfaultc64.exe /crash <type>
 7. watch-crash.sh detects BSOD:
@@ -69,7 +70,7 @@ The table below shows what each file is, who writes it, and at which pipeline ph
 | File | Size (typical) | Phase | Written by | What it contains |
 |---|---|---|---|---|
 | `watcher-ready` | 42 B | Pre-BSOD | `watch-crash.sh` | Run ID marker — written when watcher is armed and watching |
-| `recovery-metadata.json` | ~1.3 KB | Pre-BSOD | `preflight-rhov.sh` | VM name, namespace, PVC names, storage class, snapshot class, recovery image digest, armed epoch, pre-crash dump inventory |
+| `recovery-metadata.json` | ~1.3 KB | Pre-BSOD | `preflight-rhov.sh` | VM name, namespace, PVC names, storage class, snapshot class, recovery image digest, armed epoch, pre-crash dump inventory, staged NotMyFault record (`artifacts.notMyFault`) |
 | `bsod-screenshot.png` | ~37 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `virtctl vnc` | VNC screenshot of the Windows blue screen at crash moment |
 | `vm-memory.elf.tar.gz` | ~800 MB–2.3 GB | At BSOD (VM still frozen) | `watch-crash.sh` → `virtctl memory-dump` | **Primary dump artifact.** Full physical RAM snapshot in ELF ET_CORE format, streamed from KubeVirt via HTTP export. Contains full Windows memory: kernel, drivers, user processes, page tables. Developer converts offline with `elf2dmp` for WinDbg/Volatility |
 | `domain-bsod.xml` | ~14 KB | At BSOD (VM still frozen) | `watch-crash.sh` → `virsh dumpxml` | libvirt domain XML captured **at crash detection time** (state=crashed/paused). Primary XML artifact for forensics. |
@@ -113,7 +114,6 @@ Pipeline start
 
 **Crash dump artifacts (platform-dependent)**:
 - `MEMORY.DMP` / `DedicatedDump.sys` — Not extracted by the retained archive-only extractor.
-- `Minidump/` — Not created or populated by the retained extractor.
 - Offline memory analysis — If KubeVirt capture succeeds, developers may attempt `elf2dmp` conversion of `vm-memory.elf.tar.gz`; neither capture nor conversion is guaranteed.
 - `vm-memory-windows.dmp` — elf2dmp conversion disabled (17GB, developer runs offline)
 - Volatility outputs — Developer tool, run offline against vm-memory.elf.tar.gz
@@ -135,27 +135,27 @@ Before running the pipeline:
 
 1. **VM Running**: `oc get vmi win2022-vm-hjoshi1 -n windows-bsod` shows `Running`
 2. **QGA healthy**: `python3 guest-agent.py ping` returns `{}`
-3. **Crash dump configured** (golden image settings — requires one prior reboot):
-   - `CrashDumpEnabled=7` (Automatic)
-   - `AutoReboot=0`
-   - `DedicatedDumpFile=C:\DedicatedDump.sys` (15.9GB pre-allocated)
+3. **Crash dump settings in the golden image** (configured by `golden-image-pre-reboot.ps1`, verified by
+   `golden-image-post-reboot.ps1`; preflight only validates them and changes nothing):
+   - `CrashDumpEnabled=7` (Automatic), `AutoReboot=0` (the VM stays frozen after the BSOD)
+   - no `DedicatedDumpFile`; a fixed `C:\pagefile.sys` of RAM + 257 MB
 4. **Evidence mount**: `/mnt/persistent-bsod-evidence` writable and persistent
-5. **NotMyFault binary**: `C:\Temp\nmf\notmyfaultc64.exe` on the VM
+5. **NotMyFault**: no host copy is needed. Preflight (`--require-trigger`) makes the guest validator download the
+   current release from `https://download.sysinternals.com/files/NotMyFault.zip` (an earlier guest copy is
+   removed, never reused), check its Microsoft Authenticode signature and stage `C:\Temp\nmf\notmyfaultc64.exe`.
+   The SHA-256 values in `recovery-metadata.json` are an audit record; no hash is published for NotMyFault.
 6. **Recovery image**: Digest-pinned `quay.io/konveyor/oadp-vmfr-access@sha256:...` pullable
 
-**If preflight fails with rebootRequired=true**:
-```bash
-virtctl stop win2022-vm-hjoshi1 -n windows-bsod
-virtctl start win2022-vm-hjoshi1 -n windows-bsod
-# Wait for VM Ready, then re-run
-```
+**If preflight reports mismatching crash settings**: the guest no longer matches the golden image. Nothing is
+changed at runtime; rebuild or fix the golden image (`golden-image-pre-reboot.ps1`, reboot,
+`golden-image-post-reboot.ps1`).
 
 ## Troubleshooting
 
 | Error | Where to look | Likely cause |
 |---|---|---|
 | QGA ping failed | `watcher.log` | VM frozen from previous BSOD — restart with virtctl |
-| rebootRequired=true | preflight output | CrashDumpEnabled changed — do virtctl stop/start |
+| crash settings do not match the golden image | preflight output (`mismatches`) | Guest settings differ from `crash-control.json`; fix the golden image |
 | source PVC attached | `watcher.log` | StopVM failed or VMI still running |
 | oc cp unexpected EOF | `watcher.log` | Retry — transient network issue |
 | missing: memory | `evidence-summary.json` / `watcher.log` | KubeVirt capture or export failed |
@@ -166,4 +166,4 @@ virtctl start win2022-vm-hjoshi1 -n windows-bsod
 - `../host/preflight-rhov.sh` — VM validation and metadata generation
 - `../host/watch-crash.sh` — BSOD detection and memory capture
 - `../host/extract--guest-os--crash-info.sh` — Offline NTFS artifact extraction
-- `../guest/configure-dumps.ps1` — Windows crash dump configuration
+- `../guest/validate-crash-settings.ps1` — Read-only crash-setting validation and intentional NotMyFault staging
