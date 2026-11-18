@@ -7,20 +7,20 @@
 
 # Fixed pagefile size in MB: physical RAM plus 257 MB, rounded once to a whole MB.
 # golden-image-post-reboot.ps1 checks the active pagefile against the same calculation.
-function Get-PagefileSizeMB ([int64]$MemoryBytes) {
-    [int64][math]::Round(($MemoryBytes + 257MB) / 1MB, 0)
+function Get-PagefileSizeMB ([int64]$memoryBytes) {
+    [int64][math]::Round(($memoryBytes + 257MB) / 1MB, 0)
 }
 
 # True only when the file exists and its SHA-256 equals the expected digest (case-insensitive).
-function Test-ISOhash ([string]$Path, [string]$ExpectedSHA256) {
-    if (-not (Test-Path -LiteralPath $Path)) { return $false }
-    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -eq $ExpectedSHA256
+function Test-ISOhash ([string]$path, [string]$expectedSHA256) {
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -eq $expectedSHA256
 }
 
 # Windows Installer success codes: 0, 1641 (restart initiated) and 3010 (restart required);
 # pnputil uses 0 and 3010. A missing exit code is not treated as success.
-function Test-InstallerSuccess ([Nullable[int]]$ExitCode) {
-    $null -ne $ExitCode -and $ExitCode -in 0, 1641, 3010
+function Test-InstallerSuccess ([Nullable[int]]$exitCode) {
+    $null -ne $exitCode -and $exitCode -in 0, 1641, 3010
 }
 
 # Replaces any system-managed or other page file configuration with one fixed C:\pagefile.sys.
@@ -28,13 +28,13 @@ function Test-InstallerSuccess ([Nullable[int]]$ExitCode) {
 # Win32_ComputerSystem.AutomaticManagedPagefile property, then PagingFiles is set to exactly
 # this entry (other entries are dropped). No page file is deleted here: Windows applies the
 # configuration at the next boot.
-function Set-FixedPagefile ([int64]$SizeMB) {
+function Set-FixedPagefile ([int64]$sizeMB) {
     $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
     if ($computer.AutomaticManagedPagefile) {
         Set-CimInstance -InputObject $computer -Property @{ AutomaticManagedPagefile = $false } -ErrorAction Stop
         Write-Host 'OK: automatic pagefile management disabled'
     }
-    $entry = 'C:\pagefile.sys {0} {0}' -f $SizeMB
+    $entry = 'C:\pagefile.sys {0} {0}' -f $sizeMB
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -Name PagingFiles -Type MultiString -Value @($entry) -ErrorAction Stop
     Write-Host "OK: PagingFiles set to '${entry}' (RAM + 257 MB), active after reboot"
 }
@@ -46,14 +46,14 @@ function Enable-TLS12 {
 
 # Downloads an already resolved HTTPS URL to a file without following redirects: a redirect or any
 # status other than 200 throws instead of being followed, so the download cannot leave HTTPS.
-function Save-HTTPSdownload ([string]$URL, [string]$Path) {
-    if ($URL -notlike 'https://*') { throw "not an HTTPS URL: ${URL}" }
-    $request = [System.Net.HttpWebRequest]::Create($URL)
+function Save-HTTPSdownload ([string]$url, [string]$path) {
+    if ($url -notlike 'https://*') { throw "not an HTTPS URL: ${url}" }
+    $request = [System.Net.HttpWebRequest]::Create($url)
     $request.AllowAutoRedirect = $false
     $response = $request.GetResponse()
     try {
-        if ([int]$response.StatusCode -ne 200) { throw "HTTP $([int]$response.StatusCode) from ${URL}" }
-        $file = [System.IO.File]::Create($Path)
+        if ([int]$response.StatusCode -ne 200) { throw "HTTP $([int]$response.StatusCode) from ${url}" }
+        $file = [System.IO.File]::Create($path)
         try { $response.GetResponseStream().CopyTo($file) } finally { $file.Close() }
     } finally {
         $response.Close()
@@ -63,15 +63,15 @@ function Save-HTTPSdownload ([string]$URL, [string]$Path) {
 # Turns an HTTP(S) redirect location into the HTTPS URL on the same official host, or nothing when
 # it points elsewhere. Official download aliases may redirect to plain http://; only the host and
 # path are taken from such a location, and the request is always made over HTTPS.
-function Get-HTTPSredirectTarget ([string]$Location, [string]$OfficialHost) {
-    if ($Location -notmatch '^https?://([^/?#]+)(/[^#]*)$') { return }
-    if ($Matches[1] -ne $OfficialHost) { return }
+function Get-HTTPSredirectTarget ([string]$location, [string]$officialHost) {
+    if ($location -notmatch '^https?://([^/?#]+)(/[^#]*)$') { return }
+    if ($Matches[1] -ne $officialHost) { return }
     "https://$($Matches[1])$($Matches[2])"
 }
 
 # Returns the status code and Location header of one HTTPS HEAD request without following redirects.
-function Get-HTTPSresponseHead ([string]$URL) {
-    $request = [System.Net.HttpWebRequest]::Create($URL)
+function Get-HTTPSresponseHead ([string]$url) {
+    $request = [System.Net.HttpWebRequest]::Create($url)
     $request.Method = 'HEAD'
     $request.AllowAutoRedirect = $false
     try {
@@ -89,30 +89,30 @@ function Get-HTTPSresponseHead ([string]$URL) {
 
 # Follows an official download alias hop by hop (at most five) and returns the final HTTPS URL on
 # the same host; a redirect to another host, a non-HTTPS start or an error status throws.
-function Resolve-OfficialHTTPS ([string]$URL, [string]$OfficialHost) {
-    if ($URL -notlike "https://${OfficialHost}/*") { throw "not an HTTPS URL on ${OfficialHost}: ${URL}" }
+function Resolve-OfficialHTTPS ([string]$url, [string]$officialHost) {
+    if ($url -notlike "https://${officialHost}/*") { throw "not an HTTPS URL on ${officialHost}: ${url}" }
     foreach ($hop in 1..5) {
-        $head = Get-HTTPSresponseHead $URL
-        if ($head.StatusCode -eq 200) { return $URL }
-        if ($head.StatusCode -lt 300 -or $head.StatusCode -ge 400) { throw "HTTP $($head.StatusCode) from ${URL}" }
-        $next = Get-HTTPSredirectTarget $head.Location $OfficialHost
-        if (-not $next) { throw "redirect from ${URL} leaves ${OfficialHost}: $($head.Location)" }
-        $URL = $next
+        $head = Get-HTTPSresponseHead $url
+        if ($head.StatusCode -eq 200) { return $url }
+        if ($head.StatusCode -lt 300 -or $head.StatusCode -ge 400) { throw "HTTP $($head.StatusCode) from ${url}" }
+        $next = Get-HTTPSredirectTarget $head.Location $officialHost
+        if (-not $next) { throw "redirect from ${url} leaves ${officialHost}: $($head.Location)" }
+        $url = $next
     }
-    throw "too many redirects from ${URL}"
+    throw "too many redirects from ${url}"
 }
 
 # Returns a stored artifact record (JSON), or nothing when it is missing or unreadable.
-function Read-ArtifactRecord ([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path)) { return }
-    try { Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json } catch { return }
+function Read-ArtifactRecord ([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return }
+    try { Get-Content -Raw -LiteralPath $path | ConvertFrom-Json } catch { return }
 }
 
 # Stores an artifact record as JSON, adding the UTC time it was recorded.
-function Write-ArtifactRecord ([string]$Path, $Record) {
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) -ErrorAction Stop | Out-Null
-    $Record['recordedUTC'] = [DateTime]::UtcNow.ToString('o')
-    $Record | ConvertTo-Json | Set-Content -LiteralPath $Path -Encoding ASCII -ErrorAction Stop
+function Write-ArtifactRecord ([string]$path, $record) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) -ErrorAction Stop | Out-Null
+    $record['recordedUTC'] = [DateTime]::UtcNow.ToString('o')
+    $record | ConvertTo-Json | Set-Content -LiteralPath $path -Encoding ASCII -ErrorAction Stop
 }
 
 # The memory size is read before any change: an unreadable, missing or non-positive size stops the
