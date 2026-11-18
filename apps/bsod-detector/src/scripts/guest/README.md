@@ -196,7 +196,7 @@ A mismatch does not change the exit code: the JSON reports it, and `preflight-rh
 - Requires a valid Authenticode signature on `notmyfaultc64.exe` whose signer's organization is exactly `Microsoft Corporation`. An untrusted or missing executable is deleted, never staged.
 - Moves the verified executable to `C:\Temp\nmf\notmyfaultc64.exe` and removes the archive and extraction folder.
 - Reports `source`, `resolvedSource`, `archiveSHA256`, `sha256` (of the executable), `version` (file version), `signer` and `stagedPath`. No hash is published for NotMyFault: the SHA-256 values record what was downloaded; the signature is the publisher check.
-- Never runs NotMyFault, crashes or reboots the guest. A staging failure emits failure JSON and exits with code 4; the host preflight then stops the run.
+- Never runs NotMyFault, crashes or reboots the guest. A staging failure exits with code 4 and still emits the full result (settings mismatches, page file, the failed `notMyFault` record) with `ok` set to `false` and an `error`; the host preflight then stops the run and prints it.
 
 The host `preflight-rhov.sh` passes `-StageNotMyFault` only with `--require-trigger` and records the reported values in `recovery-metadata.json` (`artifacts.notMyFault`). Watch runs do not pass it.
 
@@ -224,4 +224,4 @@ The normal output is one JSON object with:
 | `pageFile.requiredMB` | RAM + 257 MB in MB, or `null` when RAM cannot be read or is not positive. |
 | `notMyFault` | `{ "status": "not requested" }` without `-StageNotMyFault`; otherwise the staging record above. |
 
-An unknown dump type emits `{ "ok": false, "error": "...", "script": "validate-crash-settings.ps1" }` and exits with code 2; a failed NotMyFault staging emits the same failure shape and exits with code 4. A missing configuration is a terminating error.
+An unknown dump type emits `{ "ok": false, "error": "...", "script": "validate-crash-settings.ps1" }` and exits with code 2; a failed NotMyFault staging emits the normal result with `ok: false` and `error` added (so settings mismatches stay visible) and exits with code 4. A missing configuration is a terminating error.
