@@ -5,16 +5,16 @@
 
 # Fixed pagefile size in MB: physical RAM plus 257 MB, rounded once to a whole MB. This must
 # match the size golden-image-pre-reboot.ps1 configures, so the check below can pass exactly.
-function Get-PagefileSizeMB ([int64]$MemoryBytes) {
-    [int64][math]::Round(($MemoryBytes + 257MB) / 1MB, 0)
+function Get-PagefileSizeMB ([int64]$memoryBytes) {
+    [int64][math]::Round(($memoryBytes + 257MB) / 1MB, 0)
 }
 
 # Removes the given cache files and outputs one message per file that could not be removed.
 # A missing file is already clean. A mounted ISO is left in place and reported, and any
 # removal error (for example a file in use) is reported instead of being ignored.
-function Remove-SetupCacheFile ([string[]]$Paths) {
+function Remove-SetupCacheFile ([string[]]$pathArr) {
     $failures = @()
-    foreach ($path in $Paths) {
+    foreach ($path in $pathArr) {
         if (-not (Test-Path -LiteralPath $path)) { continue }
         if ($path -like '*.iso') {
             $image = Get-DiskImage -ImagePath $path -ErrorAction SilentlyContinue
@@ -34,9 +34,9 @@ function Remove-SetupCacheFile ([string[]]$Paths) {
 }
 
 # Returns a stored artifact record (JSON), or nothing when it is missing or unreadable.
-function Read-ArtifactRecord ([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path)) { return }
-    try { Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json } catch { return }
+function Read-ArtifactRecord ([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return }
+    try { Get-Content -Raw -LiteralPath $path | ConvertFrom-Json } catch { return }
 }
 
 # FAIL lines use Write-Error. Keep the default preference so a caller's Stop preference cannot end
