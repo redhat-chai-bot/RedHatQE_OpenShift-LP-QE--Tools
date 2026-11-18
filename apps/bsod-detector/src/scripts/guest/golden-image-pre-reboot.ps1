@@ -2,8 +2,8 @@
 # Afterwards run golden-image-post-reboot.ps1 and seal only if it passes.
 # Both VirtIO storage drivers are staged so the image boots on a virtio (viostor),
 # scsi (vioscsi) or sata (storahci, inbox) disk bus.
-# The page file is sized from this VM's RAM (RAM + 257 MB). configure-dumps.ps1 checks it against
-# the RAM of the VM it runs on, so VMs cloned from this image must not have more RAM than this VM.
+# The page file is sized from this VM's RAM (RAM + 257 MB). validate-crash-settings.ps1 checks it
+# against the RAM of the VM it runs on, so VMs cloned from this image must not have more RAM than this VM.
 
 # Fixed pagefile size in MB: physical RAM plus 257 MB, rounded once to a whole MB.
 # golden-image-post-reboot.ps1 checks the active pagefile against the same calculation.
@@ -11,7 +11,7 @@ function Get-PagefileSizeMB ([int64]$MemoryBytes) {
     [int64][math]::Round(($MemoryBytes + 257MB) / 1MB, 0)
 }
 
-# True only when the file exists and its SHA-256 equals the pinned digest (case-insensitive).
+# True only when the file exists and its SHA-256 equals the expected digest (case-insensitive).
 function Test-ISOhash ([string]$Path, [string]$ExpectedSHA256) {
     if (-not (Test-Path -LiteralPath $Path)) { return $false }
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -eq $ExpectedSHA256
@@ -44,9 +44,75 @@ function Enable-TLS12 {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 }
 
-# Downloads the ISO to the given (temporary) path.
-function Save-ISOdownload ([string]$URL, [string]$Path) {
-    (New-Object System.Net.WebClient).DownloadFile($URL, $Path)
+# Downloads an already resolved HTTPS URL to a file without following redirects: a redirect or any
+# status other than 200 throws instead of being followed, so the download cannot leave HTTPS.
+function Save-HTTPSdownload ([string]$URL, [string]$Path) {
+    if ($URL -notlike 'https://*') { throw "not an HTTPS URL: ${URL}" }
+    $request = [System.Net.HttpWebRequest]::Create($URL)
+    $request.AllowAutoRedirect = $false
+    $response = $request.GetResponse()
+    try {
+        if ([int]$response.StatusCode -ne 200) { throw "HTTP $([int]$response.StatusCode) from ${URL}" }
+        $file = [System.IO.File]::Create($Path)
+        try { $response.GetResponseStream().CopyTo($file) } finally { $file.Close() }
+    } finally {
+        $response.Close()
+    }
+}
+
+# Turns an HTTP(S) redirect location into the HTTPS URL on the same official host, or nothing when
+# it points elsewhere. Official download aliases may redirect to plain http://; only the host and
+# path are taken from such a location, and the request is always made over HTTPS.
+function Get-HTTPSredirectTarget ([string]$Location, [string]$OfficialHost) {
+    if ($Location -notmatch '^https?://([^/?#]+)(/[^#]*)$') { return }
+    if ($Matches[1] -ne $OfficialHost) { return }
+    "https://$($Matches[1])$($Matches[2])"
+}
+
+# Returns the status code and Location header of one HTTPS HEAD request without following redirects.
+function Get-HTTPSresponseHead ([string]$URL) {
+    $request = [System.Net.HttpWebRequest]::Create($URL)
+    $request.Method = 'HEAD'
+    $request.AllowAutoRedirect = $false
+    try {
+        $response = $request.GetResponse()
+    } catch [System.Net.WebException] {
+        if (-not $_.Exception.Response) { throw }
+        $response = $_.Exception.Response
+    }
+    try {
+        [pscustomobject]@{ StatusCode = [int]$response.StatusCode; Location = $response.Headers['Location'] }
+    } finally {
+        $response.Close()
+    }
+}
+
+# Follows an official download alias hop by hop (at most five) and returns the final HTTPS URL on
+# the same host; a redirect to another host, a non-HTTPS start or an error status throws.
+function Resolve-OfficialHTTPS ([string]$URL, [string]$OfficialHost) {
+    if ($URL -notlike "https://${OfficialHost}/*") { throw "not an HTTPS URL on ${OfficialHost}: ${URL}" }
+    foreach ($hop in 1..5) {
+        $head = Get-HTTPSresponseHead $URL
+        if ($head.StatusCode -eq 200) { return $URL }
+        if ($head.StatusCode -lt 300 -or $head.StatusCode -ge 400) { throw "HTTP $($head.StatusCode) from ${URL}" }
+        $next = Get-HTTPSredirectTarget $head.Location $OfficialHost
+        if (-not $next) { throw "redirect from ${URL} leaves ${OfficialHost}: $($head.Location)" }
+        $URL = $next
+    }
+    throw "too many redirects from ${URL}"
+}
+
+# Returns a stored artifact record (JSON), or nothing when it is missing or unreadable.
+function Read-ArtifactRecord ([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    try { Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json } catch { return }
+}
+
+# Stores an artifact record as JSON, adding the UTC time it was recorded.
+function Write-ArtifactRecord ([string]$Path, $Record) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) -ErrorAction Stop | Out-Null
+    $Record['recordedUTC'] = [DateTime]::UtcNow.ToString('o')
+    $Record | ConvertTo-Json | Set-Content -LiteralPath $Path -Encoding ASCII -ErrorAction Stop
 }
 
 # The memory size is read before any change: an unreadable, missing or non-positive size stops the
@@ -68,38 +134,52 @@ Write-Host "OK: physical memory read; the page file will be ${pagefileSizeMB} MB
 # golden-image-post-reboot.ps1, which may run under another account (per-user $env:TEMP differs).
 New-Item -ItemType Directory -Force -Path 'C:\Temp' | Out-Null
 Enable-TLS12
-# virtio-win is pinned to the published build 0.1.302-1 (what stable-virtio and latest-virtio
-# pointed to on 2026-11-17) and used only when its SHA-256 matches. No detached signature is
-# published: the digest is the one recorded for this ISO in the official
-# virtio-win-0.1.302-1.noarch.rpm header, and the ISO inside that RPM and the direct download
-# hash to the same value. To move to another build, update the version and digest together.
-$isoURL    = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-0.1.302.iso'
-$isoSHA256 = '303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d'
+# virtio-win: the current official release behind the latest-virtio alias, with no hardcoded
+# version or digest. The alias is resolved hop by hop over HTTPS on fedorapeople.org (it
+# redirects to plain http://, which is never requested). No checksum or signature is published
+# for the ISO, so its SHA-256 is calculated from the downloaded file and recorded, with the
+# source, resolved source and version, in an audit record that stays in the image after
+# golden-image-post-reboot.ps1 removes the ISO cache. The record is not a publisher attestation.
+$isoAliasURL   = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso'
 $isoPath = 'C:\Temp\virtio-win.iso'
+$isoRecordPath = 'C:\ProgramData\bsod-detector\virtio-win-iso.json'
+try {
+    $isoURL = Resolve-OfficialHTTPS $isoAliasURL 'fedorapeople.org'
+} catch {
+    Write-Error "FAIL: cannot resolve the latest virtio-win ISO over HTTPS: $($_.Exception.Message)"
+    exit 1
+}
+$isoVersion = if ($isoURL -match '/virtio-win-([0-9][0-9.]*)\.iso$') { $Matches[1] } else { $null }
+Write-Host "Latest virtio-win ISO: ${isoURL} (version $(if ($isoVersion) { $isoVersion } else { 'not in the file name' }))"
 
-# A cached ISO is reused only if it matches the pinned digest. Otherwise the ISO is downloaded to a
-# temporary name, verified and only then moved over the cache; a failed or mismatching download
-# stops the script before anything is installed, without falling back to an unverified copy.
-if (Test-ISOhash $isoPath $isoSHA256) {
-    Write-Host "OK: cached virtio-win ISO matches the pinned SHA-256 ${isoSHA256}"
+# A cached ISO is reused only when it is that same latest release and still matches the SHA-256
+# recorded when it was downloaded; otherwise the latest ISO is downloaded to a temporary name and
+# only then moved over the cache. A failed download stops the script before anything is installed.
+$isoRecord = Read-ArtifactRecord $isoRecordPath
+if ($isoRecord -and $isoRecord.resolvedSource -eq $isoURL -and (Test-ISOhash $isoPath $isoRecord.sha256)) {
+    Write-Host "OK: cached virtio-win ISO is the latest release and matches its recorded SHA-256 $($isoRecord.sha256)"
 } else {
-    if (Test-Path -LiteralPath $isoPath) {
-        Write-Host 'WARN: the cached virtio-win ISO does not match the pinned SHA-256 - replacing it'
-    }
     $isoTmpPath = "${isoPath}.download"
     try {
+        # The old record no longer describes the cache once a new download starts.
+        if (Test-Path -LiteralPath $isoRecordPath) { Remove-Item -LiteralPath $isoRecordPath -Force -ErrorAction Stop }
         Write-Host "Downloading ${isoURL} ..."
-        Save-ISOdownload $isoURL $isoTmpPath
-        if (-not (Test-ISOhash $isoTmpPath $isoSHA256)) { throw "the download does not match the pinned SHA-256 ${isoSHA256}" }
-        # A mismatching cache can still be mounted by an interrupted earlier run; detach it first.
+        Save-HTTPSdownload $isoURL $isoTmpPath
+        $isoSHA256 = (Get-FileHash -LiteralPath $isoTmpPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        # An older cache can still be mounted by an interrupted earlier run; detach it first.
         if ((Test-Path -LiteralPath $isoPath) -and (Get-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue).Attached) {
             Dismount-DiskImage -ImagePath $isoPath -ErrorAction Stop | Out-Null
         }
         Move-Item -Path $isoTmpPath -Destination $isoPath -Force -ErrorAction Stop
-        Write-Host "OK: downloaded and verified virtio-win 0.1.302 ($([math]::Round((Get-Item $isoPath).Length / 1MB, 0)) MB)"
+        Write-ArtifactRecord $isoRecordPath ([ordered]@{
+            schema = 1; artifact = 'virtio-win.iso'; source = $isoAliasURL; resolvedSource = $isoURL; version = $isoVersion
+            sha256 = $isoSHA256; sizeBytes = (Get-Item $isoPath).Length
+            verification = 'No checksum or signature is published for this ISO; sha256 was calculated from the downloaded file (audit record, not publisher verification).'
+        })
+        Write-Host "OK: downloaded virtio-win ${isoVersion}; SHA-256 ${isoSHA256} recorded in ${isoRecordPath}"
     } catch {
         Remove-Item -Path $isoTmpPath -Force -ErrorAction SilentlyContinue
-        Write-Error "FAIL: no virtio-win ISO matching the pinned SHA-256 is available: $($_.Exception.Message)"
+        Write-Error "FAIL: the latest virtio-win ISO could not be downloaded and recorded: $($_.Exception.Message)"
         exit 1
     }
 }
@@ -167,8 +247,8 @@ Write-Host 'NOTE: storahci.sys (SATA) is an inbox Windows driver - no installati
 # simulated crash. The current src/scripts/host/watch-crash.sh still starts the VM again unless it
 # runs with --no-restart (a watcher change is planned separately); a restarted VM is not verified.
 
-# The ISO stays on disk for re-runs (reused only while its SHA-256 matches); golden-image-post-reboot.ps1
-# removes it once every check has passed.
+# The ISO stays on disk for re-runs (reused only while it is the latest release and matches its
+# recorded SHA-256); golden-image-post-reboot.ps1 removes it once every check has passed.
 Dismount-DiskImage -ImagePath $isoPath
 Write-Host "OK: ISO unmounted (kept on disk at ${isoPath} until golden-image-post-reboot.ps1 passes)"
 
@@ -203,7 +283,6 @@ try {
     Set-ItemProperty -Path $cc -Name Overwrite            -Value 1                         -Type DWord        -ErrorAction Stop
     Set-ItemProperty -Path $cc -Name LogEvent             -Value 1                         -Type DWord        -ErrorAction Stop
     Set-ItemProperty -Path $cc -Name DumpFile             -Value '%SystemRoot%\MEMORY.DMP' -Type ExpandString -ErrorAction Stop
-    Set-ItemProperty -Path $cc -Name MinidumpDir          -Value '%SystemRoot%\Minidump'   -Type ExpandString -ErrorAction Stop
     if (Get-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction SilentlyContinue) {
         Remove-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction Stop
     }
