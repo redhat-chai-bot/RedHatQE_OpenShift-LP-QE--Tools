@@ -45,7 +45,7 @@ case "$1" in
     fi ;;
   exec)
     if [[ "$*" == *Get-ChildItem* ]]; then echo '[]'
-    else echo '{"windows":true,"dumpParent":true,"minidumpParent":true,"notMyFault":true}'
+    else echo '{"windows":true,"dumpParent":true,"notMyFault":true}'
     fi ;;
   *) exit 91 ;;
 esac
@@ -54,14 +54,11 @@ EOF
 #!/usr/bin/env bash
 [[ "${1:-}" == --request-timeout=* ]] && shift
 printf '%s\n' "$*" >> "$OC_LOG"
-if [[ "${HANG_VM_GET:-0}" == 1 && "$1 $2" == 'get vm' ]]; then sleep 30; fi
+if [[ "${HANG_VM_GET:-0}" == 1 && "$1 $2" == 'get vm' ]]; then sleep 1; exit 1; fi
 case "$1 $2" in
   'get vm') cat "$FIXTURE_DIR/vm-manual.json" ;;
   'get vmi') cat "$FIXTURE_DIR/vmi-running.json" ;;
-  'get pod')
-    if [[ "$*" == *'kubevirt.io/vm='* ]]; then cat "$FIXTURE_DIR/pods-running.json"
-    else printf '%s' "${PROBE_PHASE:-Succeeded}"
-    fi ;;
+  'get pod') cat "$FIXTURE_DIR/pods-running.json" ;;
   'get pvc')
     if [[ "$3" == fixture-memory ]]; then cat "$FIXTURE_DIR/pvc-memory-dump.json"
     elif [[ "$3" == fixture-evidence-pvc ]]; then cat "$FIXTURE_DIR/pvc-evidence.json"
@@ -86,17 +83,17 @@ run_preflight() {
   local run_id=fixture-run-001
   mkdir -p "$EVIDENCE_ROOT/$run_id"
   run env PATH="$BATS_TMPDIR/mockbin:$PATH" REAL_PYTHON="$REAL_PYTHON" EVIDENCE_ROOT="$EVIDENCE_ROOT" \
-    FIXTURE_DIR="$FIXTURES" OC_LOG="$OC_LOG" CFG_JSON="${CFG_JSON:-}" PROBE_PHASE="${PROBE_PHASE:-}" \
+    FIXTURE_DIR="$FIXTURES" OC_LOG="$OC_LOG" CFG_JSON="${CFG_JSON:-}" \
     HANG_VM_GET="${HANG_VM_GET:-0}" MOUNT_TARGET="${MOUNT_TARGET:-}" MOUNT_SOURCE="${MOUNT_SOURCE:-}" \
     BSOD_DET__GUEST_AGENT__BIN="$BATS_TMPDIR/mockbin/guest-agent" BSOD_DET__COMMAND__TIMEOUT="${BSOD_COMMAND_TIMEOUT:-2}" \
     bash "$HOST_DIR/preflight-rhov.sh" --ns fixture-ns --vm fixture-vm --out "$EVIDENCE_ROOT/$run_id" \
       --metadata "$EVIDENCE_ROOT/$run_id/recovery-metadata.json" --run-id "$run_id" \
       --evidence-mount "$EVIDENCE_ROOT" --evidence-volume-kind pvc --evidence-storage-id fixture-evidence-pvc \
-      --snap-class fixture-snapshot-class --recovery-image registry.test/recovery@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+      --snap-class fixture-snapshot-class \
       --memory-dump-pvc fixture-memory --require-trigger "${PREFLIGHT_EXTRA[@]}"
 }
 
-@test "preflight proves mount identity, image tools, pagefile, and exact disk-to-PVC mapping" {
+@test "preflight proves mount identity, pagefile, and exact disk-to-PVC mapping" {
   export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
   mkdir "$EVIDENCE_ROOT"; echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"; make_preflight_mocks; PREFLIGHT_EXTRA=()
   run_preflight
@@ -107,10 +104,19 @@ run_preflight() {
   [ "$(jq -r .diskTarget "$metadata")" = vda ]
   [ "$(jq -r .memoryDumpPvc "$metadata")" = fixture-memory ]
   [ "$(jq -r .evidenceMount.id "$metadata")" = fixture-evidence-pvc ]
-  grep -q '^apply -f -' "$OC_LOG"
+  # Extractor-required fields remain; recovery-image contract fields are gone.
+  [ "$(jq -r .runId "$metadata")" = fixture-run-001 ]
+  [ "$(jq -r .outputDir "$metadata")" = "$EVIDENCE_ROOT/fixture-run-001" ]
+  [ "$(jq -r .namespace "$metadata")" = fixture-ns ]
+  [ "$(jq -r .vm "$metadata")" = fixture-vm ]
+  [ "$(jq -r '.recoveryImage // empty' "$metadata")" = '' ]
+  [ "$(jq -r '.recoveryImageContract // empty' "$metadata")" = '' ]
+  # No recovery-image capability probe pod is created.
+  ! grep -q '^apply -f' "$OC_LOG"
+  ! grep -q 'bsod-probe-' "$OC_LOG"
 }
 
-@test "preflight rejects unmounted output, unknown pagefile, wrong disk, and bad recovery image" {
+@test "preflight rejects unmounted output, unknown pagefile, and wrong disk" {
   export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
   mkdir "$EVIDENCE_ROOT"; echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"; make_preflight_mocks; PREFLIGHT_EXTRA=()
   rm "$EVIDENCE_ROOT/.bsod-storage-identity"
@@ -123,12 +129,28 @@ run_preflight() {
   rm -rf "$EVIDENCE_ROOT/fixture-run-001"; unset CFG_JSON
   PREFLIGHT_EXTRA=(--disk-target vdb); run_preflight
   [ "$status" -ne 0 ]; [[ "$output" == *'does not map uniquely'* ]]
-  rm -rf "$EVIDENCE_ROOT/fixture-run-001"; PREFLIGHT_EXTRA=(); PROBE_PHASE=Failed; run_preflight
-  [ "$status" -ne 0 ]; [[ "$output" == *'capability probe failed'* ]]
 }
 
-@test "preflight remote-command timeout is actionable and bounded" {
-  export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log" HANG_VM_GET=1 BSOD_COMMAND_TIMEOUT=1
+@test "preflight rejects --recovery-image as unknown" {
+  export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
+  mkdir "$EVIDENCE_ROOT"; echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"; make_preflight_mocks
+  PREFLIGHT_EXTRA=(--recovery-image 'registry.test/recovery@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+  run_preflight
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'unknown argument: --recovery-image'* ]]
+}
+
+@test "preflight rejects rebootRequired guest dump configuration" {
+  export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
+  mkdir "$EVIDENCE_ROOT"; echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"; make_preflight_mocks; PREFLIGHT_EXTRA=()
+  CFG_JSON='{"ok":true,"matchesRecommended":true,"current":{"AutoReboot":0},"pageFile":{"adequate":true},"rebootRequired":true}'
+  run_preflight
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'requires a reboot before arming'* ]]
+}
+
+@test "preflight remote-command failure is actionable and bounded" {
+  export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log" HANG_VM_GET=1
   mkdir "$EVIDENCE_ROOT"; echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"; make_preflight_mocks; PREFLIGHT_EXTRA=()
   start=$SECONDS; run_preflight; elapsed=$((SECONDS-start))
   [ "$status" -ne 0 ]; [ "$elapsed" -lt 10 ]
