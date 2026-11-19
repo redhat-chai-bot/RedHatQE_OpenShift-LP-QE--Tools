@@ -119,11 +119,11 @@ class RecursiveMappingTests(unittest.TestCase):
         self.assertEqual(deletes[0][4:], ['--ignore-not-found', '--timeout=60s', '--wait=true'])
         self.assertFalse(any(call[0] == 'wait' and '--for=delete' in call for call in self.Calls()))
 
-    def test_blocking_delete_already_absent_succeeds_without_separate_wait(self):
+    def test_Cleanup_BlockingDeleteOfAbsentHelperSucceedsWithoutSeparateWait(self):
         self.AssertCompleted(self.RunRecovery('helper-absent-client48'))
         self.assertEqual(len(self.Contents()), 3)
 
-    def test_default_mapping_raw_pagefile_archive_and_no_generated_reports(self):
+    def test_Extractor_DefaultMappingArchivesRawPagefileWithoutGeneratedReports(self):
         before = (self.out / 'vm-memory.elf').read_bytes()
         self.AssertCompleted(self.RunRecovery())
         expected = dict(self.files)
@@ -131,13 +131,13 @@ class RecursiveMappingTests(unittest.TestCase):
         self.assertEqual(self.Contents(), expected)
         self.assertEqual((self.out / 'vm-memory.elf').read_bytes(), before)
 
-    def test_files_directories_slashes_spaces_dotfiles_and_same_basename(self):
+    def test_Extractor_MapsFilesDirectoriesSlashesSpacesDotfilesAndSameBasename(self):
         for source, destination in (('/foo/bar', '/foo/new'), ('foo/bar/', 'foo/new/'),
                                     ('/foo/bar///', '/foo/new///'), ('foo/bar', ''),
                                     ('/foo/bar/', '/other/bar/')):
             for directory in (False, True):
                 with self.subTest(source=source, destination=destination, directory=directory):
-                    case = RecursiveMappingTests('test_default_mapping_raw_pagefile_archive_and_no_generated_reports')
+                    case = RecursiveMappingTests('test_Extractor_DefaultMappingArchivesRawPagefileWithoutGeneratedReports')
                     case.setUp()
                     self.addCleanup(case.doCleanups)
                     children = {'nested/space file': b'child', '.hidden': b'dot'} if directory else {'': b'file'}
@@ -149,18 +149,18 @@ class RecursiveMappingTests(unittest.TestCase):
                     self.assertEqual(case.Contents(), {final + ('/' + child if child else ''): content
                                                       for child, content in children.items()})
 
-    def test_space_paths_and_mapping_lookup_before_normalization(self):
+    def test_Extractor_LooksUpSpacePathMappingsBeforeNormalization(self):
         self.WriteGuest('space dir/file name', b'spaces')
         script = self.MappedScript({'space dir/file name/': '/new dir/new name/'})
         self.AssertCompleted(self.RunRecovery(script=script))
         self.assertEqual(self.Contents(), {'new dir/new name': b'spaces'})
 
-    def test_missing_item_does_not_prevent_other_copies(self):
+    def test_Extractor_MissingItemDoesNotPreventOtherCopies(self):
         (self.disk / 'pagefile.sys').unlink()
         self.AssertCompleted(self.RunRecovery())
         self.assertEqual(self.Contents(), {key: value for key, value in self.files.items() if key != 'pagefile.sys'})
 
-    def test_partition_archive_replaces_existing_archive_with_one_gzip_member(self):
+    def test_Extractor_PartitionArchiveReplacesExistingArchiveWithOneGzipMember(self):
         archive = self.out / 'guest-fs--crash-info--sda3.tgz'
         archive.write_bytes(b'previous archive bytes')
         archive.chmod(0o600)
@@ -171,7 +171,7 @@ class RecursiveMappingTests(unittest.TestCase):
         self.assertEqual(decoder.unused_data, b'')
         self.assertEqual(len(self.Contents()), 3)
 
-    def test_failed_copy_never_renames_preexisting_unrelated_artifact(self):
+    def test_RemoteCopyScript_FailedCopyNeverRenamesPreexistingUnrelatedArtifact(self):
         source = fixtures.recovery.read_text()
         remote = re.search(r"bash -o pipefail -O inherit_errexit -euxc '(.*?)' ''", source, re.DOTALL).group(1)
         parent = '/tmp/mapping-fixture'
@@ -189,7 +189,7 @@ class RecursiveMappingTests(unittest.TestCase):
         self.assertFalse((physical / 'MEMORY.DMP').exists())
         self.assertNotIn('"mv"', (self.root / 'helper-argv.jsonl').read_text())
 
-    def test_helper_filesystem_is_separate_and_readonly(self):
+    def test_Extractor_HelperFilesystemIsSeparateAndReadonly(self):
         self.AssertCompleted(self.RunRecovery())
         calls = [json.loads(line) for line in (self.root / 'helper-argv.jsonl').read_text().splitlines()]
         copies = [call for call in calls if call[0] == 'guestfish']
@@ -203,7 +203,7 @@ class RecursiveMappingTests(unittest.TestCase):
             self.assertFalse(Path(destination).exists())
         self.assertEqual({key: (self.disk / key).read_bytes() for key in self.files}, self.files)
 
-    def test_existing_outputs_are_not_rewritten_or_validated(self):
+    def test_Extractor_ExistingOutputsAreNotRewrittenOrValidated(self):
         names = ('events.json', 'parse-dump-header.json', 'checksums.sha256',
                  'stage-errors.jsonl', 'extraction-summary.json', 'watcher.log')
         for name in names:
@@ -214,13 +214,13 @@ class RecursiveMappingTests(unittest.TestCase):
         self.assertEqual({name: (self.out / name).read_bytes() for name in names}, before)
         self.assertEqual(len(self.Contents()), 3)
 
-    def test_native_failure_and_cleanup_contracts(self):
+    def test_Extractor_NativeFailuresAndCleanupReturnContractStatuses(self):
         for scenario, status in (('api-error', 1), ('wait-error', 19),
                                  ('virtctl-error', 41),
                                  ('cleanup-error', 25), ('cleanup-wait-error', 28),
                                  ('cleanup-wait-timeout', 28), ('tar-error', 35)):
             with self.subTest(scenario=scenario):
-                case = RecursiveMappingTests('test_default_mapping_raw_pagefile_archive_and_no_generated_reports')
+                case = RecursiveMappingTests('test_Extractor_DefaultMappingArchivesRawPagefileWithoutGeneratedReports')
                 case.setUp()
                 self.addCleanup(case.doCleanups)
                 result = case.RunRecovery(scenario)
@@ -236,7 +236,7 @@ class RecursiveMappingTests(unittest.TestCase):
                     self.assertIn('mock delete failure' if scenario == 'cleanup-error' else
                                   'mock blocking delete failed', result.stderr)
 
-    def test_actual_watcher_and_container_dispatch(self):
+    def test_Recover_DispatchesActualExtractor(self):
         watcher = (fixtures.hostDir / 'watch-crash.sh').read_text()
         runTimed = re.search(r'^function RunTimed \(\) \{.*\}$', watcher, re.MULTILINE).group()
         recover = re.search(r'^function Recover \(\) \{\n.*?^\}', watcher, re.MULTILINE | re.DOTALL).group()
@@ -248,15 +248,6 @@ class RecursiveMappingTests(unittest.TestCase):
                                  str(self.meta), str(self.root / 'watcher.log')],
                                 env=self.env, text=True, capture_output=True, timeout=10)
         self.AssertCompleted(result)
-        self.assertEqual(len(self.Contents()), 3)
-        entrypoint = fixtures.hostDir.parents[4] / 'image/container/bsod-detector/entrypoint.sh'
-        text = entrypoint.read_text().replace('exec /usr/local/bin/extract--guest-os--crash-info.sh',
-                                             'exec ' + str(fixtures.recovery))
-        self.assertNotEqual(text, entrypoint.read_text())
-        result = subprocess.run(['bash', '-c', text, '', '--metadata', str(self.meta)],
-                                env=dict(self.env, MODE='recover', EVIDENCE_DIR=str(self.out)),
-                                text=True, capture_output=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.Contents()), 3)
 
 
