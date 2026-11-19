@@ -4,16 +4,16 @@ load test-helper
 
 setup() {
   setup_temp
-  HOST_DIR="$REPO_ROOT/src/scripts/host"
-  RELIABILITY="$HOST_DIR/reliability.py"
-  FIXTURES="$REPO_ROOT/test/fixtures"
+  hostDir="$REPO_ROOT/src/scripts/host"
+  reliability="$hostDir/reliability.py"
+  fixtures="$REPO_ROOT/test/fixtures"
   REAL_PYTHON="$(command -v python3)"
   mkdir -p "$BATS_TMPDIR/mockbin"
 }
 
 teardown() { teardown_temp; }
 
-make_python_and_findmnt_mocks() {
+MakePythonAndFindmntMocks() {
   cat > "$BATS_TMPDIR/mockbin/python3" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == -c && "${2:-}" == 'import Evtx.Evtx' ]]; then exit 0; fi
@@ -28,8 +28,8 @@ EOF
   chmod +x "$BATS_TMPDIR/mockbin/python3" "$BATS_TMPDIR/mockbin/findmnt"
 }
 
-make_preflight_mocks() {
-  make_python_and_findmnt_mocks
+MakePreflightMocks() {
+  MakePythonAndFindmntMocks
   cat > "$BATS_TMPDIR/mockbin/virtctl" <<'EOF'
 #!/usr/bin/env bash
 [[ "$*" == *'memory-dump get --help'* || "$*" == *'memory-dump download --help'* ]] && exit 0
@@ -82,24 +82,24 @@ EOF
   chmod +x "$BATS_TMPDIR/mockbin/virtctl" "$BATS_TMPDIR/mockbin/guest-agent" "$BATS_TMPDIR/mockbin/oc"
 }
 
-run_preflight() {
-  local run_id=fixture-run-001
-  mkdir -p "$EVIDENCE_ROOT/$run_id"
+RunPreflight() {
+  local runId=fixture-run-001
+  mkdir -p "$EVIDENCE_ROOT/$runId"
   run env PATH="$BATS_TMPDIR/mockbin:$PATH" REAL_PYTHON="$REAL_PYTHON" EVIDENCE_ROOT="$EVIDENCE_ROOT" \
-    FIXTURE_DIR="$FIXTURES" OC_LOG="$OC_LOG" CFG_JSON="${CFG_JSON:-}" PROBE_PHASE="${PROBE_PHASE:-}" \
+    FIXTURE_DIR="$fixtures" OC_LOG="$OC_LOG" CFG_JSON="${CFG_JSON:-}" PROBE_PHASE="${PROBE_PHASE:-}" \
     HANG_VM_GET="${HANG_VM_GET:-0}" MOUNT_TARGET="${MOUNT_TARGET:-}" MOUNT_SOURCE="${MOUNT_SOURCE:-}" \
     BSOD_DET__GUEST_AGENT__BIN="$BATS_TMPDIR/mockbin/guest-agent" BSOD_DET__COMMAND__TIMEOUT="${BSOD_COMMAND_TIMEOUT:-2}" \
-    bash "$HOST_DIR/preflight-rhov.sh" --ns fixture-ns --vm fixture-vm --out "$EVIDENCE_ROOT/$run_id" \
-      --metadata "$EVIDENCE_ROOT/$run_id/recovery-metadata.json" --run-id "$run_id" \
+    bash "$hostDir/preflight-rhov.sh" --ns fixture-ns --vm fixture-vm --out "$EVIDENCE_ROOT/$runId" \
+      --metadata "$EVIDENCE_ROOT/$runId/recovery-metadata.json" --run-id "$runId" \
       --evidence-mount "$EVIDENCE_ROOT" --evidence-volume-kind pvc --evidence-storage-id fixture-evidence-pvc \
       --snap-class fixture-snapshot-class --recovery-image registry.test/recovery@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-      --memory-dump-pvc fixture-memory --require-trigger "${PREFLIGHT_EXTRA[@]}"
+      --memory-dump-pvc fixture-memory --require-trigger "${preflightExtraArr[@]}"
 }
 
-@test "preflight proves mount identity, image tools, pagefile, and exact disk-to-PVC mapping" {
+@test 'preflight proves mount identity, image tools, pagefile, and exact disk-to-PVC mapping' {
   export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
-  mkdir "$EVIDENCE_ROOT"; echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"; make_preflight_mocks; PREFLIGHT_EXTRA=()
-  run_preflight
+  mkdir "$EVIDENCE_ROOT"; echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"; MakePreflightMocks; preflightExtraArr=()
+  RunPreflight
   [ "$status" -eq 0 ]
   metadata="$EVIDENCE_ROOT/fixture-run-001/recovery-metadata.json"
   [ "$(jq -r .guestPvc "$metadata")" = fixture-rootdisk ]
@@ -110,35 +110,35 @@ run_preflight() {
   grep -q '^apply -f -' "$OC_LOG"
 }
 
-@test "preflight rejects unmounted output, unknown pagefile, wrong disk, and bad recovery image" {
+@test 'preflight rejects unmounted output, unknown pagefile, wrong disk, and bad recovery image' {
   export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
-  mkdir "$EVIDENCE_ROOT"; echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"; make_preflight_mocks; PREFLIGHT_EXTRA=()
+  mkdir "$EVIDENCE_ROOT"; echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"; MakePreflightMocks; preflightExtraArr=()
   rm "$EVIDENCE_ROOT/.bsod-storage-identity"
-  MOUNT_TARGET=/; run_preflight
+  MOUNT_TARGET=/; RunPreflight
   [ "$status" -ne 0 ]; [[ "$output" == *'exact target of a distinct non-root mount'* ]]
   rm -rf "$EVIDENCE_ROOT/fixture-run-001"; unset MOUNT_TARGET
   echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"
-  CFG_JSON='{"ok":true,"matchesRecommended":true,"current":{"AutoReboot":0},"pageFile":{"adequate":null},"rebootRequired":false}'; run_preflight
+  CFG_JSON='{"ok":true,"matchesRecommended":true,"current":{"AutoReboot":0},"pageFile":{"adequate":null},"rebootRequired":false}'; RunPreflight
   [ "$status" -ne 0 ]; [[ "$output" == *'CrashControl/pagefile prerequisites failed validation'* ]]
   rm -rf "$EVIDENCE_ROOT/fixture-run-001"; unset CFG_JSON
-  PREFLIGHT_EXTRA=(--disk-target vdb); run_preflight
+  preflightExtraArr=(--disk-target vdb); RunPreflight
   [ "$status" -ne 0 ]; [[ "$output" == *'does not map uniquely'* ]]
-  rm -rf "$EVIDENCE_ROOT/fixture-run-001"; PREFLIGHT_EXTRA=(); PROBE_PHASE=Failed; run_preflight
+  rm -rf "$EVIDENCE_ROOT/fixture-run-001"; preflightExtraArr=(); PROBE_PHASE=Failed; RunPreflight
   [ "$status" -ne 0 ]; [[ "$output" == *'capability probe failed'* ]]
 }
 
-@test "preflight remote-command timeout is actionable and bounded" {
+@test 'preflight remote-command timeout is actionable and bounded' {
   export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log" HANG_VM_GET=1 BSOD_COMMAND_TIMEOUT=1
-  mkdir "$EVIDENCE_ROOT"; echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"; make_preflight_mocks; PREFLIGHT_EXTRA=()
-  start=$SECONDS; run_preflight; elapsed=$((SECONDS-start))
+  mkdir "$EVIDENCE_ROOT"; echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"; MakePreflightMocks; preflightExtraArr=()
+  start=$SECONDS; RunPreflight; elapsed=$((SECONDS-start))
   [ "$status" -ne 0 ]; [ "$elapsed" -lt 10 ]
   [[ "$output" == *'cannot read VirtualMachine'* ]]
 }
 
-make_recovery_mocks() {
+MakeRecoveryMocks() {
   REAL_OC="$(command -v oc)"
   export REAL_OC
-  make_python_and_findmnt_mocks
+  MakePythonAndFindmntMocks
   export MOCK_ROOT="$BATS_TMPDIR/helper-mock"
   "$REAL_PYTHON" -B - "$REPO_ROOT/test/test_recovery.py" "$MOCK_ROOT" <<'EOF'
 import importlib.util
@@ -205,19 +205,14 @@ case "$1" in
   *) exit 93 ;;
 esac
 EOF
-  cat > "$BATS_TMPDIR/mockbin/extract-evtx" <<'EOF'
-#!/usr/bin/env bash
-[[ "${EVTX_FAIL:-0}" == 0 ]] || { echo '{"ok":false,"error":"fixture parse failure"}'; exit 1; }
-echo '{"ok":true,"crash":{"detected":true},"events":[]}'
-EOF
-  chmod +x "$BATS_TMPDIR/mockbin/oc" "$BATS_TMPDIR/mockbin/extract-evtx"
+  chmod +x "$BATS_TMPDIR/mockbin/oc"
 }
 
-write_recovery_metadata() {
-  local run_id=fixture-recovery-001 out="$EVIDENCE_ROOT/fixture-recovery-001"
+WriteRecoveryMetadata() {
+  local runId=fixture-recovery-001 out="$EVIDENCE_ROOT/fixture-recovery-001"
   mkdir -p "$out"
   echo fixture-evidence-pvc > "$EVIDENCE_ROOT/.bsod-storage-identity"
-  jq -n --arg run "$run_id" --arg out "$out" --arg target "$EVIDENCE_ROOT" \
+  jq -n --arg run "$runId" --arg out "$out" --arg target "$EVIDENCE_ROOT" \
     '{schema:2,runId:$run,outputDir:$out,namespace:"fixture-ns",vm:"fixture-vm",guestPvc:"fixture-rootdisk",
       snapshotClass:"fixture-snapshot-class",storageClass:"fixture-storage-class",storageSize:"32Gi",volumeMode:"Block",
       recoveryImage:"registry.test/recovery@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -225,32 +220,32 @@ write_recovery_metadata() {
       evidenceMount:{target:$target,source:"server:/evidence",fsType:"xfs",device:"0:99",kind:"pvc",id:"fixture-evidence-pvc"}}' > "$BATS_TMPDIR/metadata.json"
 }
 
-run_recovery() {
+RunRecovery() {
   run env PATH="$BATS_TMPDIR/mockbin:$PATH" REAL_PYTHON="$REAL_PYTHON" EVIDENCE_ROOT="$EVIDENCE_ROOT" \
     BSOD_DET__GUEST_FS__CTR_IMG='registry.test/guestfs:fixture' \
-    OC_LOG="$OC_LOG" BSOD_EXTRACT_EVTX_BIN="$BATS_TMPDIR/mockbin/extract-evtx" \
-    MISSING_GUESTFISH="${MISSING_GUESTFISH:-0}" DUMP_CODE="${DUMP_CODE:-10}" EVTX_FAIL="${EVTX_FAIL:-0}" MOUNT_SOURCE="${MOUNT_SOURCE:-}" \
-    bash "$HOST_DIR/extract--guest-os--crash-info.sh" --metadata "$BATS_TMPDIR/metadata.json"
+    OC_LOG="$OC_LOG" \
+    MISSING_GUESTFISH="${MISSING_GUESTFISH:-0}" DUMP_CODE="${DUMP_CODE:-10}" MOUNT_SOURCE="${MOUNT_SOURCE:-}" \
+    bash "$hostDir/extract--guest-os--crash-info.sh" --metadata "$BATS_TMPDIR/metadata.json"
 }
 
-write_elf_memory_fixture() {
+WriteElfMemoryFixture() {
   "$REAL_PYTHON" -c 'import struct,sys; d=bytearray(124); d[:16]=b"\x7fELF\x02\x01\x01"+bytes(9); struct.pack_into("<H",d,0x10,4); struct.pack_into("<Q",d,0x20,64); struct.pack_into("<H",d,0x34,64); struct.pack_into("<HH",d,0x36,56,1); struct.pack_into("<IIQ",d,64,1,0,120); struct.pack_into("<Q",d,96,4); d[120:]=b"CORE"; open(sys.argv[1],"wb").write(d)' "$1"
 }
 
-@test "recovery reports missing memory when standalone output lacks watcher capture" {
+@test 'recovery reports missing memory when standalone output lacks watcher capture' {
   export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
-  mkdir "$EVIDENCE_ROOT"; make_recovery_mocks; write_recovery_metadata; run_recovery
+  mkdir "$EVIDENCE_ROOT"; MakeRecoveryMocks; WriteRecoveryMetadata; RunRecovery
   [ "$status" -ne 0 ]
   summary="$EVIDENCE_ROOT/fixture-recovery-001/extraction-summary.json"
   [ "$(jq -r .ok "$summary")" = false ]
   jq -e '.missingRequiredArtifactTypes | index("memory") != null' "$summary"
 }
 
-@test "recovery validates existing memory and leaves watcher screenshot absent" {
+@test 'recovery validates existing memory and leaves watcher screenshot absent' {
   export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
-  mkdir "$EVIDENCE_ROOT"; make_recovery_mocks; write_recovery_metadata
-  write_elf_memory_fixture "$EVIDENCE_ROOT/fixture-recovery-001/vm-memory.elf"
-  run_recovery
+  mkdir "$EVIDENCE_ROOT"; MakeRecoveryMocks; WriteRecoveryMetadata
+  WriteElfMemoryFixture "$EVIDENCE_ROOT/fixture-recovery-001/vm-memory.elf"
+  RunRecovery
   [ "$status" -eq 0 ]
   summary="$EVIDENCE_ROOT/fixture-recovery-001/extraction-summary.json"
   [ "$(jq -r .ok "$summary")" = true ]
@@ -264,10 +259,10 @@ write_elf_memory_fixture() {
   ! grep -Eq '(^| )delete (pvc|volumesnapshot)( |/)' "$OC_LOG"
 }
 
-@test "recovery reaches archive creation with existing output" {
+@test 'recovery reaches archive creation with existing output' {
   export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
-  mkdir "$EVIDENCE_ROOT"; make_recovery_mocks; write_recovery_metadata
-  printf stale > "$EVIDENCE_ROOT/fixture-recovery-001/MEMORY.DMP"; run_recovery
+  mkdir "$EVIDENCE_ROOT"; MakeRecoveryMocks; WriteRecoveryMetadata
+  printf stale > "$EVIDENCE_ROOT/fixture-recovery-001/MEMORY.DMP"; RunRecovery
   [ "$status" -ne 0 ]; [[ "$output" != *'Pre-existing extraction artifact rejected'* ]]
   grep -q '^apply -f -' "$OC_LOG"
   [ -s "$EVIDENCE_ROOT/fixture-recovery-001/guest-fs--crash-info.tgz" ]
@@ -276,21 +271,21 @@ write_elf_memory_fixture() {
   grep -q '^-n fixture-ns delete pod/' "$OC_LOG"
 }
 
-@test "recovery handles unavailable guestfish without requiring storage metadata" {
+@test 'recovery handles unavailable guestfish without requiring storage metadata' {
   export EVIDENCE_ROOT="$BATS_TMPDIR/evidence" OC_LOG="$BATS_TMPDIR/oc.log"
-  mkdir "$EVIDENCE_ROOT"; make_recovery_mocks; write_recovery_metadata
-  rm -rf "$EVIDENCE_ROOT/fixture-recovery-001"; write_recovery_metadata; rm "$EVIDENCE_ROOT/.bsod-storage-identity"
+  mkdir "$EVIDENCE_ROOT"; MakeRecoveryMocks; WriteRecoveryMetadata
+  rm -rf "$EVIDENCE_ROOT/fixture-recovery-001"; WriteRecoveryMetadata; rm "$EVIDENCE_ROOT/.bsod-storage-identity"
   jq 'del(.evidenceMount)' "$BATS_TMPDIR/metadata.json" > "$BATS_TMPDIR/metadata.tmp"
   mv "$BATS_TMPDIR/metadata.tmp" "$BATS_TMPDIR/metadata.json"
-  write_elf_memory_fixture "$EVIDENCE_ROOT/fixture-recovery-001/vm-memory.elf"; run_recovery
+  WriteElfMemoryFixture "$EVIDENCE_ROOT/fixture-recovery-001/vm-memory.elf"; RunRecovery
   [ "$status" -eq 0 ]
-  rm -rf "$EVIDENCE_ROOT/fixture-recovery-001"; write_recovery_metadata; MISSING_GUESTFISH=1; run_recovery
+  rm -rf "$EVIDENCE_ROOT/fixture-recovery-001"; WriteRecoveryMetadata; MISSING_GUESTFISH=1; RunRecovery
   [ "$status" -ne 0 ]
   [[ "$output" == *guestfish* ]]
   [ ! -e "$EVIDENCE_ROOT/fixture-recovery-001/stage-errors.jsonl" ]
 }
 
-make_watcher_mocks() {
+MakeWatcherMocks() {
   cat > "$BATS_TMPDIR/mockbin/guest-agent" <<'EOF'
 #!/usr/bin/env bash
 count=0; [[ ! -f "$PING_COUNT" ]] || count="$(<"$PING_COUNT")"; count=$((count+1)); echo "$count" > "$PING_COUNT"
@@ -345,48 +340,48 @@ EOF
   chmod +x "$BATS_TMPDIR/mockbin/guest-agent" "$BATS_TMPDIR/mockbin/virtctl" "$BATS_TMPDIR/mockbin/oc" "$BATS_TMPDIR/mockbin/host-signals" "$BATS_TMPDIR/mockbin/recovery"
 }
 
-write_watcher_metadata() {
+WriteWatcherMetadata() {
   mkdir -p "$BATS_TMPDIR/evidence/fixture-watch-001"
   jq -n --arg out "$BATS_TMPDIR/evidence/fixture-watch-001" \
     '{runId:"fixture-watch-001",outputDir:$out,namespace:"fixture-ns",vm:"fixture-vm",launcherPod:"launcher",domain:"fixture-ns_fixture-vm",node:"node",diskTarget:"vda",memoryDumpPvc:"memory-pvc"}' > "$BATS_TMPDIR/metadata.json"
 }
 
-run_watcher() {
+RunWatcher() {
   run env PATH="$BATS_TMPDIR/mockbin:$PATH" REAL_PYTHON="$REAL_PYTHON" CALL_LOG="$BATS_TMPDIR/calls.log" PING_COUNT="$BATS_TMPDIR/pings" STAT_COUNT="$BATS_TMPDIR/stats" STOPPED="$BATS_TMPDIR/stopped" \
     BLOCK_DOMSTATE="${BLOCK_DOMSTATE:-0}" BSOD_DET__GUEST_AGENT__BIN="$BATS_TMPDIR/mockbin/guest-agent" BSOD_DET__HOST_SIGNALS__BIN="$BATS_TMPDIR/mockbin/host-signals" \
     BSOD_COMMAND_TIMEOUT=1 BSOD_CAPTURE_TIMEOUT=5 BSOD_MEMORY_CAPTURE_TIMEOUT=5 BSOD_RECOVERY_TIMEOUT=10 BSOD_ARMED_TIMEOUT=20 \
-    bash "$HOST_DIR/watch-crash.sh" --ns fixture-ns --vm fixture-vm --out "$BATS_TMPDIR/evidence/fixture-watch-001" \
+    bash "$hostDir/watch-crash.sh" --ns fixture-ns --vm fixture-vm --out "$BATS_TMPDIR/evidence/fixture-watch-001" \
       --metadata "$BATS_TMPDIR/metadata.json" --run-id fixture-watch-001 --ready-file "$BATS_TMPDIR/evidence/fixture-watch-001/ready" --interval 1 --miss 1 --idle-samples 2 --quiesce-wait 10
 }
 
-@test "ARCHIVED: watcher arms, samples before capture, and completes fixture recovery" {
-  skip "legacy end-to-end fixture assumes old timing/recovery mocks; current watcher integration simulation is not implemented"
-  make_watcher_mocks; write_watcher_metadata; run_watcher
+@test 'ARCHIVED: watcher arms, samples before capture, and completes fixture recovery' {
+  skip 'legacy end-to-end fixture assumes old timing/recovery mocks; current watcher integration simulation is not implemented'
+  MakeWatcherMocks; WriteWatcherMetadata; RunWatcher
   [ "$status" -eq 0 ]
   [ "$(<"$BATS_TMPDIR/evidence/fixture-watch-001/ready")" = fixture-watch-001 ]
   [ "$(jq -r .ok "$BATS_TMPDIR/evidence/fixture-watch-001/evidence-summary.json")" = true ]
-  stat_line="$(grep -n 'virsh domstats' "$BATS_TMPDIR/calls.log" | head -1 | cut -d: -f1)"
-  shot_line="$(grep -n 'virtctl vnc screenshot' "$BATS_TMPDIR/calls.log" | head -1 | cut -d: -f1)"
-  [ "$stat_line" -lt "$shot_line" ]
+  statLine="$(grep -n 'virsh domstats' "$BATS_TMPDIR/calls.log" | head -1 | cut -d: -f1)"
+  shotLine="$(grep -n 'virtctl vnc screenshot' "$BATS_TMPDIR/calls.log" | head -1 | cut -d: -f1)"
+  [ "$statLine" -lt "$shotLine" ]
   grep -q 'virtctl memory-dump get' "$BATS_TMPDIR/calls.log"
   grep -q 'virtctl memory-dump download' "$BATS_TMPDIR/calls.log"
   ! grep -q '/dev/stdout' "$BATS_TMPDIR/calls.log"
 }
 
-@test "ARCHIVED: blocked remote state call times out and never stops the VM" {
-  skip "legacy end-to-end fixture assumes old timing/recovery mocks; current watcher integration simulation is not implemented"
-  make_watcher_mocks; write_watcher_metadata; BLOCK_DOMSTATE=1; run_watcher
+@test 'ARCHIVED: blocked remote state call times out and never stops the VM' {
+  skip 'legacy end-to-end fixture assumes old timing/recovery mocks; current watcher integration simulation is not implemented'
+  MakeWatcherMocks; WriteWatcherMetadata; BLOCK_DOMSTATE=1; RunWatcher
   [ "$status" -ne 0 ]
   ! grep -q 'virtctl stop' "$BATS_TMPDIR/calls.log"
   grep -q 'ambiguous or unavailable crash evidence' "$BATS_TMPDIR/evidence/fixture-watch-001/stage-errors.jsonl"
 }
 
-@test "ARCHIVED: readiness waits for ping/event arming and TERM exits instead of resuming" {
-  skip "legacy end-to-end fixture assumes old timing/recovery mocks; current watcher integration simulation is not implemented"
-  make_watcher_mocks; write_watcher_metadata
+@test 'ARCHIVED: readiness waits for ping/event arming and TERM exits instead of resuming' {
+  skip 'legacy end-to-end fixture assumes old timing/recovery mocks; current watcher integration simulation is not implemented'
+  MakeWatcherMocks; WriteWatcherMetadata
   env PATH="$BATS_TMPDIR/mockbin:$PATH" REAL_PYTHON="$REAL_PYTHON" CALL_LOG="$BATS_TMPDIR/calls.log" PING_COUNT="$BATS_TMPDIR/pings" STAT_COUNT="$BATS_TMPDIR/stats" STOPPED="$BATS_TMPDIR/stopped" FIRST_PING_DELAY=2 \
     BSOD_DET__GUEST_AGENT__BIN="$BATS_TMPDIR/mockbin/guest-agent" BSOD_DET__HOST_SIGNALS__BIN="$BATS_TMPDIR/mockbin/host-signals" BSOD_ARMED_TIMEOUT=30 \
-    bash "$HOST_DIR/watch-crash.sh" --ns fixture-ns --vm fixture-vm --out "$BATS_TMPDIR/evidence/fixture-watch-001" --metadata "$BATS_TMPDIR/metadata.json" --run-id fixture-watch-001 --ready-file "$BATS_TMPDIR/evidence/fixture-watch-001/ready" --interval 5 --miss 2 >"$BATS_TMPDIR/watcher.out" 2>&1 &
+    bash "$hostDir/watch-crash.sh" --ns fixture-ns --vm fixture-vm --out "$BATS_TMPDIR/evidence/fixture-watch-001" --metadata "$BATS_TMPDIR/metadata.json" --run-id fixture-watch-001 --ready-file "$BATS_TMPDIR/evidence/fixture-watch-001/ready" --interval 5 --miss 2 >"$BATS_TMPDIR/watcher.out" 2>&1 &
   pid=$!
   sleep 1; [ ! -e "$BATS_TMPDIR/evidence/fixture-watch-001/ready" ]
   for _ in {1..10}; do [[ -e "$BATS_TMPDIR/evidence/fixture-watch-001/ready" ]] && break; sleep 1; done
@@ -396,31 +391,31 @@ run_watcher() {
   ! kill -0 "$pid" 2>/dev/null
 }
 
-@test "watcher help preserves an unrelated file.0x sentinel in TMPDIR" {
+@test 'watcher help preserves an unrelated file.0x sentinel in TMPDIR' {
   local sentinel="$BATS_TMPDIR/file.0x-unrelated"
   printf 'keep this unrelated file\n' > "$sentinel"
 
-  run env TMPDIR="$BATS_TMPDIR" bash "$HOST_DIR/watch-crash.sh" --help
+  run env TMPDIR="$BATS_TMPDIR" bash "$hostDir/watch-crash.sh" --help
 
   [ "$status" -eq 0 ]
   [ -f "$sentinel" ]
   [ "$(<"$sentinel")" = 'keep this unrelated file' ]
 }
 
-@test "dump parser handles quoted paths and returns semantic failures nonzero" {
+@test 'dump parser handles quoted paths and returns semantic failures nonzero' {
   weird="$BATS_TMPDIR/a' [fixture] --dump.dmp"
   "$REAL_PYTHON" -c 'import struct,sys; d=bytearray(96); d[:8]=b"PAGEDU64"; struct.pack_into("<I",d,0x38,10); open(sys.argv[1],"wb").write(d)' "$weird"
-  run bash "$HOST_DIR/parse-dump-header.sh" "$weird"
+  run bash "$hostDir/parse-dump-header.sh" "$weird"
   [ "$status" -eq 0 ]; [ "$(jq -r .ok <<<"$output")" = true ]
   "$REAL_PYTHON" -c 'import struct,sys; d=bytearray(96); d[:8]=b"PAGEDU64"; struct.pack_into("<I",d,0x38,57005); open(sys.argv[1],"wb").write(d)' "$weird"
-  run bash "$HOST_DIR/parse-dump-header.sh" "$weird"
+  run bash "$hostDir/parse-dump-header.sh" "$weird"
   [ "$status" -ne 0 ]; [ "$(jq -r .ok <<<"$output")" = false ]
 }
 
-@test "source contracts use bounded file capture and the current trigger entry point" {
-  ! grep -q 'memory-dump .*\/dev\/stdout' "$HOST_DIR/watch-crash.sh"
-  grep -q 'virtctl vnc screenshot' "$HOST_DIR/watch-crash.sh"
-  grep -q 'virtctl memory-dump get' "$HOST_DIR/watch-crash.sh"
-  grep -q 'extract--guest-os--crash-info.sh' "$HOST_DIR/watch-crash.sh"
+@test 'source contracts use bounded file capture and the current trigger entry point' {
+  ! grep -q 'memory-dump .*\/dev\/stdout' "$hostDir/watch-crash.sh"
+  grep -q 'virtctl vnc screenshot' "$hostDir/watch-crash.sh"
+  grep -q 'virtctl memory-dump get' "$hostDir/watch-crash.sh"
+  grep -q 'extract--guest-os--crash-info.sh' "$hostDir/watch-crash.sh"
   grep -q 'exec-crash' "$REPO_ROOT/src/scripts/crash-injector/trigger-bsod-intentional.sh"
 }
