@@ -15,7 +15,7 @@ Asserted behavior:
 * extractor missing: preflight exits 1, names the missing extractor, stops
   there without reaching its next check, and runs none of the stubbed tools;
 * extractor present (control): preflight passes the helper check and exits 1 at
-  the next check, the guest configuration inputs, which the mirror omits.
+  the next check, the guest validation inputs, which the mirror omits.
 
 Out of scope here, because existing tests exercise it:
 
@@ -30,7 +30,7 @@ Limits: ``requiredTools`` mirrors the tools preflight requires before its helper
 check. If preflight starts requiring another tool, or runs another external
 command through ``PATH`` before that check, the hermetic ``PATH`` makes the run
 stop early and these tests fail with preflight's output in the message. A
-command called by absolute path is not caught. Moving the guest configuration
+command called by absolute path is not caught. Moving the guest validation
 check ahead of the helper check also fails these tests, although preflight
 would still fail closed. They do not show that a full preflight run succeeds.
 '''
@@ -47,7 +47,7 @@ extractorName = 'extract--guest-os--crash-info.sh'
 preflightName = 'preflight-rhov.sh'
 requiredTools = ('oc', 'virtctl', 'jq', 'python3', 'sha256sum', 'findmnt', 'timeout', 'realpath', 'sync')
 realCommands = ('bash', 'dirname')
-guestConfigError = 'preflight-rhov: ERROR: guest configuration inputs are missing'
+guestConfigError = 'preflight-rhov: ERROR: guest validation inputs are missing'
 stubScript = '''#!/bin/sh
 printf '%s\\n' "${0##*/} $*" >> "${STUB_LOG}"
 exit 97
@@ -120,12 +120,12 @@ class PreflightExtractorHelperTests(unittest.TestCase):
         with self.subTest(check='extractor accepted'):
             self.assertNotIn(self.missingHelperError, lines,
                              f'preflight rejected a present extractor; stderr:\n{result.stderr}')
-        # The guest configuration check follows the helper check; reaching it shows the helper check passed.
+        # The guest validation check follows the helper check; reaching it shows the helper check passed.
         with self.subTest(check='reached the next check'):
             self.assertIn(guestConfigError, lines,
                           f'preflight stopped somewhere other than the next check; stderr:\n{result.stderr}')
         with self.subTest(check='no stubbed tool ran'):
-            self.assertEqual(self.StubCalls(), [], 'preflight ran a required tool before its guest configuration check')
+            self.assertEqual(self.StubCalls(), [], 'preflight ran a required tool before its guest validation check')
 
 
 if __name__ == '__main__':
