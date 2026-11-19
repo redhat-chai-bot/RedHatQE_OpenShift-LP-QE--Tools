@@ -50,7 +50,7 @@
     }
     On failure: { "ok": false, "error": "...", "script": "validate-crash-settings.ps1" } with exit code
     2 (unknown dump type) or 4 (NotMyFault could not be staged; the full result above is emitted with
-    ok = false and the error, so settings mismatches stay visible; the host preflight then stops).
+    ok = false and the error, so settings mismatches stay visible; callers should treat it as a failure).
     A missing data file is a terminating error. A settings mismatch is reported in the JSON, not
     through the exit code.
 #>
@@ -235,8 +235,8 @@ function Get-NotMyFaultTrustProblem ([string]$path) {
 # Stages the current NotMyFault release for an intentional crash run and returns its record.
 # Any earlier copy at the staging path is removed first and never reused, so the trigger can only
 # find the copy downloaded and verified now. An untrusted download is deleted, never staged.
-# C:\Temp\nmf is a fixed contract shared with the host preflight and trigger scripts, which check
-# that exact path through the guest agent (a per-user $env:TEMP would differ).
+# C:\Temp\nmf is a fixed staging path that callers check through the guest agent (a per-user
+# $env:TEMP would differ).
 function Invoke-NotMyFaultStaging ([string]$source) {
     $nmfDir = 'C:\Temp\nmf'
     $nmfPath = "${nmfDir}\notmyfaultc64.exe"
