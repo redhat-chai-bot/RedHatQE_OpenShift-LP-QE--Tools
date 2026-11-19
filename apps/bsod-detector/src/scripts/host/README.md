@@ -419,6 +419,19 @@ guest-agent.py <cmd>
 
 ---
 
+## Guest crash-setting validator (caller contract)
+
+`src/scripts/guest/validate-crash-settings.ps1` is the read-only replacement for the guest crash-dump configuration script. The current `preflight-rhov.sh` (described above) still uploads and runs `configure-dumps.ps1` (path override `BSOD_DET__CONFIGURE__DUMPS`) and still requires `rebootRequired == false`; adopting the validator in the host preflight is pending in pull request #39. Until that change lands, the preflight's guest crash-dump step needs `configure-dumps.ps1`, which the validator pull request removes, so the two changes have to land together.
+
+A host caller that adopts the validator:
+
+- Copies the script and `src/data/crash-control.json` to the guest and runs `validate-crash-settings.ps1 -dataFile <guest path of crash-control.json>`. It adds `-stageNotMyFault` only for an intentional crash run; normal validation downloads and stages nothing. Parameter names are camelCase, and PowerShell also binds the former `-DataFile`/`-StageNotMyFault` spellings.
+- Reads one JSON object from stdout and stops unless `ok`, `matchesRecommended` and `pageFile.adequate` are true and `current.AutoReboot` is 0. A mismatch keeps exit code 0. The fix is to rebuild or correct the golden image: the validator never writes the registry, CIM settings or the page file and never reboots or crashes the guest.
+- Treats any non-zero exit code as a failure, including 2 (unknown dump type) and 4 (NotMyFault staging failed; the full settings result is still emitted with `ok: false` and `error`).
+- With `-stageNotMyFault`, finds the freshly downloaded, signature-checked copy at `C:\Temp\nmf\notmyfaultc64.exe` and can keep the reported `notMyFault` record (source, resolved source, archive and executable SHA-256, version, signer).
+
+The validator's help and the guest README (`src/scripts/guest/README.md`, updated in its own pull request) document every output field; the validator test pull request adds `test/test_validate_crash_settings_contract.py`, which checks this output against the real script with its system commands mocked, and `test/test_preflight_crash_settings.py`, which specifies the host integration listed above against the real `preflight-rhov.sh`; it fails against the current preflight until pull request #39 lands.
+
 ## Execution Flow (Intentional Crash)
 
 ```
