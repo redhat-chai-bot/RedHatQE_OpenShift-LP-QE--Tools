@@ -30,7 +30,7 @@ The descriptions below document what the scripts in this directory do; they do n
 
 Do not seal if the post-reboot script reports `FAIL` or exits with code 1. It prints a sealing command after its checks pass and its cleanup succeeds, but does not execute that command itself.
 
-`validate-crash-settings.ps1` is a run-time check meant for a host caller to run before arming a crash test, not a step of the golden-image pair; it never repairs a mismatch. Its desired values come from its configuration, so they can differ from the fixed golden-image settings. No host script calls it yet: the current `src/scripts/host/preflight-rhov.sh` still uploads the former guest configuration script with `crash-control.json` and requires that script to report no pending reboot. Moving the preflight to this validator is a separate, planned change; until then nothing runs the validator automatically.
+`validate-crash-settings.ps1` is a run-time check meant for a host caller to run before arming a crash test, not a step of the golden-image pair; it never repairs a mismatch. Its desired values come from its configuration, so they can differ from the fixed golden-image settings. Its host caller is `src/scripts/host/preflight-rhov.sh`; the host README (`src/scripts/host/README.md`) describes how that caller uses the result.
 
 ## 1. golden-image-pre-reboot.ps1
 
