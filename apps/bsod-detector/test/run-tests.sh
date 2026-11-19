@@ -23,6 +23,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
   "${testDir}/test_validate_crash_settings_unit.py" \
   "${testDir}/test_validate_crash_settings_contract.py" \
   "${testDir}/test_validate_crash_settings_main_flow.py" \
+  "${testDir}/test_preflight_crash_settings.py" \
   "${testDir}/test_golden_image_post_reboot.py" \
   "${testDir}/test_recursive_mapping.py" \
   "${testDir}/test_extractor_contract.py" \
