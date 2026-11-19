@@ -37,8 +37,8 @@ A catalog of what ships in this tool and why each file is kept.
 
 | File | Description |
 |---|---|
-| `configure-dumps.ps1` | Configure CrashControl registry settings (`AutoReboot=0`, dump type). |
-| `golden-image-pre-reboot.ps1` | Prepare the golden image before sealing: VirtIO drivers, guest agent, pvpanic, recovery disabled, crash-dump registry, pre-allocated `DedicatedDump.sys` and `pagefile.sys` (reboots at the end). |
+| `validate-crash-settings.ps1` | Read-only comparison of the guest's CrashControl settings with `crash-control.json` (no writes or reboot); with `-stageNotMyFault` stages the latest NotMyFault and reports its SHA-256. |
+| `golden-image-pre-reboot.ps1` | Prepare the golden image before sealing: fetch the latest virtio-win ISO over HTTPS and record its SHA-256 (a cached copy is reused only when it is that same release and still matches its recorded SHA-256), install the QEMU Guest Agent, attempt to install the VirtIO storage drivers, write the CrashControl values (Automatic memory dump, `AutoReboot=0`, no `DedicatedDumpFile`) and configure one fixed `C:\pagefile.sys` of RAM + 257 MB (reboots at the end). It installs no pvpanic driver and leaves Windows boot-recovery settings at their defaults. |
 | `golden-image-post-reboot.ps1` | Verify after that reboot that the golden-image crash settings are active; all checks must pass before sealing. |
 
 ---
@@ -48,7 +48,7 @@ A catalog of what ships in this tool and why each file is kept.
 | File | Consumed by |
 |---|---|
 | `bugcheck-codes.json` | parse-dump-header.sh |
-| `crash-control.json` | configure-dumps.ps1, preflight-rhov.sh |
+| `crash-control.json` | validate-crash-settings.ps1 (read-only comparison); golden-image-pre-reboot.ps1 writes the same values; preflight-rhov.sh still copies it to the guest for the former configuration script until pull request #39 moves it to the validator |
 | `event-sources.json` | Reference data only (no active script consumer) |
 | `host-signals.json` | collect-host-signals.sh (host-only) |
 
