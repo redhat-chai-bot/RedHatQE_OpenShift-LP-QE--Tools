@@ -166,7 +166,7 @@ evidence-summary.json        (final pipeline verdict)
 
 **2. Helper scripts present**
 - All pipeline helpers must exist and be readable: `guest-agent.py`, `reliability.py`, `extract--guest-os--crash-info.sh`, `collect-host-signals.sh`, `parse-dump-header.sh`
-- Guest validation inputs must exist: `validate-crash-settings.ps1` (or the file named by `BSOD_DET__VALIDATE__CRASH_SETTINGS`; the deprecated `BSOD_DET__CONFIGURE__DUMPS` alias must also name a `validate-crash-settings.ps1`), `crash-control.json`
+- Guest config inputs must exist: `configure-dumps.ps1`, `crash-control.json`
 
 **3. Evidence mount validation**
 - Evidence root must be an existing non-symlink directory
@@ -196,19 +196,24 @@ evidence-summary.json        (final pipeline verdict)
 **6. QGA liveness**
 - QGA ping via `guest-agent.py ping` — 5 retries × 3s sleep
 - Die if all retries fail (VM not ready for crash injection)
-- No bootstrap: preflight never downloads or installs the agent. An agent that does not answer is a golden-image problem (`golden-image-pre-reboot.ps1` installs it, `golden-image-post-reboot.ps1` checks it)
 
-**7. Guest crash-setting validation (read-only)**
-- Upload `validate-crash-settings.ps1` and `crash-control.json` (to `C:\Windows\Temp`) with `guest-agent.py psfile` and run `validate-crash-settings.ps1 -dataFile C:\Windows\Temp\crash-control.json`; with `--require-trigger` it also passes `-stageNotMyFault`
-- Die on a non-zero exit, on output that is not JSON, or unless `script` is `validate-crash-settings.ps1`, `action` is `validated`, `ok` and `matchesRecommended` and `pageFile.adequate` are `true` and `current.AutoReboot` is `0` (typed comparisons: `"0"` or `"true"` strings fail)
-- With `--require-trigger`, also die unless `notMyFault.status` is `staged` with 64-hex `sha256` and `archiveSHA256`, a `resolvedSource` under `https://download.sysinternals.com/` and `stagedPath` `C:\Temp\nmf\notmyfaultc64.exe`; that record is written to `recovery-metadata.json` as `artifacts.notMyFault` (null without `--require-trigger`)
-- Nothing is configured, installed or rebooted: a mismatch means the golden image must be rebuilt or corrected
+**7. Guest crash dump configuration**
+- Upload `configure-dumps.ps1` + `crash-control.json` to VM via guest-agent
+- Run `configure-dumps.ps1 -DataFile crash-control.json`
+- Die if output fails any of:
+  - `ok == true` — script ran successfully
+  - `matchesRecommended == true` — all registry values match expected
+  - `current.AutoReboot == 0` — VM will stay frozen after BSOD
+  - `pageFile.adequate == true` — DedicatedDumpFile or pagefile is adequate
+  - `rebootRequired == false` — no pending reboot needed; if true, do `virtctl stop && virtctl start`
 
 **8. Guest path verification**
-- `C:\Windows` exists (the staged NotMyFault is proven by the validator record above)
+- `C:\Windows` exists
+- `C:\Windows\Minidump` exists
+- If `--require-trigger`: `C:\Temp\nmf\notmyfaultc64.exe` exists (NotMyFault binary)
 
 **9. Pre-crash dump inventory**
-- Records an existing `C:\Windows\MEMORY.DMP` with path/size/mtime (no Minidump files)
+- Records all existing dump files (`MEMORY.DMP`, `Minidump\*.dmp`) with path/size/mtime
 - Stored in `recovery-metadata.json` as `preCrashInventory` for post-crash comparison
 
 **10. Generate recovery-metadata.json**
@@ -416,16 +421,16 @@ guest-agent.py <cmd>
 
 ## Guest crash-setting validator (caller contract)
 
-`src/scripts/guest/validate-crash-settings.ps1` is the read-only replacement for the former guest crash-dump configuration script. `preflight-rhov.sh` (described above) is its host caller: `BSOD_DET__VALIDATE__CRASH_SETTINGS` overrides the validator path, and `BSOD_DET__CONFIGURE__DUMPS` remains a deprecated alias (with a warning) that must name a `validate-crash-settings.ps1`. There is no fallback to the former script and no reboot check.
+`src/scripts/guest/validate-crash-settings.ps1` is the read-only replacement for the guest crash-dump configuration script. The current `preflight-rhov.sh` (described above) still uploads and runs `configure-dumps.ps1` (path override `BSOD_DET__CONFIGURE__DUMPS`) and still requires `rebootRequired == false`; adopting the validator in the host preflight is pending in pull request #39. Until that change lands, the preflight's guest crash-dump step needs `configure-dumps.ps1`, which the validator pull request removes, so the two changes have to land together.
 
-A host caller of the validator (preflight-rhov.sh does all of the following):
+A host caller that adopts the validator:
 
 - Copies the script and `src/data/crash-control.json` to the guest and runs `validate-crash-settings.ps1 -dataFile <guest path of crash-control.json>`. It adds `-stageNotMyFault` only for an intentional crash run; normal validation downloads and stages nothing. Parameter names are camelCase, and PowerShell also binds the former `-DataFile`/`-StageNotMyFault` spellings.
 - Reads one JSON object from stdout and stops unless `ok`, `matchesRecommended` and `pageFile.adequate` are true and `current.AutoReboot` is 0. A mismatch keeps exit code 0. The fix is to rebuild or correct the golden image: the validator never writes the registry, CIM settings or the page file and never reboots or crashes the guest.
 - Treats any non-zero exit code as a failure, including 2 (unknown dump type) and 4 (NotMyFault staging failed; the full settings result is still emitted with `ok: false` and `error`).
 - With `-stageNotMyFault`, finds the freshly downloaded, signature-checked copy at `C:\Temp\nmf\notmyfaultc64.exe` and can keep the reported `notMyFault` record (source, resolved source, archive and executable SHA-256, version, signer).
 
-The validator's help and the guest README (`src/scripts/guest/README.md`, updated in its own pull request) document every output field; the validator test pull request adds `test/test_validate_crash_settings_contract.py`, which checks this output against the real script with its system commands mocked, and `test/test_preflight_crash_settings.py`, which runs the real `preflight-rhov.sh` against stubbed cluster and guest tools.
+The validator's help and the guest README (`src/scripts/guest/README.md`, updated in its own pull request) document every output field; the validator test pull request adds `test/test_validate_crash_settings_contract.py`, which checks this output against the real script with its system commands mocked, and `test/test_preflight_crash_settings.py`, which specifies the host integration listed above against the real `preflight-rhov.sh`; it fails against the current preflight until pull request #39 lands.
 
 ## Execution Flow (Intentional Crash)
 
@@ -433,7 +438,7 @@ The validator's help and the guest README (`src/scripts/guest/README.md`, update
 trigger-bsod-intentional.sh
   ├─ preflight-rhov.sh
   │    ├─ QGA ping (5 retries)
-  │    ├─ validate-crash-settings.ps1 (read-only) → settings match, AutoReboot=0, page file adequate (+ NotMyFault staged with --require-trigger)
+  │    ├─ configure-dumps.ps1 → verify rebootRequired=false
   │    └─ write recovery-metadata.json
   │
   ├─ Clear and verify stale guest dumps
@@ -493,8 +498,8 @@ All variables follow Red Hat Chaos Team naming: `BSOD_DET__[<COMPONENT>__]<NAME>
 4. **VM and VMI state** (lines 162–172): runStrategy=Manual, VMI phase=Running, PVC modes
 5. **Recovery image capability probe** (lines 169–172): Temporary pod validates bash + guestfish contract
 6. **QGA liveness** (lines 174–176): Ping guest via QEMU Guest Agent (5 retries)
-7. **Guest crash-setting validation**: Upload and run the read-only validate-crash-settings.ps1; require a matching typed result (and a staged NotMyFault with --require-trigger)
-8. **Guest path verification**: Verify C:\Windows exists
+7. **Guest crash dump configuration** (lines 178–186): Upload configure-dumps.ps1, verify settings effective (not pending reboot)
+8. **Guest path verification** (lines 188–191): Verify C:\Windows, C:\Windows\Minidump exist; NotMyFault binary if required
 9. **Pre-crash dump inventory** (lines 193–195): Record baseline dumps for post-crash comparison
 10. **Generate recovery-metadata.json** (lines 197–210): Write all validated state for downstream scripts
 
