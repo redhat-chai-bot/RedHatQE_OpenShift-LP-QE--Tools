@@ -1,12 +1,11 @@
 {
-  "_comment": "Source of truth for crash-dump configuration. The configure step (configure-dumps.ps1) applies these registry values under CrashControl so a dump is actually written when a BSOD occurs; the collector verifies the live settings match before trusting that a dump would have been produced. 'crashDumpType' values follow the CrashDumpEnabled registry semantics.",
+  "_comment": "Source of truth for crash-dump settings. golden-image-pre-reboot.ps1 writes the same values into the golden image and golden-image-post-reboot.ps1 verifies them; at run time validate-crash-settings.ps1 only compares the live registry with recommended.values (value and type) and recommended.absentValues and reports mismatches without changing anything. 'crashDumpType' values follow the CrashDumpEnabled registry semantics.",
   "_source": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\CrashControl. See Microsoft docs: 'Overview of memory dump file options for Windows'.",
   "registryPath": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\CrashControl",
   "crashDumpTypes": {
     "none":      { "CrashDumpEnabled": 0, "description": "No dump written." },
-    "complete":  { "CrashDumpEnabled": 1, "description": "Complete memory dump: entire physical memory. Requires page file >= RAM size (+1MB) or a dedicated dump file." },
+    "complete":  { "CrashDumpEnabled": 1, "description": "Complete memory dump: entire physical memory. Requires a page file >= RAM size (+1MB); this project does not use a dedicated dump file." },
     "kernel":    { "CrashDumpEnabled": 2, "description": "Kernel memory dump: kernel-mode read/write pages only. Good default for driver crashes." },
-    "small":     { "CrashDumpEnabled": 3, "description": "Small (mini) dump, 64KB-ish, written to %SystemRoot%\\Minidump. Minimum useful dump." },
     "automatic": { "CrashDumpEnabled": 7, "description": "Automatic memory dump (Win8+): like kernel dump but lets the OS manage page-file sizing." },
     "filtered":  { "CrashDumpEnabled": 11, "description": "Variable size. Filters out VM host/guest memory overhead, making offline extraction faster than full complete dumps on high-RAM servers." }
   },
@@ -18,15 +17,14 @@
       "Overwrite": 1,
       "LogEvent": 1,
       "AutoReboot": 0,
-      "MinidumpDir": "%SystemRoot%\\Minidump",
-      "DumpFile": "%SystemRoot%\\MEMORY.DMP",
-      "DedicatedDumpFile": "C:\\DedicatedDump.sys"
+      "DumpFile": "%SystemRoot%\\MEMORY.DMP"
     },
-    "notes": "CrashDumpEnabled=7 (Automatic). pagefile.sys cannot be created on KVM with VirtIO Balloon; full physical memory captured via KubeVirt vm-memory.elf.tar.gz. AutoReboot=0 keeps VM frozen. Minidump and on-disk MEMORY.DMP are blocked on this platform."
+    "absentValues": ["DedicatedDumpFile"],
+    "notes": "CrashDumpEnabled=7 (Automatic). AutoReboot=0 stops Windows from rebooting itself after the simulated crash, so the frozen VM keeps its memory for capture (src/scripts/host/watch-crash.sh still starts the VM again afterwards unless it runs with --no-restart). Dumps go through the page file only: golden-image-pre-reboot.ps1 configures a fixed C:\\pagefile.sys of RAM + 257 MB and no DedicatedDumpFile. Small (mini) dumps are not part of this flow. KubeVirt vm-memory.elf.tar.gz captures full physical memory and the disk is extracted offline."
   },
   "pageFile": {
     "path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management",
     "value": "PagingFiles",
-    "notes": "A complete dump needs a system-managed or fixed page file on the system drive at least as large as physical RAM (+1MB). Kernel/automatic dumps need less but still require a page file on the system volume, or a DedicatedDumpFile configured under CrashControl."
+    "notes": "Adequate when PagingFiles holds an entry on C: (\"<path> <initialMB> <maxMB>\") whose initial and maximum sizes are both at least physical RAM + 257 MB, the size golden-image-pre-reboot.ps1 configures. System-managed or missing page files are not adequate; DedicatedDumpFile is not used."
   }
 }
