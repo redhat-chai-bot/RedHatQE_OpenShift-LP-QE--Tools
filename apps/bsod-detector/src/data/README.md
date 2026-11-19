@@ -25,9 +25,11 @@ Bug-check (stop) code -> name + description. Keyed by canonical `0x`-prefixed
 ### `crash-control.json`
 Crash-dump registry configuration under `CrashControl`, dump-type semantics, and
 page-file requirements.
-- **Consumers:** `validate-crash-settings.ps1` (run by `preflight-rhov.sh`) compares the live registry with
-  `recommended.values` (value and registry type) and `recommended.absentValues` and reports mismatches; it never
-  writes or reboots. `golden-image-pre-reboot.ps1` configures the same settings in the golden image.
+- **Consumers:** `validate-crash-settings.ps1` compares the live registry with `recommended.values` (value and
+  registry type) and `recommended.absentValues` and reports mismatches; it never writes or reboots. No host script
+  calls it yet: `preflight-rhov.sh` still copies this file to the guest for the former configuration script until the
+  preflight moves to the validator in a separate change. `golden-image-pre-reboot.ps1` configures the same settings
+  in the golden image.
 
 ### `event-sources.json`
 Crash-relevant event log `log` / `source` / `eventId` entries with meaning.
