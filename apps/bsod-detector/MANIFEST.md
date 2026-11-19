@@ -48,7 +48,7 @@ A catalog of what ships in this tool and why each file is kept.
 | File | Consumed by |
 |---|---|
 | `bugcheck-codes.json` | parse-dump-header.sh |
-| `crash-control.json` | validate-crash-settings.ps1 (read-only comparison); golden-image-pre-reboot.ps1 writes the same values; preflight-rhov.sh still copies it to the guest for the former configuration script |
+| `crash-control.json` | validate-crash-settings.ps1 (read-only comparison); golden-image-pre-reboot.ps1 writes the same values; preflight-rhov.sh copies it to the guest and runs the validator against it |
 | `event-sources.json` | Reference data only (no active script consumer) |
 | `host-signals.json` | collect-host-signals.sh (host-only) |
 
