@@ -741,7 +741,7 @@ trigger-bsod-intentional.sh
   │               ├── Auto-create memory-dump PVC if missing
   │               ├── Auto-create evidence PVC if missing
   │               ├── QGA ping (5 retries)
-  │               ├── Read-only crash-setting validation (validate-crash-settings.ps1)
+  │               ├── Crash dump registry validation (rebootRequired=false)
   │               └── Write recovery-metadata.json
   ├── Phase 2b: Add pvpanic device via QMP + pre-capture domain.xml + vmi-spec.json
   ├── Phase 2c: Upload notmyfaultc64.exe to VM via QGA
@@ -874,7 +874,6 @@ apps/bsod-detector/
 | `BSOD_DET__READY__TIMEOUT` | No | `300` | Watcher readiness timeout |
 | `BSOD_DET__PREFLIGHT__TIMEOUT` | No | `300` | Positive-integer validation only; trigger currently uses a fixed 1800s preflight timeout |
 | `BSOD_DET__GUEST_FS__CTR_IMG` | No | Pinned nightly tag | `virtctl guestfs` image; no legacy fallback |
-| `BSOD_DET__CRASH_CONTROL__FILE` | No | `src/data/crash-control.json` | crash-control.json that preflight copies to the guest for `validate-crash-settings.ps1` |
-| `BSOD_DET__VALIDATE__CRASH_SETTINGS` | No | `src/scripts/guest/validate-crash-settings.ps1` | Read-only guest validator that preflight runs; the file must be named `validate-crash-settings.ps1` |
-| `BSOD_DET__CONFIGURE__DUMPS` | No | — | Deprecated alias of `BSOD_DET__VALIDATE__CRASH_SETTINGS` (preflight warns); it must also name a `validate-crash-settings.ps1` |
+| `BSOD_DET__CRASH_CONTROL__FILE` | No | `src/data/crash-control.json` | crash-control.json that the current preflight passes to `configure-dumps.ps1` (`BSOD_DET__CONFIGURE__DUMPS`); that script is replaced by `validate-crash-settings.ps1`, which the host preflight has not adopted yet (pending in pull request #39) |
+| `BSOD_DET__QEMU_GA_MSI_URL` | No | `latest-virtio/qemu-ga-x86_64.msi` on fedorapeople.org | MSI that preflight uploads when the guest agent does not answer |
 | `BSOD_DET__RECOVERY__IMAGE` | No | — | Digest-pinned recovery image |
