@@ -10,7 +10,7 @@ fail when those copies drift from the table. If a table is wrong, fix it here an
 | File | Consumed by |
 |---|---|
 | `bugcheck-codes.json` | Host-side scripts (parse-dump-header.sh) |
-| `crash-control.json` | Guest-side (golden-image-pre-reboot.ps1 writes the same values; validate-crash-settings.ps1 compares them read-only); preflight-rhov.sh still copies it to the guest for the former configuration script |
+| `crash-control.json` | Guest-side (golden-image-pre-reboot.ps1 writes the same values; validate-crash-settings.ps1 compares them read-only); preflight-rhov.sh copies it to the guest and runs the validator against it |
 | `event-sources.json` | Reference data only (no active script consumer) |
 | `host-signals.json` | **Host-only** (collect-host-signals.sh) |
 
@@ -26,9 +26,9 @@ Bug-check (stop) code -> name + description. Keyed by canonical `0x`-prefixed
 Crash-dump registry configuration under `CrashControl`, dump-type semantics, and
 page-file requirements.
 - **Consumers:** `validate-crash-settings.ps1` compares the live registry with `recommended.values` (value and
-  registry type) and `recommended.absentValues` and reports mismatches; it never writes or reboots. No host script
-  calls it yet: `preflight-rhov.sh` still copies this file to the guest for the former configuration script until the
-  preflight moves to the validator in a separate change. `golden-image-pre-reboot.ps1` configures the same settings
+  registry type) and `recommended.absentValues` and reports mismatches; it never writes or reboots. `preflight-rhov.sh`
+  copies this file to the guest (`BSOD_DET__CRASH_CONTROL__FILE` overrides the host path) and runs the validator against
+  it before arming. `golden-image-pre-reboot.ps1` configures the same settings
   in the golden image.
 
 ### `event-sources.json`
