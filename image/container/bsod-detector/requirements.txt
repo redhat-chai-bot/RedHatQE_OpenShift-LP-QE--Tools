@@ -1,4 +1,0 @@
-python-evtx==0.8.1 \
-    --hash=sha256:46336b854dbe0a1e75873ae30db5f583c9d2262ff1d21bdb6b1e624ecfa18ddb
-hexdump==3.3 \
-    --hash=sha256:d781a43b0c16ace3f9366aade73e8ad3a7bd5137d58f0b45ab2d3f54876f20db

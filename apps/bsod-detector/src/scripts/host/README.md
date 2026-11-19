@@ -19,7 +19,6 @@ These scripts manage the full BSOD detection and artifact extraction pipeline or
 | `reliability.py` | Artifact validation, decision logic, summary generation |
 | `collect-host-signals.sh` | Parse host-side KVM/Hyper-V crash correlation signals |
 | `parse-dump-header.sh` | Extract Windows bugcheck code from crash dump headers |
-| Archived `extract-evtx.py` | Optional offline EVTX parser at `../../../archieve/src/scripts/host/extract-evtx.py`; not present in the active script tree |
 
 ---
 
@@ -238,19 +237,18 @@ Writes all collected VM/storage/config data needed by downstream scripts.
 **Purpose**: Offline NTFS artifact extraction from stopped VM disk.
 
 **Usage**: `extract--guest-os--crash-info.sh --metadata METADATA.json`.
-Optionally export `BSOD_DET__GUEST_FS__CTR_IMG` before running the extractor, watcher or container. The extractor
+Optionally export `BSOD_DET__GUEST_FS__CTR_IMG` before running the extractor or watcher. The extractor
 passes the value directly to `virtctl guestfs --image`; unset or empty uses the pinned default
 `quay.io/kubevirt/libguestfs-tools:20261112_5c3989e66e`.
 The legacy image environment variable is not consulted.
-Run it as an executable, as the watcher and container entrypoint do; it is not a sourceable shell library.
-The output directory comes only from metadata `.outputDir`; there is no extractor `--out` option.
+Run it as an executable, as the watcher does; it is not a sourceable shell library.
+The output directory comes only from metadata `.outputDir`; there is no extractor `--out` option (watcher and preflight keep theirs).
 The extractor preserves the provided path spelling and accepts existing directory aliases and arbitrary directory names.
 Metadata `.runId` is read independently of the output directory name. Existing extraction artifacts do not trigger a stale-output rejection.
 The extractor needs only `runId`, `outputDir`, `namespace`, `vm` and `guestPvc` metadata fields.
 JSON/parser/checksum generation is removed. Existing outputs are not parsed, validated or rewritten; the parser placeholder comment does not perform conversion.
 It does not revalidate evidence-mount identity or preflight-only storage/image fields.
 Preflight's persistent-storage validation is unchanged; extraction no longer checks whether that mount changed afterwards.
-Container `MODE=recover` takes the same metadata-only arguments; watcher/preflight and archived `MODE=extract` retain their own `--out` options.
 Extraction inherits stdout/stderr (captured in `watcher.log` when called by the watcher); it creates no `extraction.log` or stage-error entries. The final summary invocation is commented out pending the Python refactor; pre-existing summary and stage-error files are not revalidated or modified.
 `trap 'Cleanup "$?" "${guestfsPid}" "${guestfsStdIn}" "${hlprPod}"' EXIT` is the only cleanup; no custom INT/TERM trap
 is added. The virtctl PID and stdin descriptor start as 0, so failures before virtctl starts make no kill, wait or
@@ -291,24 +289,18 @@ upstream's 500s Pending limit).
 - Archive-only output has no loose EVTX or implicit unpacking. The extractor final validator is commented out, so missing/empty archives can return zero. The separate watcher `natural-rhov` validator still requires loose EVTX and can fail on a valid archive. The extractor no longer generates JSON or checksums.
 - Do not invoke the commented final `reliability.py write-summary` call or write a fresh `extraction-summary.json`
 
-**Optional offline tool (archived)**:
-- `extract-evtx.py` can parse extracted `.evtx` files into crash-detection JSON; it is not called by the active pipeline and requires `python-evtx`.
-- Inline python-evtx parser → `EventLogs/System.json`, `Application.json`
-
 **Output structure**:
 ```
 guest-fs--crash-info--<partition>.tgz  (archive members: Windows/System32/winevt/Logs/*.evtx)
 ```
 
-**Offline analysis**: EVTX files are archive members, not loose `guestFS_*` outputs. Unpack manually into a separate directory before using the archived parser. Raw pagefile.sys bytes may be archived as MEMORY.DMP; this is not conversion or validation of a Windows dump. DedicatedDump.sys and Minidump/ are not requested; no platform-specific dump availability or verdict is promised here. KubeVirt memory capture is a separate fallible watcher operation.
+**Offline analysis**: EVTX files are archive members, not loose `guestFS_*` outputs. Unpack manually into a separate directory before opening them in Windows Event Viewer. Raw pagefile.sys bytes may be archived as MEMORY.DMP; this is not conversion or validation of a Windows dump. DedicatedDump.sys and Minidump/ are not requested; no platform-specific dump availability or verdict is promised here. KubeVirt memory capture is a separate fallible watcher operation.
 
 **Environment Variables**:
 
 | Variable | Purpose |
 |---|---|
 | `BSOD_DET__COMMAND__TIMEOUT` | Command timeout (default: 30s) |
-| `BSOD_DET__EXTRACT_EVTX__BIN` | Legacy override referenced only by the commented parser hook; the active pipeline does not use it |
-| `BSOD_DET__DATA__DIR` | Legacy override referenced only by the commented parser hook; active pipeline does not use it |
 | `BSOD_DET__GUEST_FS__CTR_IMG` | `virtctl guestfs` image; unset or empty uses the pinned tag, no legacy fallback |
 
 ---
@@ -424,30 +416,6 @@ guest-agent.py <cmd>
 - `checksums.sha256` — exempt from manifest (cannot be in its own manifest)
 - Summary files (`extraction-summary.json`, `evidence-summary.json`) — excluded from scan (generated after manifest)
 - All other classified artifacts — must have manifest entry and matching hash
-
----
-
-### Archived `extract-evtx.py`
-
-**Purpose**: Parse Windows `.evtx` EventLog files to JSON with crash detection. This utility is archived at `../../../archieve/src/scripts/host/extract-evtx.py`; it is not called by the active pipeline.
-
-**Crash detection tiers**:
-1. `System/1001` BugCheck — classic BSOD with bugcheck code
-2. `Application/1001` LiveKernelEvent — kernel event
-3. `System/6008` dirty shutdown
-
-**Usage (offline)**:
-```bash
-run_dir=/path/to/run
-archive=/path/to/guest-fs--crash-info--PARTITION.tgz
-mkdir -p "$run_dir/offline-guest-files"
-tar -xzf "$archive" -C "$run_dir/offline-guest-files"
-python3 apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py \
-  --data-dir apps/bsod-detector/src/data \
-  "$run_dir"/offline-guest-files/Windows/System32/winevt/Logs/*.evtx
-```
-
-Requires: `pip install python-evtx`
 
 ---
 
@@ -803,31 +771,3 @@ guest-agent.py <cmd>
   "warnings": ["..."]
 }
 ```
-
----
-
-### Archived extract-evtx.py
-
-**Purpose**: Parse Windows `.evtx` EventLog files to JSON with crash detection. The utility is archived at `apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py`, not present in the active script tree.
-
-#### Crash Detection Tiers
-
-1. `System/1001` BugCheck — classic BSOD with bugcheck code
-2. `Application/1001` LiveKernelEvent — kernel event
-3. `System/6008` dirty shutdown
-
-#### Usage (Offline)
-
-```bash
-run_dir=/path/to/run
-archive=/path/to/guest-fs--crash-info--PARTITION.tgz
-mkdir -p "$run_dir/offline-guest-files"
-tar -xzf "$archive" -C "$run_dir/offline-guest-files"
-python3 apps/bsod-detector/archieve/src/scripts/host/extract-evtx.py \
-  --data-dir apps/bsod-detector/src/data \
-  "$run_dir"/offline-guest-files/Windows/System32/winevt/Logs/*.evtx
-```
-
-**Requires**: `pip install python-evtx`
-
-**Note**: This is a developer tool archived for offline use. The extractor no longer writes `events.json`; developers run this manually against extracted `.evtx` files.
