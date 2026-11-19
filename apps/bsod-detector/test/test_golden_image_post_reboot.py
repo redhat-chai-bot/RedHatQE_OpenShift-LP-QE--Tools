@@ -214,6 +214,7 @@ function Write-Error ($Message) { $global:MockLog.Add("Write-Error ${Message}") 
 function Exit-Script ([int]$code) { $global:MockLog.Add("exit ${code}") }
 '''
 
+
 @functools.cache
 def PostRebootMainFlowMocks() -> str:
     """postMainFlowMocks with the registry defaults taken from recommended.values."""
@@ -256,14 +257,14 @@ class PostRebootStaticTests(unittest.TestCase):
         self.assertIn(record, text)
         self.assertIn(record, PARTNER_SCRIPT.read_text(encoding='utf-8'))
         # The record checks precede the failure gate; the cleanup removes only the ISO cache files.
-        self.assertLess(text.index('$isoRecord = Read-ArtifactRecord $isoRecordPath'), text.index('if ($hasFailure) {'))
+        self.assertLess(AssertIndex(self, text, '$isoRecord = Read-ArtifactRecord $isoRecordPath'), AssertIndex(self, text, 'if ($hasFailure) {'))
         cleanupLine = next(line for line in text.splitlines() if 'Remove-SetupCacheFile @(' in line)
         self.assertNotIn('ProgramData', cleanupLine)
 
     def test_ErrorActionPreference_FailuresIgnoreTheCallersPreference(self) -> None:
         text = ScriptText()
         self.assertIn("$ErrorActionPreference = 'Continue'", text)
-        self.assertLess(text.index("$ErrorActionPreference = 'Continue'"), text.index('    Write-Error '))
+        self.assertLess(AssertIndex(self, text, "$ErrorActionPreference = 'Continue'"), AssertIndex(self, text, '    Write-Error '))
 
     def test_DedicatedDumpFile_OldFileRefusesSealingWithoutDeletion(self) -> None:
         text = ScriptText()
