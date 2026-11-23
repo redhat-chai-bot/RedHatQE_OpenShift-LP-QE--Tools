@@ -198,7 +198,11 @@ EOF
   oc --request-timeout=30s delete virtualmachineexport "${exportName}" -n "${ns}" --ignore-not-found >>"${pipelineLog}" 2>&1 || true
   ((downloadStatus == 0)) || { RecordError memory "virtctl vmexport download failed"; return 1; }
   if ! RunTimed 60 python3 "${scriptDir}/reliability.py" validate-artifact --type memory --path "${temporary}" >/dev/null; then
-    rm -f "${temporary}"; RecordError memory 'downloaded memory dump is not a structurally valid ELF file'; return 1
+    # Keep file for inspection instead of deleting — rename to final target name with warn.
+    mv -f "${temporary}" "${target}" 2>/dev/null || rm -f "${temporary}"
+    Log "WARN: memory dump failed ELF validation — kept as $(basename "${target}") for inspection"
+    RecordError memory 'downloaded memory dump is not a structurally valid ELF file'
+    return 1
   fi
   mv -f "${temporary}" "${target}"
   RunTimed 60 virtctl memory-dump remove "${vm}" -n "${ns}" >>"${pipelineLog}" 2>&1 || { RecordError memory 'memory-dump association cleanup failed'; return 1; }
