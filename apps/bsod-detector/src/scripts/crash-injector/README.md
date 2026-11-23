@@ -46,7 +46,7 @@ BSOD_DET__CONFIRM_TARGET="win2022-vm-hjoshi1" \
 2. Create run directory: /mnt/persistent-bsod-evidence/{TIMESTAMP}-intentional-{PID}-{RANDOM}/
 3. Run preflight-rhov.sh
    ├─ QGA ping (5 retries)
-   ├─ configure-dumps.ps1 on guest → validate rebootRequired=false
+   ├─ Guest crash-settings validation → verify rebootRequired=false
    └─ Write recovery-metadata.json
 4. Clean stale guest dumps (`MEMORY.DMP`, `Minidump/*.dmp`) and verify they are absent
 5. Start `watch-crash.sh` in the background and wait for its run-ID readiness marker
@@ -166,4 +166,3 @@ virtctl start win2022-vm-hjoshi1 -n windows-bsod
 - `../host/preflight-rhov.sh` — VM validation and metadata generation
 - `../host/watch-crash.sh` — BSOD detection and memory capture
 - `../host/extract--guest-os--crash-info.sh` — Offline NTFS artifact extraction
-- `../guest/configure-dumps.ps1` — Windows crash dump configuration

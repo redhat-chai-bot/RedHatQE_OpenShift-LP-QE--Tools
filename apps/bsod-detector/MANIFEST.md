@@ -21,11 +21,6 @@ A catalog of what ships in this tool and why each file is kept.
 | `extract--guest-os--crash-info.sh` | Snapshot-based RHOV recovery using pre-stop metadata and direct durable streams. |
 | `collect-host-signals.sh` | Capture host-side crash-correlation signals (split-lock `#AC`, Hyper-V enlightenments). |
 
-### Analyze
-| File | Description |
-|---|---|
-| `parse-dump-header.sh` | Read bug-check code and parameters from a Windows crash dump header (no debugger). |
-
 ### Access / lifecycle
 | File | Description |
 |---|---|
@@ -33,11 +28,10 @@ A catalog of what ships in this tool and why each file is kept.
 
 ---
 
-## src/scripts/guest/ — guest-side configuration (one-time setup)
+## src/scripts/guest/ — golden-image setup (one-time)
 
 | File | Description |
 |---|---|
-| `configure-dumps.ps1` | Configure CrashControl registry settings (`AutoReboot=0`, dump type). |
 | `golden-image-pre-reboot.ps1` | Prepare the golden image before sealing: VirtIO drivers, guest agent, pvpanic, recovery disabled, crash-dump registry, pre-allocated `DedicatedDump.sys` and `pagefile.sys` (reboots at the end). |
 | `golden-image-post-reboot.ps1` | Verify after that reboot that the golden-image crash settings are active; all checks must pass before sealing. |
 
@@ -47,8 +41,7 @@ A catalog of what ships in this tool and why each file is kept.
 
 | File | Consumed by |
 |---|---|
-| `bugcheck-codes.json` | parse-dump-header.sh |
-| `crash-control.json` | configure-dumps.ps1, preflight-rhov.sh |
+| `crash-control.json` | preflight-rhov.sh (guest crash-settings validation) |
 | `event-sources.json` | Reference data only (no active script consumer) |
 | `host-signals.json` | collect-host-signals.sh (host-only) |
 

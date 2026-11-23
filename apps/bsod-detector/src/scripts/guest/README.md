@@ -2,46 +2,19 @@
 
 PowerShell scripts that run **inside Windows VMs** via the qemu-guest-agent tunnel.
 
-These scripts configure Windows crash dump settings and prepare the golden image.
+These scripts prepare the golden image, which is where the Windows crash dump settings should be set. Before each run,
+preflight also checks the guest's crash settings against `crash-control.json`.
 
 ## Script Overview
 
-### `configure-dumps.ps1`
+### Crash-settings validation
 
-**Purpose**: Apply and verify Windows crash dump registry settings before BSOD injection.
-
-**Called by**: `preflight-rhov.sh` via `guest-agent.py psfile`
-
-**What it configures** (reads from `crash-control.json`):
-
-| Registry Key | Value | Why |
-|---|---|---|
-| `CrashDumpEnabled` | `7` (Automatic) | Kernel dump → MEMORY.DMP + Minidump. Blocked on KVM but needed for EventLog crash events |
-| `AutoReboot` | `0` | **Critical** — keeps VM frozen at BSOD so pipeline can detect and capture |
-| `AlwaysKeepMemoryDump` | `1` | Prevents Windows from auto-deleting MEMORY.DMP |
-| `Overwrite` | `1` | Overwrite previous dump |
-| `LogEvent` | `1` | Write crash event to System EventLog |
-| `DumpFile` | `%SystemRoot%\MEMORY.DMP` | Output path for kernel dump |
-| `MinidumpDir` | `%SystemRoot%\Minidump` | Minidump output directory |
-| `DedicatedDumpFile` | `C:\DedicatedDump.sys` | Bypass pagefile for crash staging |
-
-**DedicatedDumpFile pre-allocation**: If `C:\DedicatedDump.sys` doesn't exist, the script pre-creates it using `fsutil file createnew` sized to `TotalPhysicalMemory + 1MB`. This file is used by Windows for crash dump staging instead of pagefile.
-
-**Reboot detection**: The script returns `rebootRequired=true` if any change requires a reboot (e.g., `CrashDumpEnabled` type change). Preflight will `Die` if reboot is pending — operator must do `virtctl stop && virtctl start` then re-run.
-
-**Output JSON**:
-```json
-{
-  "ok": true,
-  "matchesRecommended": true,
-  "rebootRequired": false,
-  "action": "applied",
-  "current": { "CrashDumpEnabled": 7, "AutoReboot": 0, ... },
-  "pageFile": { "adequate": true, "configured": "..." }
-}
-```
-
-**Pagefile note**: Preflight requires `pageFile.adequate=true`. With `DedicatedDumpFile` configured this is satisfied without `pagefile.sys`. The pagefile block was removed from configure-dumps.ps1 because `pagefile.sys` cannot be reliably created on KVM with VirtIO Balloon (Windows Server 2022 lazy pagefile allocation defers creation until memory pressure — which rarely occurs on VMs with ≥16GB RAM).
+Before arming a crash test, preflight runs a guest-side crash-settings step and fails unless the guest reports settings
+that match `crash-control.json` (see [Registry Reference](#registry-reference)), with `AutoReboot=0`, an adequate page
+file and no pending reboot. Golden-image setup is where these settings should be prepared (see [Golden Image Requirements](#golden-image-requirements)); the
+current guest-side step can still apply recommended values that differ before it reports. A read-only validator for this
+step, `validate-crash-settings.ps1`, which only checks the settings, is proposed in [#8](https://github.com/redhat-chai-bot/RedHatQE_OpenShift-LP-QE--Tools/pull/8) and is not part of this
+tree yet.
 
 ---
 
@@ -93,14 +66,14 @@ $wc = New-Object System.Net.WebClient
 $wc.DownloadFile("https://...", "C:\Temp\virtio-win.iso")
 ```
 
-**At pipeline runtime**, `configure-dumps.ps1` finds settings already in place → `rebootRequired=false` → preflight passes cleanly.
+**At pipeline runtime**, a guest prepared this way reports matching settings with no pending reboot, so preflight passes.
 
 ---
 
 ## Guest-Agent Communication
 
 ```
-host: guest-agent.py psfile configure-dumps.ps1 --companion crash-control.json C:\Windows\Temp\crash-control.json -- -DataFile C:\Windows\Temp\crash-control.json
+host: guest-agent.py psfile <script.ps1> --companion crash-control.json C:\Windows\Temp\crash-control.json -- <script arguments>
   ↓
 oc exec virt-launcher-<vm>-<hash>
   ↓
@@ -108,7 +81,7 @@ virsh qemu-agent-command <ns>_<vm> '<QMP JSON>'
   ↓
 qemu-guest-agent (Windows service)
   ↓
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\configure-dumps.ps1 -DataFile C:\Windows\Temp\crash-control.json
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\<script.ps1> <script arguments>
   ↓
 stdout/stderr captured → returned to host
 ```
@@ -145,4 +118,4 @@ Scripts run as `NT AUTHORITY\SYSTEM` — full Windows privilege, no interactive 
 
 - `crash-control.json` — Recommended values database (`src/data/`)
 - `guest-agent.py` — Execution tunnel (`src/scripts/host/`)
-- `preflight-rhov.sh` — Calls configure-dumps.ps1 and validates output (`src/scripts/host/`)
+- `preflight-rhov.sh` — Runs the guest crash-settings validation and checks its output (`src/scripts/host/`)

@@ -18,7 +18,6 @@ These scripts manage the full BSOD detection and artifact extraction pipeline or
 | `guest-agent.py` | Python CLI for QEMU Guest Agent communication (PowerShell tunnel) |
 | `reliability.py` | Artifact validation, decision logic, summary generation |
 | `collect-host-signals.sh` | Parse host-side KVM/Hyper-V crash correlation signals |
-| `parse-dump-header.sh` | Extract Windows bugcheck code from crash dump headers |
 
 ---
 
@@ -165,8 +164,9 @@ evidence-summary.json        (final pipeline verdict)
 - `BSOD_DET__COMMAND__TIMEOUT` must be a positive integer
 
 **2. Helper scripts present**
-- All pipeline helpers must exist and be readable: `guest-agent.py`, `reliability.py`, `extract--guest-os--crash-info.sh`, `collect-host-signals.sh`, `parse-dump-header.sh`
-- Guest config inputs must exist: `configure-dumps.ps1`, `crash-control.json`
+- All pipeline helpers must exist and be readable, for example `guest-agent.py`, `reliability.py`,
+  `extract--guest-os--crash-info.sh` and `collect-host-signals.sh`
+- Guest crash-settings inputs must exist: the guest-side script and `crash-control.json`
 
 **3. Evidence mount validation**
 - Evidence root must be an existing non-symlink directory
@@ -197,9 +197,8 @@ evidence-summary.json        (final pipeline verdict)
 - QGA ping via `guest-agent.py ping` — 5 retries × 3s sleep
 - Die if all retries fail (VM not ready for crash injection)
 
-**7. Guest crash dump configuration**
-- Upload `configure-dumps.ps1` + `crash-control.json` to VM via guest-agent
-- Run `configure-dumps.ps1 -DataFile crash-control.json`
+**7. Guest crash-settings validation**
+- Upload the guest crash-settings script and `crash-control.json` to the VM via guest-agent and run it
 - Die if output fails any of:
   - `ok == true` — script ran successfully
   - `matchesRecommended == true` — all registry values match expected
@@ -367,29 +366,6 @@ guest-agent.py <cmd>
 
 ---
 
-### `parse-dump-header.sh`
-
-**Purpose**: Extract Windows bugcheck code from a `.dmp` file header.
-
-**Output**:
-```json
-{
-  "ok": true,
-  "totalDumps": 1,
-  "dumps": [{
-    "file": "vm-memory-windows.dmp",
-    "bugCheckCode": "0x00000161",
-    "bugCheckName": "LIVE_SYSTEM_DUMP",
-    "parameters": ["0x0", "0x0", "0x0", "0x0"],
-    "valid": true
-  }]
-}
-```
-
-**Note**: The current extractor does not call this parser or write parse-dump-header.json. Developers may run the parser separately against an independently obtained compatible dump; raw pagefile bytes renamed MEMORY.DMP are not a converted dump.
-
----
-
 ### `reliability.py`
 
 **Purpose**: Artifact validation, evidence integrity, and summary generation.
@@ -425,7 +401,7 @@ guest-agent.py <cmd>
 trigger-bsod-intentional.sh
   ├─ preflight-rhov.sh
   │    ├─ QGA ping (5 retries)
-  │    ├─ configure-dumps.ps1 → verify rebootRequired=false
+  │    ├─ guest crash-settings validation → verify rebootRequired=false
   │    └─ write recovery-metadata.json
   │
   ├─ Clear and verify stale guest dumps
@@ -485,7 +461,7 @@ All variables follow Red Hat Chaos Team naming: `BSOD_DET__[<COMPONENT>__]<NAME>
 4. **VM and VMI state** (lines 162–172): runStrategy=Manual, VMI phase=Running, PVC modes
 5. **Recovery image capability probe** (lines 169–172): Temporary pod validates bash + guestfish contract
 6. **QGA liveness** (lines 174–176): Ping guest via QEMU Guest Agent (5 retries)
-7. **Guest crash dump configuration** (lines 178–186): Upload configure-dumps.ps1, verify settings effective (not pending reboot)
+7. **Guest crash-settings validation** (lines 178–186): Run the guest crash-settings step; fail unless the reported settings match and no reboot is pending
 8. **Guest path verification** (lines 188–191): Verify C:\Windows, C:\Windows\Minidump exist; NotMyFault binary if required
 9. **Pre-crash dump inventory** (lines 193–195): Record baseline dumps for post-crash comparison
 10. **Generate recovery-metadata.json** (lines 197–210): Write all validated state for downstream scripts
@@ -726,48 +702,6 @@ guest-agent.py <cmd>
   "splitLockDetected": true|false,
   "hyperv": { "features": [...], "mitigationApplied": true|false },
   "assessment": ["..."],
-  "warnings": ["..."]
-}
-```
-
----
-
-### parse-dump-header.sh
-
-**Purpose**: Extract Windows bugcheck code from crash dump file headers.
-
-#### Helper Functions
-
-| Function | Purpose |
-|----------|---------|
-| `Die()` | Print error and exit with code 2 |
-| `ReadU32Le()` | Read little-endian uint32 at offset via Python binary read |
-| `ReadU64Le()` | Read little-endian uint64 at offset via Python binary read |
-
-#### Processing (lines 101–156)
-
-1. **Verify PAGEDU64 signature** (lines 106–113): Check 8-byte magic header
-2. **Extract header fields** (lines 115–120):
-   - BugCheckCode (uint32 @ offset 0x38)
-   - Parameters 1-4 (uint64 each @ 0x40, 0x48, 0x50, 0x58)
-3. **Resolve to bugcheck name** (lines 122–129): Lookup in bugcheck-codes.json
-4. **Emit JSON result** (lines 152–154):
-   - List of processed dumps with codes, names, parameters
-   - Warnings for missing codes or signature issues
-
-#### Output
-
-```json
-{
-  "ok": true,
-  "totalDumps": 1,
-  "dumps": [{
-    "file": "...",
-    "bugCheckCode": "0x...",
-    "bugCheckName": "...",
-    "parameters": ["0x...", ...],
-    "valid": true
-  }],
   "warnings": ["..."]
 }
 ```
