@@ -337,6 +337,7 @@ EOF
 [[ "$1" == --metadata && "$#" == 2 ]] || exit 2
 out="$(jq -er .outputDir "$2")"
 "$REAL_PYTHON" -c 'import struct,sys,pathlib; p=pathlib.Path(sys.argv[1]); d=bytearray(8192); d[:8]=b"PAGEDU64"; struct.pack_into("<I",d,0x38,10); (p/"MEMORY.DMP").write_bytes(d); e=bytearray(4096); e[:8]=b"ElfFile\x00"; struct.pack_into("<I",e,0x78,4096); (p/"System.evtx").write_bytes(e)' "$out"
+echo '{"ok":true}' > "$out/parse-dump-header.json"
 echo '{"ok":true}' > "$out/events.json"
 echo fixture > "$out/recovery.log"
 echo fixture > "$out/checksums.sha256"
@@ -406,12 +407,20 @@ run_watcher() {
   [ "$(<"$sentinel")" = 'keep this unrelated file' ]
 }
 
-# parse-dump-header.sh archived — test removed
+@test "dump parser handles quoted paths and returns semantic failures nonzero" {
+  weird="$BATS_TMPDIR/a' [fixture] --dump.dmp"
+  "$REAL_PYTHON" -c 'import struct,sys; d=bytearray(96); d[:8]=b"PAGEDU64"; struct.pack_into("<I",d,0x38,10); open(sys.argv[1],"wb").write(d)' "$weird"
+  run bash "$HOST_DIR/parse-dump-header.sh" "$weird"
+  [ "$status" -eq 0 ]; [ "$(jq -r .ok <<<"$output")" = true ]
+  "$REAL_PYTHON" -c 'import struct,sys; d=bytearray(96); d[:8]=b"PAGEDU64"; struct.pack_into("<I",d,0x38,57005); open(sys.argv[1],"wb").write(d)' "$weird"
+  run bash "$HOST_DIR/parse-dump-header.sh" "$weird"
+  [ "$status" -ne 0 ]; [ "$(jq -r .ok <<<"$output")" = false ]
+}
 
 @test "source contracts use bounded file capture and the current trigger entry point" {
   ! grep -q 'memory-dump .*\/dev\/stdout' "$HOST_DIR/watch-crash.sh"
   grep -q 'virtctl vnc screenshot' "$HOST_DIR/watch-crash.sh"
   grep -q 'virtctl memory-dump get' "$HOST_DIR/watch-crash.sh"
   grep -q 'extract--guest-os--crash-info.sh' "$HOST_DIR/watch-crash.sh"
-  grep -q 'exec-crash' "$REPO_ROOT/src/scripts/bsod-pipeline/bsod-runner.sh"
+  grep -q 'exec-crash' "$REPO_ROOT/src/scripts/crash-injector/trigger-bsod-intentional.sh"
 }

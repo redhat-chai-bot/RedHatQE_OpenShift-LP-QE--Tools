@@ -1,0 +1,32 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ProviderName%
+DriverVer   = 08/20/2026,1.0.0.0
+CatalogFile = crashme.cat
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[DefaultInstall.ntamd64]
+CopyFiles = CrashMe.CopyFiles
+
+[CrashMe.CopyFiles]
+crashme.sys
+
+[DefaultInstall.ntamd64.Services]
+AddService = CrashMe,,CrashMe.Service
+
+[CrashMe.Service]
+DisplayName    = %ServiceName%
+Description    = %ServiceDesc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\crashme.sys
+
+[Strings]
+ProviderName = "BSODDetector"
+ServiceName  = "CrashMe"
+ServiceDesc  = "Test driver that triggers KeBugCheckEx on demand"

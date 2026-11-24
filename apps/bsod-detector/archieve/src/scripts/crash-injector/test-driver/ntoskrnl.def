@@ -1,0 +1,9 @@
+LIBRARY ntoskrnl.exe
+EXPORTS
+    IoCreateDevice
+    IoDeleteDevice
+    IoCreateSymbolicLink
+    IoDeleteSymbolicLink
+    IoCompleteRequest
+    IofCompleteRequest
+    KeBugCheckEx

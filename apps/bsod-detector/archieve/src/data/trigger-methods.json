@@ -1,0 +1,121 @@
+{
+  "_comment": "Tracks how each bug-check code is triggered in the test harness. Scripts read this file to select the correct trigger for a given code; do not duplicate these entries elsewhere. All entries use the KeBugCheckEx test driver (test-driver/crashme.sys) which calls KeBugCheckEx with the specified code and parameters.",
+  "codes": {
+    "0x0000000A": {
+      "name": "IRQL_NOT_LESS_OR_EQUAL",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x0", "0x0", "0x0", "0x0"],
+      "observedAs": "0x000000D1",
+      "note": "With Driver Verifier enabled, triggering 0x0A produces 0xD1 (DRIVER_IRQL_NOT_LESS_OR_EQUAL) as the observed bug check"
+    },
+    "0x00000019": {
+      "name": "BAD_POOL_HEADER",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x3", "0x0", "0x0", "0x0"]
+    },
+    "0x0000001A": {
+      "name": "MEMORY_MANAGEMENT",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x3F", "0xF4EC", "0x45C23B3D", "0xEBC0C2B3"]
+    },
+    "0x0000001E": {
+      "name": "KMODE_EXCEPTION_NOT_HANDLED",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x0", "0x0", "0x0", "0x0"]
+    },
+    "0x0000003D": {
+      "name": "INTERRUPT_EXCEPTION_NOT_HANDLED",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0xfffff80376bc2cc8", "0xfffff80376bc2510", "0x0", "0x0"]
+    },
+    "0x0000007A": {
+      "name": "KERNEL_DATA_INPAGE_ERROR",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0xffff908313b69b40", "0xC0000185", "0x707AE860", "0xffff8027d77688e8"]
+    },
+    "0x0000007B": {
+      "name": "INACCESSIBLE_BOOT_DEVICE",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x0", "0x0", "0x0", "0x0"]
+    },
+    "0x0000007E": {
+      "name": "SYSTEM_THREAD_EXCEPTION_NOT_HANDLED",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x0", "0x0", "0x0", "0x0"]
+    },
+    "0x00000080": {
+      "name": "NMI_HARDWARE_FAILURE",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x0", "0x0", "0x0", "0x0"]
+    },
+    "0x0000009F": {
+      "name": "DRIVER_POWER_STATE_FAILURE",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x0", "0x0", "0x0", "0x0"]
+    },
+    "0x000000C1": {
+      "name": "SPECIAL_POOL_DETECTED_MEMORY_CORRUPTION",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x0", "0x0", "0x0", "0x0"]
+    },
+    "0x000000C2": {
+      "name": "BAD_POOL_CALLER",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x0", "0x0", "0x0", "0x0"]
+    },
+    "0x000000F7": {
+      "name": "DRIVER_OVERRAN_STACK_BUFFER",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x0", "0x0", "0x0", "0x0"]
+    },
+    "0x00000109": {
+      "name": "CRITICAL_STRUCTURE_CORRUPTION",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0xA3A007E720C9B519", "0x0", "0x5229358D108F9F1A", "0x101"]
+    },
+    "0x00000124": {
+      "name": "WHEA_UNCORRECTABLE_ERROR",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x0", "0x0", "0x0", "0x0"]
+    },
+    "0x00000133": {
+      "name": "DPC_WATCHDOG_VIOLATION",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x0", "0x0", "0x0", "0x0"]
+    },
+    "0x00000135": {
+      "name": "REGISTRY_FILTER_DRIVER_EXCEPTION",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0xC0000006", "0xFFFFF906CD8C4F80", "0xFFFFF8030FA98A90", "0xFFFFCC8D699B5920"]
+    },
+    "0x00000154": {
+      "name": "UNEXPECTED_STORE_EXCEPTION",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0xFFFF800A275D0000", "0xFFFFB68B2D598F60", "0x2", "0x0"]
+    },
+    "0x00020001": {
+      "name": "HYPERVISOR_ERROR",
+      "verified": true,
+      "method": "kebugcheckex",
+      "parameters": ["0x32", "0x1", "0x0", "0x0"]
+    }
+  }
+}
