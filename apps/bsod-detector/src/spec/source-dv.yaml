@@ -1,0 +1,24 @@
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: ${SOURCE_DV}
+  namespace: ${NAMESPACE}
+  annotations:
+    cdi.kubevirt.io/storage.deleteAfterCompletion: "false"
+    cdi.kubevirt.io/storage.usePopulator: "true"
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"cdi.kubevirt.io/v1beta1","kind":"DataVolume","metadata":{"name":"${SOURCE_DV}","namespace":"${NAMESPACE}"},"spec":{"pvc":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"${SOURCE_DV_SIZE}"}},"storageClassName":"${STORAGE_CLASS}","volumeMode":"Block"},"source":{"s3":{"secretRef":"${S3_SECRET_REF}","url":"${S3_IMAGE_URL}"}}}}
+    descheduler.alpha.kubernetes.io/evict: "true"
+spec:
+  pvc:
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: ${SOURCE_DV_SIZE}
+    storageClassName: ${STORAGE_CLASS}
+    volumeMode: Block
+  source:
+    s3:
+      secretRef: ${S3_SECRET_REF}
+      url: ${S3_IMAGE_URL}
