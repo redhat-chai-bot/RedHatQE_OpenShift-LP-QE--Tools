@@ -1,0 +1,23 @@
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: ${VM_NAME}-root-disk
+  namespace: ${NAMESPACE}
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"cdi.kubevirt.io/v1beta1","kind":"DataVolume","metadata":{"name":"${VM_NAME}-root-disk","namespace":"${NAMESPACE}"},"spec":{"pvc":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"${STORAGE_SIZE}"}},"storageClassName":"${STORAGE_CLASS}","volumeMode":"Block"},"source":{"pvc":{"name":"${SOURCE_DV}","namespace":"${NAMESPACE}"}}}}
+    cdi.kubevirt.io/storage.usePopulator: "true"
+    descheduler.alpha.kubernetes.io/evict: "true"
+spec:
+  pvc:
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: ${STORAGE_SIZE}
+    storageClassName: ${STORAGE_CLASS}
+    volumeMode: Block
+  source:
+    pvc:
+      name: ${SOURCE_DV}
+      namespace: ${NAMESPACE}
