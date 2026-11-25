@@ -25,15 +25,16 @@ typeset -A cfgArr=(
     [miss]=2                        # --miss: missed pings before the crash decision
     [quiesceWait]=900               # --quiesce-wait: seconds to wait for crash dump writes to quiesce
     [idleSamples]=3                 # --idle-samples: idle disk samples that count as quiesced
-    # Preflight inputs, used only when preflight runs here (no --metadata). Unset ones are not forwarded, so preflight-rhov.sh
-    # applies its own default (named in parentheses).
+    # Preflight inputs, used only when preflight runs here (no --metadata). Unset ones are not forwarded; preflight-rhov.sh then
+    # re-reads its own environment fallback (in parentheses; only legacy BSOD_EVIDENCE_VOLUME_KIND for the volume kind) and fails
+    # closed on each required one. Only --disk-target is optional: preflight otherwise discovers it from the VMI and domain XML.
     [evidenceMount]=''              # --evidence-mount, else BSOD_DET__EVIDENCE__MOUNT, else --out; always forwarded
     [evidenceKind]=''               # --evidence-volume-kind, else BSOD_DET__EVIDENCE__VOLUME_KIND, else legacy BSOD_EVIDENCE_VOLUME_KIND
     [evidenceId]=''                 # --evidence-storage-id (BSOD_DET__EVIDENCE__STORAGE_ID)
     [snapClass]=''                  # --snap-class (BSOD_DET__SNAPSHOT__CLASS)
     [recoveryImage]=''              # --recovery-image (BSOD_DET__RECOVERY__IMAGE)
     [memoryPvc]=''                  # --memory-dump-pvc (BSOD_DET__MEMORY__DUMP_PVC)
-    [diskTarget]=''                 # --disk-target (discovered from the VMI and domain XML)
+    [diskTarget]=''                 # --disk-target (optional; no environment fallback)
     # Timeout budgets in seconds: BSOD_DET__TIMEOUT__*, else the legacy name in parentheses, else the default.
     [armedTimeout]="${BSOD_DET__TIMEOUT__ARMED:-${BSOD_DET__ARMED__TIMEOUT:-}}"                 # (BSOD_DET__ARMED__TIMEOUT) required
     [preflightTimeout]="${BSOD_DET__TIMEOUT__PREFLIGHT:-${BSOD_DET__PREFLIGHT__TIMEOUT:-300}}"  # (BSOD_DET__PREFLIGHT__TIMEOUT)
@@ -100,10 +101,8 @@ function Cleanup () {
         isMemoryAssociated=0
     fi
     [[ -z "${runDir}" ]] || rm -rf "${runDir}"
-    [[ -z "${outDir}" ]] || rm -f "${outDir}/.domain-bsod.xml.tmp"
-    # Remove guestfish download caches (file.0x*) left in the application tree or /tmp.
-    find "${scriptDir}/../.." -maxdepth 5 -name 'file.0x*' -type f -delete 2>/dev/null || true
-    find /tmp -maxdepth 2 -name 'file.0x*' -type f -delete 2>/dev/null || true
+    # Only this run's own temporaries in its run directory are removed: no shared directory is swept.
+    [[ -z "${outDir}" ]] || rm -f "${outDir}/.domain-bsod.xml.tmp" "${outDir}/.vm-memory.elf.tmp"
     true
 }
 function OnSignal () {
@@ -156,13 +155,16 @@ function ValidateTools () {
 }
 function ValidateConfig () {
     typeset key=''
+    typeset -A settingArr=([interval]=--interval [miss]=--miss [quiesceWait]=--quiesce-wait [idleSamples]=--idle-samples
+        [armedTimeout]='BSOD_DET__TIMEOUT__ARMED (or BSOD_DET__ARMED__TIMEOUT)'
+        [memoryTimeout]='BSOD_DET__TIMEOUT__MEMORY (or BSOD_MEMORY_CAPTURE_TIMEOUT)')
     [[ -n "${cfgArr[ns]}" && -n "${cfgArr[vm]}" && -n "${cfgArr[out]}" ]] || Die '--ns, --vm, and --out are required'
     [[ -n "${cfgArr[armedTimeout]}" ]] ||
         Die 'BSOD_DET__TIMEOUT__ARMED (or legacy BSOD_DET__ARMED__TIMEOUT) must be set by the caller, e.g. bsod-runner.sh'
     # Counts and the budgets used in shell arithmetic must be plain positive integers; the preflight and capture budgets only
     # reach timeout(1), which also accepts suffixed durations.
     for key in interval miss quiesceWait idleSamples armedTimeout memoryTimeout; do
-        [[ "${cfgArr[${key}]}" =~ ^[1-9][0-9]*$ ]] || Die 'all timeout/count values must be positive integers'
+        [[ "${cfgArr[${key}]}" =~ ^[1-9][0-9]*$ ]] || Die "${settingArr[${key}]} must be a positive integer (got '${cfgArr[${key}]}')"
     done
     if [[ -n "${cfgArr[metadata]}" ]]; then
         [[ -r "${cfgArr[metadata]}" && -n "${cfgArr[runId]}" ]] || Die '--metadata requires a readable file and --run-id'
@@ -265,8 +267,8 @@ function Arm () {
 # shellcheck disable=SC2034 # nextPhaseRef and crashStateRef are namerefs to the caller's variables.
 function Watch () {
     # Sets the next phase (respond or expired) and, on respond, the domain state seen at the capture decision.
-    typeset -n nextPhaseRef="${1:?}"; (($#)) && shift
-    typeset -n crashStateRef="${1:?}"; (($#)) && shift
+    typeset -n nextPhaseRef="${1:?}"; shift
+    typeset -n crashStateRef="${1:?}"; shift
     typeset state='' vmiPhase='' decision=''
     typeset -i misses=0
     typeset -i deadline=$((SECONDS + cfgArr[armedTimeout]))
@@ -412,7 +414,7 @@ function CaptureMemory () {
     typeset target="${outDir}/vm-memory.elf.tar.gz"
     rm -f "${temporary}"
     RequestMemoryDump || return 1
-    DownloadMemoryDump "${temporary}" || return 1
+    DownloadMemoryDump "${temporary}" || { rm -f "${temporary}"; return 1; }
     if ! RunTimed 60 python3 "${scriptDir}/reliability.py" validate-artifact --type memory --path "${temporary}" >/dev/null; then
         rm -f "${temporary}"; RecordError memory 'downloaded memory dump is not a structurally valid ELF file'; return 1
     fi
