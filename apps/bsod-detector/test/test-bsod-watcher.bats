@@ -29,7 +29,8 @@ EOF
 }
 
 teardown() {
-  [[ ! -s "$MOCK_DIR/download.pid" ]] || kill -KILL "$(cat "$MOCK_DIR/download.pid")" 2>/dev/null || true
+  # Only a mock that still runs is stopped: a finished one has been reaped and its PID may belong to another process.
+  if MockAlive; then kill -KILL "$(cat "$MOCK_DIR/download.pid")" 2>/dev/null || true; fi
   chmod -R u+rwX "$BATS_TMPDIR" 2>/dev/null || true
   teardown_temp
 }
@@ -117,7 +118,7 @@ sleep () {
     if ((grown < GROW_STEPS)); then
         printf '%064d' 0 >> "${target:-$outDir/dump.tmp}"; grown=$((grown + 1)); echo "grew at=${SECONDS}" >> "$MOCK_DIR/clock"
     elif [[ "${GROW_FINISH:-yes}" == yes && ! -e "$MOCK_DIR/finish" ]]; then
-        touch "$MOCK_DIR/finish"; while kill -0 "${downloadPid}" 2>/dev/null; do command sleep 0.01; done
+        touch "$MOCK_DIR/finish"; while IsDownloadRunning; do command sleep 0.01; done
     fi
 }
 # Every signal the watcher sends is recorded with whether its target still existed at that moment.
@@ -130,6 +131,23 @@ snippet="$1"; shift
 eval "${snippet}"
 EOF
   chmod +x "$driver"
+}
+
+# MockAlive: succeeds while this test's download mock still runs. A recorded PID alone may already have been reaped and reused,
+# so the process must also carry this test's MOCK_DIR in its environment (a check-then-signal window remains inherent).
+MockAlive() {
+  local pid='' environment=''
+  pid="$(cat "$MOCK_DIR/download.pid" 2>/dev/null)" && [[ -n "$pid" ]] || return 1
+  environment="$(tr '\0' '\n' 2>/dev/null < "/proc/$pid/environ")" || return 1
+  grep -qxF "MOCK_DIR=$MOCK_DIR" <<<"$environment"
+}
+
+# Interrupts a progressing download with TERM after 3 s. timeout signals only its own child, the driver running the watcher's
+# real traps, and kills it if it still runs 30 s later; the test itself signals no PID. $1 is the watcher.log path.
+InterruptDownload() {
+  rc=0
+  TEST_TRAPS=1 MOCK_DOWNLOAD=interruptible GROW_STEPS=100000 GROW_FINISH=no TEST_PIPELINE_LOG="$1" \
+    timeout --foreground --preserve-status -s TERM -k 30 3 "$driver" 'CaptureMemory' > "$BATS_TMPDIR/interrupted.out" 2>&1 || rc=$?
 }
 
 # Refute CMD...: fails the test when CMD succeeds (a bare `! CMD` does not fail a Bats test unless it is the last command).
@@ -267,7 +285,7 @@ LastGrowth() { awk '/^grew/{t=$2} END{sub("at=","",t); print t+0}' "$MOCK_DIR/cl
   [ "$(StoppedAfter)" -ge 300 ] && [ "$(StoppedAfter)" -le 311 ]  # limit reached at 300 s, then at most 10 s of TERM grace
   grep -q 'download stalled (no data for 300s) and was stopped' "$MOCK_DIR/out/stage-errors.jsonl"
   Refute grep -q 'download failed' "$MOCK_DIR/out/stage-errors.jsonl"
-  Refute kill -0 "$(cat "$MOCK_DIR/download.pid")" 2>/dev/null
+  Refute MockAlive
   grep -q '"uid":"uid-synthetic"' "$MOCK_DIR/delete-body"
 }
 
@@ -282,7 +300,7 @@ LastGrowth() { awk '/^grew/{t=$2} END{sub("at=","",t); print t+0}' "$MOCK_DIR/cl
 @test "stalled download that ignores TERM is killed" {
   MOCK_DOWNLOAD=stall-ignore-term run timeout 60 "$driver" 'DownloadMemoryDump "$outDir/dump.tmp"'
   [ "$status" -eq 1 ]
-  Refute kill -0 "$(cat "$MOCK_DIR/download.pid")" 2>/dev/null
+  Refute MockAlive
   grep -q 'stalled' "$MOCK_DIR/out/stage-errors.jsonl"
 }
 
@@ -424,7 +442,7 @@ LastGrowth() { awk '/^grew/{t=$2} END{sub("at=","",t); print t+0}' "$MOCK_DIR/cl
 @test "a stalled download is stopped before its temporary is removed, without signalling a finished process" {
   MOCK_DOWNLOAD=stall run timeout 60 "$driver" 'CaptureMemory || echo "capture failed temp=[${memoryTemporary}]"'
   [[ "$output" == *'capture failed temp=[]'* ]]
-  Refute kill -0 "$(cat "$MOCK_DIR/download.pid")" 2>/dev/null
+  Refute MockAlive
   [ -z "$(find "$MOCK_DIR/out" -name '.vm-memory.elf.*')" ]
   grep -q 'stalled' "$MOCK_DIR/out/stage-errors.jsonl"
   grep -q '^kill -TERM .* alive=yes' "$MOCK_DIR/kills"
@@ -432,16 +450,23 @@ LastGrowth() { awk '/^grew/{t=$2} END{sub("at=","",t); print t+0}' "$MOCK_DIR/cl
 }
 
 @test "an interrupted download is stopped before its temporary output is removed" {
-  TEST_TRAPS=1 MOCK_DOWNLOAD=interruptible GROW_STEPS=100000 GROW_FINISH=no "$driver" 'CaptureMemory' > "$BATS_TMPDIR/interrupted.out" 2>&1 &
-  pid=$!
-  for _ in $(seq 200); do [[ -s "$MOCK_DIR/download.pid" ]] && break; command sleep 0.05; done
-  command sleep 0.3; kill -TERM "$pid"
-  ( command sleep 60; kill -KILL "$pid" 2>/dev/null ) & watchdog=$!
-  rc=0; wait "$pid" || rc=$?; kill "$watchdog" 2>/dev/null || true
+  InterruptDownload "$MOCK_DIR/out/watcher.log"
   [ "$rc" -eq 143 ]
   grep -q '"stage":"interrupted"' "$MOCK_DIR/out/stage-errors.jsonl"
   [ "$(cat "$MOCK_DIR/output-at-term")" = present ]
-  Refute kill -0 "$(cat "$MOCK_DIR/download.pid")" 2>/dev/null
+  Refute MockAlive
+  [ -z "$(find "$MOCK_DIR/out" -name '.vm-memory.elf.*')" ]
+  grep -q '"uid":"uid-synthetic"' "$MOCK_DIR/delete-body"
+  grep -q '^kill -TERM .* alive=yes' "$MOCK_DIR/kills"
+}
+
+@test "a failed log sink neither skips the interrupt cleanup nor changes its status" {
+  InterruptDownload /dev/full
+  [ "$rc" -eq 143 ]
+  [ "$(grep -c 'cannot append to /dev/full' "$BATS_TMPDIR/interrupted.out")" -eq 1 ]
+  grep -q '"stage":"interrupted"' "$MOCK_DIR/out/stage-errors.jsonl"
+  [ "$(cat "$MOCK_DIR/output-at-term")" = present ]
+  Refute MockAlive
   [ -z "$(find "$MOCK_DIR/out" -name '.vm-memory.elf.*')" ]
   grep -q '"uid":"uid-synthetic"' "$MOCK_DIR/delete-body"
 }
