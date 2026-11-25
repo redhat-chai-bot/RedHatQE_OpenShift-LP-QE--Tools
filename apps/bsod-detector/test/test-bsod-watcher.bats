@@ -18,10 +18,19 @@ setup() {
   export WATCHER_FUNCTIONS="$BATS_TMPDIR/watcher-functions.sh"
   sed -e 's/^set -euxo pipefail;/set -euo pipefail;/' -e '/^trap Cleanup EXIT$/,$d' "$watcher" > "$WATCHER_FUNCTIONS"
   driver="$BATS_TMPDIR/driver.sh"; MakeDriver
+  # A structurally valid synthetic memory dump: a tar.gz with one *.memory.dump member holding an ELF64 ET_CORE header.
+  export SYNTHETIC_MEMORY="$BATS_TMPDIR/synthetic-memory.tar.gz"
+  python3 -I - "$SYNTHETIC_MEMORY" <<'EOF'
+import io, struct, sys, tarfile
+elf = b"\x7fELF" + bytes([2, 1, 1]) + bytes(9) + struct.pack("<HHIQQQIHHHHHH", 4, 62, 1, 0, 64, 0, 0, 64, 56, 1, 0, 0, 0) + bytes(56)
+with tarfile.open(sys.argv[1], "w:gz") as tar:
+    info = tarfile.TarInfo("synthetic.memory.dump"); info.size = len(elf); tar.addfile(info, io.BytesIO(elf))
+EOF
 }
 
 teardown() {
   [[ ! -s "$MOCK_DIR/download.pid" ]] || kill -KILL "$(cat "$MOCK_DIR/download.pid")" 2>/dev/null || true
+  chmod -R u+rwX "$BATS_TMPDIR" 2>/dev/null || true
   teardown_temp
 }
 
@@ -35,6 +44,10 @@ case "$*" in
   *' create -f - -o jsonpath={.metadata.uid}'*) cat > /dev/null; printf 'uid-synthetic';;
   *' delete -f - --raw '*) cat > "$MOCK_DIR/delete-body"; echo '{}';;
   *' get virtualmachineexport '*)
+    case "${MOCK_EXPORT_PROBE:-}" in
+      (fail-with-ready) printf Ready; exit 1;;            # a failed probe that still printed Ready
+      (late-ready) printf Ready; sleep 10; exit 0;;       # Ready printed, but the probe outlives its budget
+    esac
     phase="${MOCK_EXPORT_PHASE:-Ready}"
     if [[ -f "$MOCK_DIR/export-phases" ]]; then
       phase="$(head -n 1 "$MOCK_DIR/export-phases")"
@@ -45,6 +58,7 @@ case "$*" in
   *powershell.exe*Application.evtx*) [[ "${MOCK_EVTX_FAIL:-}" == Application ]] && exit 1; printf "${MOCK_EVTX_APPLICATION-}";;
   *' virsh domstate '*) printf '%s\n' "${MOCK_DOMSTATE:-crashed}";;
   *' get vmi '*) printf '%s' "${MOCK_VMI_PHASE:-Running}";;
+  *' get vm '*'memoryDumpRequest.phase'*) printf Completed;;
   *' get pod '*) exit 0;;
   *) echo "mock oc: unexpected call: $*" >&2; exit 97;;
 esac
@@ -54,6 +68,7 @@ EOF
 # Mock virtctl: only `vmexport download`, whose behaviour MOCK_DOWNLOAD selects.
 set -u
 echo "virtctl $*" >> "$MOCK_DIR/calls"
+[[ "${1:-} ${2:-}" == 'memory-dump get' || "${1:-} ${2:-}" == 'memory-dump remove' ]] && exit 0
 [[ "${1:-} ${2:-}" == 'vmexport download' ]] || { echo "mock virtctl: unexpected call: $*" >&2; exit 97; }
 target=''; while (($#)); do [[ "$1" == --output ]] && target="$2"; shift; done
 echo "$$" > "$MOCK_DIR/download.pid"
@@ -64,6 +79,12 @@ case "${MOCK_DOWNLOAD:-complete}" in
   (progress) while [[ ! -e "$MOCK_DIR/finish" ]]; do sleep 0.01; done; exit 0;;  # the test clock appends the data
   (stall) exec sleep 600;;  # no data at all
   (stall-ignore-term) trap '' TERM; while :; do sleep 0.05; done;;
+  (complete-valid) cat "$SYNTHETIC_MEMORY" > "$target"; exit 0;;
+  (complete-valid-lock-log) cat "$SYNTHETIC_MEMORY" > "$target"; chmod 000 "$MOCK_DIR/out/watcher.log"; exit 0;;
+  (complete-valid-readonly) cat "$SYNTHETIC_MEMORY" > "$target"; chmod 0555 "$(dirname "$target")"; exit 0;;
+  (interruptible)  # records whether its output still existed when it was told to stop
+    trap 'if [[ -e "$target" ]]; then echo present; else echo removed; fi > "$MOCK_DIR/output-at-term"; exit 143' TERM
+    while :; do sleep 0.05; done;;
 esac
 EOF
   cat > "$MOCK_BIN/guest-agent" <<'EOF'
@@ -88,15 +109,23 @@ pipelineLog="${TEST_PIPELINE_LOG:-$outDir/watcher.log}"; stageErrors="${TEST_STA
 cfgArr[ns]=synthetic-ns; cfgArr[vm]=synthetic-vm
 metaArr=([launcherPod]=virt-launcher-synthetic-vm-abcde [domain]=synthetic-ns_synthetic-vm [memoryDumpPvc]=synthetic-memdump-pvc)
 typeset -i grown=0
+# The real sleep is an external command, while bash waits for it, it reaps finished children; /usr/bin/true does the same here.
 sleep () {
-    SECONDS=$((SECONDS + ${1%%.*})); echo "sleep $1 at=${SECONDS}" >> "$MOCK_DIR/clock"
+    SECONDS=$((SECONDS + ${1%%.*})); echo "sleep $1 at=${SECONDS}" >> "$MOCK_DIR/clock"; /usr/bin/true
+    [[ -z "${DELETE_TARGET_AT:-}" || -z "${target:-}" ]] || { ((SECONDS < DELETE_TARGET_AT)) || rm -f "${target}"; }
     [[ -n "${GROW_STEPS:-}" && -n "${downloadPid:-}" ]] || return 0
     if ((grown < GROW_STEPS)); then
-        printf '%064d' 0 >> "$outDir/dump.tmp"; grown=$((grown + 1)); echo "grew at=${SECONDS}" >> "$MOCK_DIR/clock"
+        printf '%064d' 0 >> "${target:-$outDir/dump.tmp}"; grown=$((grown + 1)); echo "grew at=${SECONDS}" >> "$MOCK_DIR/clock"
     elif [[ "${GROW_FINISH:-yes}" == yes && ! -e "$MOCK_DIR/finish" ]]; then
         touch "$MOCK_DIR/finish"; while kill -0 "${downloadPid}" 2>/dev/null; do command sleep 0.01; done
     fi
 }
+# Every signal the watcher sends is recorded with whether its target still existed at that moment.
+kill () {
+    [[ "${1:-}" == -0 ]] || echo "kill $* alive=$(ps -o pid= -p "${@: -1}" >/dev/null 2>&1 && echo yes || echo no)" >> "$MOCK_DIR/kills"
+    builtin kill "$@"
+}
+[[ -z "${TEST_TRAPS:-}" ]] || { trap Cleanup EXIT; trap 'OnSignal 130' INT; trap 'OnSignal 143' TERM; }
 snippet="$1"; shift
 eval "${snippet}"
 EOF
@@ -331,6 +360,137 @@ LastGrowth() { awk '/^grew/{t=$2} END{sub("at=","",t); print t+0}' "$MOCK_DIR/cl
     Refute grep -q 'event logs stable' "$MOCK_DIR/out/watcher.log"
     grep -q "not confirmed stable within 600s (System ${want})" "$MOCK_DIR/out/watcher.log"
   done
+}
+
+# ==== Human review: execution, side effects, owned temporaries, finalization ====
+
+@test "watcher runs directly as an executable" {
+  [ -x "$watcher" ]
+  PATH="$MOCK_BIN:$PATH" run "$watcher" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'usage: bsod-watcher.sh'* ]]
+}
+
+@test "help, invalid arguments and early failures leave caches and other files untouched" {
+  app="$BATS_TMPDIR/app"; mkdir -p "$app/src/scripts/host" "$BATS_TMPDIR/ev"; cp "$watcher" "$app/src/scripts/host/"
+  echo app > "$app/src/file.0xSENTINEL.img"; echo tmp > "$BATS_TMPDIR/file.0xSENTINEL.img"  # where the old sweeps looked
+  before="$(find "$BATS_TMPDIR" -path "$MOCK_DIR" -prune -o -print | sort | sha256sum)"
+  for case in '0|--help' '1|--bogus' '1|--vm v' "1|--ns n --vm v --out $BATS_TMPDIR/ev --interval 0"; do
+    # shellcheck disable=SC2086 # the argument lists are split on purpose
+    PATH="$MOCK_BIN:$PATH" BSOD_DET__TIMEOUT__ARMED=60 run bash "$app/src/scripts/host/bsod-watcher.sh" ${case#*|}
+    [ "$status" -eq "${case%%|*}" ]
+    [ "$(find "$BATS_TMPDIR" -path "$MOCK_DIR" -prune -o -print | sort | sha256sum)" = "$before" ]
+  done
+  [ ! -s "$MOCK_DIR/calls" ]
+}
+
+@test "a reused run ID never touches the existing run directory" {
+  run_dir="$BATS_TMPDIR/ev/reused-run-01"; mkdir -p "$run_dir"
+  for name in .vm-memory.elf.tmp .domain-bsod.xml.tmp .vm-memory.elf.OTHER1 vm-memory.elf.tar.gz; do echo other > "$run_dir/$name"; done
+  PATH="$MOCK_BIN:$PATH" BSOD_DET__TIMEOUT__ARMED=60 run "$watcher" --ns n --vm v --out "$BATS_TMPDIR/ev" \
+    --evidence-mount "$BATS_TMPDIR/ev" --run-id reused-run-01
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'cannot create unique run directory'* ]]
+  [ "$(cat "$run_dir"/.vm-memory.elf.tmp "$run_dir"/.domain-bsod.xml.tmp "$run_dir"/.vm-memory.elf.OTHER1 "$run_dir"/vm-memory.elf.tar.gz | tr '\n' ' ')" = 'other other other other ' ]
+  [ ! -s "$MOCK_DIR/calls" ]
+}
+
+@test "named diagnostics identify each invalid integer setting" {
+  PATH="$MOCK_BIN:$PATH" BSOD_DET__TIMEOUT__ARMED=10m run "$watcher" --ns n --vm v --out "$BATS_TMPDIR/ev"
+  [[ "$output" == *"BSOD_DET__TIMEOUT__ARMED (or BSOD_DET__ARMED__TIMEOUT) must be a positive integer (got '10m')"* ]]
+  PATH="$MOCK_BIN:$PATH" BSOD_DET__TIMEOUT__ARMED=60 run "$watcher" --ns n --vm v --out "$BATS_TMPDIR/ev" --quiesce-wait -5
+  [[ "$output" == *"--quiesce-wait must be a positive integer (got '-5')"* ]]
+}
+
+@test "a completed memory dump is finalized and its download is never signalled" {
+  MOCK_DOWNLOAD=complete-valid run timeout 60 "$driver" 'CaptureMemory; echo "assoc=${isMemoryAssociated} temp=[${memoryTemporary}]"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'validated KubeVirt memory dump: vm-memory.elf.tar.gz'*'assoc=0 temp=[]'* ]]
+  cmp "$SYNTHETIC_MEMORY" "$MOCK_DIR/out/vm-memory.elf.tar.gz"
+  [ -z "$(find "$MOCK_DIR/out" -name '.vm-memory.elf.*')" ]
+  [ ! -s "$MOCK_DIR/kills" ]
+  grep -q 'virtctl memory-dump remove' "$MOCK_DIR/calls"
+}
+
+@test "a failed download removes only its own temporary and keeps a finalized dump" {
+  echo final > "$MOCK_DIR/out/vm-memory.elf.tar.gz"; echo other > "$MOCK_DIR/out/.vm-memory.elf.OTHER1"
+  MOCK_DOWNLOAD=fail run timeout 60 "$driver" 'CaptureMemory || echo "capture failed temp=[${memoryTemporary}]"'
+  [[ "$output" == *'capture failed temp=[]'* ]]
+  [ "$(cat "$MOCK_DIR/out/vm-memory.elf.tar.gz") $(cat "$MOCK_DIR/out/.vm-memory.elf.OTHER1")" = 'final other' ]
+  [ "$(find "$MOCK_DIR/out" -name '.vm-memory.elf.*' | wc -l)" -eq 1 ]
+  grep -q 'virtctl vmexport download failed' "$MOCK_DIR/out/stage-errors.jsonl"
+}
+
+@test "a stalled download is stopped before its temporary is removed, without signalling a finished process" {
+  MOCK_DOWNLOAD=stall run timeout 60 "$driver" 'CaptureMemory || echo "capture failed temp=[${memoryTemporary}]"'
+  [[ "$output" == *'capture failed temp=[]'* ]]
+  Refute kill -0 "$(cat "$MOCK_DIR/download.pid")" 2>/dev/null
+  [ -z "$(find "$MOCK_DIR/out" -name '.vm-memory.elf.*')" ]
+  grep -q 'stalled' "$MOCK_DIR/out/stage-errors.jsonl"
+  grep -q '^kill -TERM .* alive=yes' "$MOCK_DIR/kills"
+  Refute grep -q 'alive=no' "$MOCK_DIR/kills"
+}
+
+@test "an interrupted download is stopped before its temporary output is removed" {
+  TEST_TRAPS=1 MOCK_DOWNLOAD=interruptible GROW_STEPS=100000 GROW_FINISH=no "$driver" 'CaptureMemory' > "$BATS_TMPDIR/interrupted.out" 2>&1 &
+  pid=$!
+  for _ in $(seq 200); do [[ -s "$MOCK_DIR/download.pid" ]] && break; command sleep 0.05; done
+  command sleep 0.3; kill -TERM "$pid"
+  ( command sleep 60; kill -KILL "$pid" 2>/dev/null ) & watchdog=$!
+  rc=0; wait "$pid" || rc=$?; kill "$watchdog" 2>/dev/null || true
+  [ "$rc" -eq 143 ]
+  grep -q '"stage":"interrupted"' "$MOCK_DIR/out/stage-errors.jsonl"
+  [ "$(cat "$MOCK_DIR/output-at-term")" = present ]
+  Refute kill -0 "$(cat "$MOCK_DIR/download.pid")" 2>/dev/null
+  [ -z "$(find "$MOCK_DIR/out" -name '.vm-memory.elf.*')" ]
+  grep -q '"uid":"uid-synthetic"' "$MOCK_DIR/delete-body"
+}
+
+@test "a download that already finished is not signalled when stopped" {
+  run "$driver" '/usr/bin/true & downloadPid=$!; /usr/bin/sleep 0.2; StopDownload; echo "status=${downloadStatus} pid=[${downloadPid}]"'
+  [ "$status" -eq 0 ]
+  [ "$output" = 'status=0 pid=[]' ]
+  [ ! -s "$MOCK_DIR/kills" ]
+}
+
+@test "a failed finalization is a memory-stage failure that keeps the association for Cleanup" {
+  mkdir "$MOCK_DIR/out/vm-memory.elf.tar.gz"
+  MOCK_DOWNLOAD=complete-valid run timeout 60 "$driver" 'CaptureMemory || echo "capture failed assoc=${isMemoryAssociated}"'
+  [[ "$output" == *'capture failed assoc=1'* ]]
+  Refute grep -q 'validated KubeVirt memory dump' <<<"$output"
+  grep -q 'cannot finalize the memory dump as vm-memory.elf.tar.gz' "$MOCK_DIR/out/stage-errors.jsonl"
+  [ -z "$(ls -A "$MOCK_DIR/out/vm-memory.elf.tar.gz")" ]
+  [ -z "$(find "$MOCK_DIR/out" -name '.vm-memory.elf.*')" ]
+}
+
+@test "finalization does not depend on watcher.log being writable" {
+  # The later association step still redirects to watcher.log (as other steps do), so it is skipped and reported; the
+  # association then stays recorded for Cleanup. The finalized dump itself must not depend on the log.
+  MOCK_DOWNLOAD=complete-valid-lock-log run timeout 60 "$driver" 'CaptureMemory || echo "capture status=$? assoc=${isMemoryAssociated}"'
+  cmp "$SYNTHETIC_MEMORY" "$MOCK_DIR/out/vm-memory.elf.tar.gz"
+  [ -z "$(find "$MOCK_DIR/out" -name '.vm-memory.elf.*')" ]
+  Refute grep -q 'cannot finalize' "$MOCK_DIR/out/stage-errors.jsonl"
+  [[ "$output" == *'capture status=1 assoc=1'* ]]
+  [ "$(jq -r .error "$MOCK_DIR/out/stage-errors.jsonl")" = 'memory-dump association cleanup failed' ]
+}
+
+@test "an unreadable download size is reported distinctly and counts as no progress" {
+  MOCK_DOWNLOAD=stall DELETE_TARGET_AT=90 run timeout 60 "$driver" 'DownloadMemoryDump "$outDir/dump.tmp"'
+  [ "$status" -eq 1 ]
+  grep -q 'cannot read the size of' "$MOCK_DIR/out/watcher.log"
+  grep -q 'stalled' "$MOCK_DIR/out/stage-errors.jsonl"
+}
+
+@test "a failed export probe that printed Ready is not readiness" {
+  MOCK_EXPORT_PROBE=fail-with-ready BSOD_DET__TIMEOUT__EXPORT_READY=20 run "$driver" 'WaitForExportReady synthetic-export'
+  [ "$status" -eq 1 ]
+  grep -q 'not Ready within 20s' "$MOCK_DIR/out/watcher.log"
+}
+
+@test "a Ready answer from a probe that outlived the deadline is not readiness" {
+  MOCK_EXPORT_PROBE=late-ready BSOD_DET__TIMEOUT__EXPORT_READY=2 run timeout 30 "$driver" 'WaitForExportReady synthetic-export'
+  [ "$status" -eq 1 ]
+  grep -q 'not Ready within 2s' "$MOCK_DIR/out/watcher.log"
 }
 
 # ==== Test isolation ====

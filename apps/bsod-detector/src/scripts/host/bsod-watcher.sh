@@ -65,6 +65,8 @@ typeset createdExportUid=''         # the only export the run ever deletes (see 
 typeset xmlTemporary=''             # Temporary files this invocation created (mktemp, unique) and has not yet renamed or removed:
 typeset memoryTemporary=''          # the only files Cleanup removes from the run output directory.
 typeset -i isLogSinkFailed=0        # watcher.log could not be written; reported once on stderr.
+typeset downloadPid=''              # Memory dump download (background virtctl) until its exit status is collected.
+typeset -i downloadStatus=0         # Exit status of the last collected download.
 
 # ==== Common helpers ====
 function Die () { echo "bsod-watcher: ERROR: $*" >&2; exit 1; }
@@ -112,6 +114,7 @@ function Fatal () {
 function Cleanup () {
     StopProgressMonitor
     StopEventWatch
+    StopDownload  # before its temporary output is removed below
     DeleteCreatedExport 1>&2
     if ((isMemoryAssociated)) && [[ -n "${cfgArr[vm]}" && -n "${cfgArr[ns]}" ]]; then
         RunTimed 60 virtctl memory-dump remove "${cfgArr[vm]}" -n "${cfgArr[ns]}" >/dev/null 2>&1 || true
@@ -389,18 +392,42 @@ function WaitForExportReady () {
     # Waits up to cfgArr[exportReadyTimeout] seconds (BSOD_DET__TIMEOUT__EXPORT_READY, default 300) for the export to report
     # Ready; each probe gets at most 30 s and each pause at most 5 s, both within the time left.
     typeset exportName="${1:?}"
-    typeset exportPhase=''
+    typeset exportPhase='' phase=''
     typeset -i deadline=$((SECONDS + cfgArr[exportReadyTimeout])) left=0
     while ((left = deadline - SECONDS, left > 0)); do
         ((left <= 30)) || left=30
-        exportPhase="$(RunTimed "${left}" oc --request-timeout="${left}s" get virtualmachineexport "${exportName}" -n "${cfgArr[ns]}" \
-            -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-        [[ "${exportPhase}" == Ready ]] && return 0
+        # Only a successful probe answering Ready within the deadline counts; a failed or cut-off probe is not readiness,
+        # whatever it printed.
+        if phase="$(RunTimed "${left}" oc --request-timeout="${left}s" get virtualmachineexport "${exportName}" -n "${cfgArr[ns]}" \
+            -o jsonpath='{.status.phase}' 2>/dev/null)"; then
+            exportPhase="${phase:-unset}"
+            [[ "${exportPhase}" == Ready ]] && ((SECONDS <= deadline)) && return 0
+        else
+            exportPhase='probe failed'
+        fi
         ((left = deadline - SECONDS, left > 0)) || break
         sleep "$((left < 5 ? left : 5))"
     done
     Log "VirtualMachineExport ${exportName} not Ready within ${cfgArr[exportReadyTimeout]}s (last phase: ${exportPhase:-unknown})"
     return 1
+}
+function IsDownloadRunning () {
+    # bash may reap a finished child before any explicit wait, after which its PID can be reused; only bash's own job table
+    # (jobs -r) tells reliably whether the download still runs.
+    [[ -n "${downloadPid}" && " $(jobs -rp | tr '\n' ' ') " == *" ${downloadPid} "* ]]
+}
+function StopDownload () {
+    # Stops this run's memory dump download if it still runs (TERM, then KILL after 10 s) and collects its exit status into
+    # downloadStatus. A finished download is never signalled; once this returns, nothing writes the download output any more.
+    typeset -i grace=0
+    [[ -n "${downloadPid}" ]] || return 0
+    if IsDownloadRunning; then
+        kill -TERM "${downloadPid}" 2>/dev/null || true
+        for ((grace = 10; grace > 0; grace--)); do IsDownloadRunning || break; sleep 1; done
+        if IsDownloadRunning; then kill -KILL "${downloadPid}" 2>/dev/null || true; fi
+    fi
+    downloadStatus=0; wait "${downloadPid}" 2>/dev/null || downloadStatus=$?
+    downloadPid=''
 }
 function DownloadMemoryDump () {
     # Exports the memory-dump PVC through a VirtualMachineExport created by this run and downloads it to the given file.
@@ -408,7 +435,7 @@ function DownloadMemoryDump () {
     typeset exportName="bsod-memdump-${runId,,}"; exportName="${exportName:0:63}"; exportName="${exportName%-}"
     # virtctl writes the export stream as it arrives: a transfer that adds no byte for downloadStallLimit seconds (the limit of
     # the predecessor watch-crash.sh) is hung and is stopped, while a slow transfer that keeps growing is never cut off.
-    typeset -i downloadPid=0 downloadStatus=0 downloadStallLimit=300 size=0 lastSize=0 lastGrowth=0 grace=0 isStalled=0
+    typeset -i downloadStallLimit=300 size=0 lastSize=0 lastGrowth=0 isStalled=0 isSizeUnknown=0
     # `create`, not `apply`: an export of that name that already exists is not this run's, so it is neither changed nor deleted.
     # Only a successful create returns the UID that DeleteCreatedExport requires.
     createdExport="${exportName}"
@@ -429,24 +456,23 @@ function DownloadMemoryDump () {
     fi
     Log "downloading memory dump via virtctl vmexport (no overall timeout; stopped after ${downloadStallLimit}s without progress)..."
     virtctl vmexport download "${exportName}" -n "${cfgArr[ns]}" --output "${target}" --format gzip --insecure --keep-vme >>"${pipelineLog}" 2>&1 &
-    downloadPid=$!; lastGrowth=${SECONDS}
-    while kill -0 "${downloadPid}" 2>/dev/null; do
+    downloadPid=$!; downloadStatus=0; lastGrowth=${SECONDS}
+    while IsDownloadRunning; do
         sleep 30
-        size="$(stat -c%s "${target}" 2>/dev/null || echo 0)"
+        if ! size="$(stat -c%s "${target}" 2>/dev/null)"; then
+            # An unreadable size is not progress; it is reported once.
+            ((isSizeUnknown)) || Log "WARN: cannot read the size of ${target}; counting no progress"
+            isSizeUnknown=1; size=${lastSize}
+        fi
         if ((size > lastSize)); then
             lastSize=${size}; lastGrowth=${SECONDS}
             Log "download progress: $(numfmt --to=iec-i --suffix=B "${size}" 2>/dev/null || echo "${size} bytes")"
         elif ((SECONDS - lastGrowth >= downloadStallLimit)); then
-            # Stop the stalled download: TERM, then KILL if it is still running after 10 s. It is only reaped by the wait below,
-            # so its PID cannot be reused in between.
             isStalled=1; Log "WARN: memory dump download added no data for ${downloadStallLimit}s — stopping it"
-            kill -TERM "${downloadPid}" 2>/dev/null || true
-            for ((grace = 10; grace > 0; grace--)); do kill -0 "${downloadPid}" 2>/dev/null || break; sleep 1; done
-            kill -KILL "${downloadPid}" 2>/dev/null || true
             break
         fi
     done
-    wait "${downloadPid}" 2>/dev/null || downloadStatus=$?
+    StopDownload  # stops a stalled download; for a finished one it only collects the exit status
     DeleteCreatedExport >>"${pipelineLog}" 2>&1
     # A download that completed on its own just as it was being stopped (status 0) is kept.
     if ((isStalled && downloadStatus != 0)); then
@@ -455,7 +481,7 @@ function DownloadMemoryDump () {
     ((downloadStatus == 0)) || { RecordError memory 'virtctl vmexport download failed'; return 1; }
 }
 function CaptureMemory () {
-    typeset target="${outDir}/vm-memory.elf.tar.gz"
+    typeset target="${outDir}/vm-memory.elf.tar.gz" moveError=''
     RequestMemoryDump || return 1
     # A unique temporary file: a partial download (failed or interrupted) is removed without touching any other run's files.
     memoryTemporary="$(mktemp "${outDir}/.vm-memory.elf.XXXXXX")" ||
@@ -466,9 +492,9 @@ function CaptureMemory () {
         RecordError memory 'downloaded memory dump is not a structurally valid ELF file'; return 1
     fi
     # Finalize atomically, never into an existing directory; a failed rename is a memory-stage failure, not a success.
-    if ! mv -fT "${memoryTemporary}" "${target}" 2>>"${pipelineLog}"; then
+    if ! moveError="$(mv -fT "${memoryTemporary}" "${target}" 2>&1)"; then
         rm -f "${memoryTemporary}" && memoryTemporary=''
-        RecordError memory "cannot finalize the memory dump as $(basename "${target}")"; return 1
+        RecordError memory "cannot finalize the memory dump as $(basename "${target}"): ${moveError}"; return 1
     fi
     memoryTemporary=''
     RunTimed 60 virtctl memory-dump remove "${cfgArr[vm]}" -n "${cfgArr[ns]}" >>"${pipelineLog}" 2>&1 ||
