@@ -61,6 +61,8 @@ typeset progressPid=''              # Background dump progress monitor.
 typeset -i isMemoryAssociated=0     # A KubeVirt memory dump is associated with the VM; removed on exit.
 typeset createdExport=''            # VirtualMachineExport this run created, and the UID the API server assigned to it:
 typeset createdExportUid=''         # the only export the run ever deletes (see DeleteCreatedExport).
+typeset xmlTemporary=''             # Temporary files this invocation created (mktemp, unique) and has not yet renamed or removed:
+typeset memoryTemporary=''          # the only files Cleanup removes from the run output directory.
 
 # ==== Common helpers ====
 function Die () { echo "bsod-watcher: ERROR: $*" >&2; exit 1; }
@@ -101,8 +103,10 @@ function Cleanup () {
         isMemoryAssociated=0
     fi
     [[ -z "${runDir}" ]] || rm -rf "${runDir}"
-    # Only this run's own temporaries in its run directory are removed: no shared directory is swept.
-    [[ -z "${outDir}" ]] || rm -f "${outDir}/.domain-bsod.xml.tmp" "${outDir}/.vm-memory.elf.tmp"
+    # Only the temporary files this invocation created are removed (never by name pattern, never in a shared directory); a
+    # failed removal does not change the exit status.
+    [[ -z "${xmlTemporary}" ]] || rm -f "${xmlTemporary}" || true
+    [[ -z "${memoryTemporary}" ]] || rm -f "${memoryTemporary}" || true
     true
 }
 function OnSignal () {
@@ -304,14 +308,16 @@ function IsPodTerminated () {
     [[ "${phaseRef}" == Failed || "${phaseRef}" == Succeeded ]]
 }
 function CaptureDomainXml () {
-    # Captures the live domain XML into a temporary file in the same directory and atomically replaces domain-bsod.xml only with
-    # a complete, non-empty capture: a failed attempt never truncates or removes a usable earlier copy.
-    typeset target="${outDir}/domain-bsod.xml" temporary="${outDir}/.domain-bsod.xml.tmp"
-    if oc --request-timeout=30s exec -n "${cfgArr[ns]}" "${metaArr[launcherPod]}" -- virsh dumpxml "${metaArr[domain]}" > "${temporary}" \
-        2>>"${pipelineLog}" && [[ -s "${temporary}" ]] && mv -fT "${temporary}" "${target}"; then
+    # Captures the live domain XML into a unique temporary file in the same directory and atomically replaces domain-bsod.xml only
+    # with a complete, non-empty capture: a failed attempt never truncates or removes a usable earlier copy.
+    typeset target="${outDir}/domain-bsod.xml"
+    xmlTemporary="$(mktemp "${outDir}/.domain-bsod.xml.XXXXXX")" || { xmlTemporary=''; return 1; }
+    if oc --request-timeout=30s exec -n "${cfgArr[ns]}" "${metaArr[launcherPod]}" -- virsh dumpxml "${metaArr[domain]}" > "${xmlTemporary}" \
+        2>>"${pipelineLog}" && [[ -s "${xmlTemporary}" ]] && mv -fT "${xmlTemporary}" "${target}"; then
+        xmlTemporary=''
         return 0
     fi
-    rm -f "${temporary}"
+    rm -f "${xmlTemporary}" && xmlTemporary=''
     return 1
 }
 function CaptureScreenshot () {
@@ -410,15 +416,17 @@ function DownloadMemoryDump () {
     ((downloadStatus == 0)) || { RecordError memory 'virtctl vmexport download failed'; return 1; }
 }
 function CaptureMemory () {
-    typeset temporary="${outDir}/.vm-memory.elf.tmp"
     typeset target="${outDir}/vm-memory.elf.tar.gz"
-    rm -f "${temporary}"
     RequestMemoryDump || return 1
-    DownloadMemoryDump "${temporary}" || { rm -f "${temporary}"; return 1; }
-    if ! RunTimed 60 python3 "${scriptDir}/reliability.py" validate-artifact --type memory --path "${temporary}" >/dev/null; then
-        rm -f "${temporary}"; RecordError memory 'downloaded memory dump is not a structurally valid ELF file'; return 1
+    # A unique temporary file: a partial download (failed or interrupted) is removed without touching any other run's files.
+    memoryTemporary="$(mktemp "${outDir}/.vm-memory.elf.XXXXXX")" ||
+        { memoryTemporary=''; RecordError memory 'cannot create the temporary memory dump file'; return 1; }
+    DownloadMemoryDump "${memoryTemporary}" || { rm -f "${memoryTemporary}" && memoryTemporary=''; return 1; }
+    if ! RunTimed 60 python3 "${scriptDir}/reliability.py" validate-artifact --type memory --path "${memoryTemporary}" >/dev/null; then
+        rm -f "${memoryTemporary}" && memoryTemporary=''
+        RecordError memory 'downloaded memory dump is not a structurally valid ELF file'; return 1
     fi
-    mv -f "${temporary}" "${target}"
+    mv -f "${memoryTemporary}" "${target}" && memoryTemporary=''
     RunTimed 60 virtctl memory-dump remove "${cfgArr[vm]}" -n "${cfgArr[ns]}" >>"${pipelineLog}" 2>&1 ||
         { RecordError memory 'memory-dump association cleanup failed'; return 1; }
     isMemoryAssociated=0; Log "validated KubeVirt memory dump: $(basename "${target}")"
