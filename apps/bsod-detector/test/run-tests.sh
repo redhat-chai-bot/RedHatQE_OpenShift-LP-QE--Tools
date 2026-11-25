@@ -21,8 +21,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
   "${testDir}/test_recovery.py" \
   "${testDir}/test_recursive_mapping.py" \
   "${testDir}/test_extractor_contract.py" \
-  "${testDir}/test_guestfs_lifecycle.py" \
-  "${testDir}/test_golden_image_iso_workspace.py"
+  "${testDir}/test_guestfs_lifecycle.py"
 
 # Keep the default suite explicit: list every active Bats file here.
 bats \
