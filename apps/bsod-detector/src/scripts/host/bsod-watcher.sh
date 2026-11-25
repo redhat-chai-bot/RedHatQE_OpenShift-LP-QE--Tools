@@ -426,7 +426,12 @@ function CaptureMemory () {
         rm -f "${memoryTemporary}" && memoryTemporary=''
         RecordError memory 'downloaded memory dump is not a structurally valid ELF file'; return 1
     fi
-    mv -f "${memoryTemporary}" "${target}" && memoryTemporary=''
+    # Finalize atomically, never into an existing directory; a failed rename is a memory-stage failure, not a success.
+    if ! mv -fT "${memoryTemporary}" "${target}" 2>>"${pipelineLog}"; then
+        rm -f "${memoryTemporary}" && memoryTemporary=''
+        RecordError memory "cannot finalize the memory dump as $(basename "${target}")"; return 1
+    fi
+    memoryTemporary=''
     RunTimed 60 virtctl memory-dump remove "${cfgArr[vm]}" -n "${cfgArr[ns]}" >>"${pipelineLog}" 2>&1 ||
         { RecordError memory 'memory-dump association cleanup failed'; return 1; }
     isMemoryAssociated=0; Log "validated KubeVirt memory dump: $(basename "${target}")"
