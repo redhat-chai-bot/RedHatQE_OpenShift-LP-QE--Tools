@@ -1,7 +1,7 @@
 # Golden-image setup, part 2 of 2. Run as Administrator AFTER the reboot triggered by
 # golden-image-pre-reboot.ps1 and BEFORE sealing. Any FAIL exits 1 (do not seal);
-# WARN lines are informational. When every check passes, the ISO cache files left by
-# golden-image-pre-reboot.ps1 are removed so they are not sealed into the image.
+# WARN lines are informational. golden-image-pre-reboot.ps1 removes its virtio-win ISO before the
+# reboot, so nothing of it is checked or cleaned up here.
 
 # Fixed pagefile size in MB: physical RAM plus 257 MB, rounded once to a whole MB. This must
 # match the size golden-image-pre-reboot.ps1 configures, so the check below can pass exactly.
@@ -9,34 +9,17 @@ function Get-PagefileSizeMB ([int64]$memoryBytes) {
     [int64][math]::Round(($memoryBytes + 257MB) / 1MB, 0)
 }
 
-# Removes the given cache files and outputs one message per file that could not be removed.
-# A missing file is already clean. A mounted ISO is left in place and reported, and any
-# removal error (for example a file in use) is reported instead of being ignored.
-function Remove-SetupCacheFile ([string[]]$pathArr) {
-    $failures = @()
-    foreach ($path in $pathArr) {
-        if (-not (Test-Path -LiteralPath $path)) { continue }
-        if ($path -like '*.iso') {
-            $image = Get-DiskImage -ImagePath $path -ErrorAction SilentlyContinue
-            if ($image -and $image.Attached) {
-                $failures += "${path} is still mounted"
-                continue
-            }
-        }
-        try {
-            Remove-Item -LiteralPath $path -Force -ErrorAction Stop
-            Write-Host "OK: removed ${path}"
-        } catch {
-            $failures += "${path} could not be removed: $($_.Exception.Message)"
-        }
-    }
-    $failures
-}
-
-# Returns a stored artifact record (JSON), or nothing when it is missing or unreadable.
-function Read-ArtifactRecord ([string]$path) {
-    if (-not (Test-Path -LiteralPath $path)) { return }
-    try { Get-Content -Raw -LiteralPath $path | ConvertFrom-Json } catch { return }
+# Removes the exact dedicated dump file an older preparation created, only when CrashControl names
+# no dedicated dump file and the path is a plain file (not a directory, link or other reparse
+# point). Returns 'absent', 'removed', or why the file is still there.
+function Remove-LegacyDedicatedDump ([string]$path, [string]$configuredTarget) {
+    if (-not (Test-Path -LiteralPath $path)) { return 'absent' }
+    if ($configuredTarget) { return "CrashControl still names DedicatedDumpFile '${configuredTarget}'" }
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if (-not $item -or $item.PSIsContainer -or "$($item.Attributes)" -like '*ReparsePoint*') { return 'it is not a plain file' }
+    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $path) { return 'it could not be removed (it may stay locked until the next reboot)' }
+    'removed'
 }
 
 # FAIL lines use Write-Error. Keep the default preference so a caller's Stop preference cannot end
@@ -108,24 +91,15 @@ if ($dedicatedDump) {
 } else {
     Write-Host 'OK: DedicatedDumpFile = (not set) - pagefile.sys used via normal I/O'
 }
-# A dedicated dump file left by an older preparation is unused but would be sealed into the image.
-# It is not deleted automatically: remove it manually once DedicatedDumpFile is unset and the VM has
-# rebooted (Windows can hold the file open until then), then re-run this script.
-if (Test-Path -LiteralPath 'C:\DedicatedDump.sys') {
-    Write-Error 'FAIL: C:\DedicatedDump.sys from an older preparation still exists - delete it manually once DedicatedDumpFile is unset and the VM has rebooted, then re-run this script'
-    $hasFailure = $true
-}
-
-# golden-image-pre-reboot.ps1 records the virtio-win ISO it installed from (source, resolved HTTPS
-# source, version, SHA-256 calculated at download) in this file. The record stays in the image when
-# the ISO cache is removed below; its SHA-256 is an audit record, not a publisher attestation.
-Write-Host "`n--- Checking the virtio-win ISO record ---"
-$isoRecordPath = 'C:\ProgramData\bsod-detector\virtio-win-iso.json'
-$isoRecord = Read-ArtifactRecord $isoRecordPath
-if ($isoRecord -and "$($isoRecord.sha256)" -match '^[0-9A-Fa-f]{64}$' -and "$($isoRecord.resolvedSource)" -like 'https://*') {
-    Write-Host "OK: virtio-win $($isoRecord.version) from $($isoRecord.resolvedSource), SHA-256 $($isoRecord.sha256) (kept in ${isoRecordPath})"
-} else {
-    Write-Error "FAIL: ${isoRecordPath} is missing or incomplete - re-run golden-image-pre-reboot.ps1"
+# A dedicated dump file left at this fixed path by an older preparation is unused but would be
+# sealed into the image. Only that exact file is removed (see Remove-LegacyDedicatedDump); if it is
+# still there (DedicatedDumpFile is set, it is not a plain file, or it is still locked), do not seal.
+$legacyDumpPath = 'C:\DedicatedDump.sys'
+$legacyDumpResult = Remove-LegacyDedicatedDump $legacyDumpPath $dedicatedDump
+if ($legacyDumpResult -eq 'removed') {
+    Write-Host "OK: removed ${legacyDumpPath} from an older preparation"
+} elseif ($legacyDumpResult -ne 'absent') {
+    Write-Error "FAIL: ${legacyDumpPath} from an older preparation is still present: ${legacyDumpResult}"
     $hasFailure = $true
 }
 
@@ -174,17 +148,5 @@ if ($hasFailure) {
     exit 1
 }
 
-# Only after every check passed: golden-image-pre-reboot.ps1 keeps its ISO download (and, after an
-# interrupted transfer, a partial .download file) for re-runs, but neither belongs in the image.
-Write-Host "`n--- Removing stale setup files ---"
-$cleanupFailures = @(Remove-SetupCacheFile @('C:\Temp\virtio-win.iso', 'C:\Temp\virtio-win.iso.download'))
-if ($cleanupFailures.Count) {
-    foreach ($failure in $cleanupFailures) { Write-Error "FAIL: ${failure}" }
-    Write-Error '=== Stale setup files remain - DO NOT SEAL. Unmount or close them, remove them and re-run this script. ==='
-    exit 1
-}
-Write-Host 'OK: virtio-win ISO cache files removed or already absent'
-
-Write-Host ''
 Write-Host '=== All checks passed - safe to seal the golden image. ===' -ForegroundColor Green
 Write-Host '=== Seal the image with: C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /quiet ===' -ForegroundColor Green
