@@ -100,6 +100,7 @@ function Cleanup () {
         isMemoryAssociated=0
     fi
     [[ -z "${runDir}" ]] || rm -rf "${runDir}"
+    [[ -z "${outDir}" ]] || rm -f "${outDir}/.domain-bsod.xml.tmp"
     # Remove guestfish download caches (file.0x*) left in the application tree or /tmp.
     find "${scriptDir}/../.." -maxdepth 5 -name 'file.0x*' -type f -delete 2>/dev/null || true
     find /tmp -maxdepth 2 -name 'file.0x*' -type f -delete 2>/dev/null || true
@@ -171,25 +172,34 @@ function ValidateConfig () {
 
 # ==== Phase: preflight ====
 function ReadMetadata () {
-    # Fields the watcher relies on must be non-empty strings; .node is informational only and read as is; .guestPvc (checked
-    # before recovery) is kept only if it is a non-empty string. One jq run prints the first invalid field (empty if none), then
-    # NUL-terminated name/value pairs shaped as `$(jq -r ...)` returns them (NUL bytes dropped, trailing newlines removed).
-    typeset -a keyArr=(runId outputDir namespace vm launcherPod domain diskTarget memoryDumpPvc) fieldArr=()
+    # Reads the preflight metadata, which must hold exactly one JSON document, in one jq run whose exit status is checked. Fields
+    # the watcher relies on must be non-empty single-line strings; .guestPvc (checked before recovery) is kept only if it is one;
+    # .node is informational only and read as is. jq prints `ok`, one line per field and .guestPvc, the .node lines and `end`, or
+    # why the metadata is invalid. Values are shaped as `$(jq -r ...)` returns them (NUL bytes dropped, trailing newlines removed).
+    typeset -a keyArr=(runId outputDir namespace vm launcherPod domain diskTarget memoryDumpPvc) lineArr=()
+    typeset output='' key=''
     typeset -i i=0
-    mapfile -d '' -t fieldArr < <(jq -j '
+    output="$(jq -sr '
         def shell: if type == "string" then gsub("\u0000"; "") | until(endswith("\n") | not; .[:-1]) else . end;
-        def valid: type == "string" and length > 0;
-        . as $meta | (first($ARGS.positional[] | select($meta[.] | valid | not)) // "") as $invalid
-        | $invalid, "\u0000",
-          if $invalid == "" then
-              ($ARGS.positional[] | ., "\u0000", ($meta[.] | shell), "\u0000"),
-              "guestPvc", "\u0000", ($meta.guestPvc | if valid then shell else "" end), "\u0000",
-              "node", "\u0000", ($meta.node | shell), "\u0000"
-          else empty end' "${metadataFile}" --args "${keyArr[@]}")
-    # Expected: the empty "first invalid field", then the name/value pairs of the fields, .guestPvc and .node.
-    [[ ${#fieldArr[@]} -eq $((1 + 2 * (${#keyArr[@]} + 2))) && -z "${fieldArr[0]}" ]] ||
-        Die "missing or invalid \`.${fieldArr[0]:-runId}\` in preflight metadata ${metadataFile}"
-    for ((i = 1; i < ${#fieldArr[@]}; i += 2)); do metaArr[${fieldArr[i]}]="${fieldArr[i + 1]}"; done
+        def valid: type == "string" and length > 0 and (shell | contains("\n") | not);
+        if length != 1 then "documents \(length)"
+        elif (.[0] | type) as $type | $type != "object" and $type != "null" then "field \($ARGS.positional[0])"
+        else .[0] as $meta | ([$ARGS.positional[] | select($meta[.] | valid | not)] | first) as $invalid
+            | if $invalid then "field \($invalid)"
+              else "ok", ($ARGS.positional[] | $meta[.] | shell), ($meta.guestPvc | if valid then shell else "" end),
+                  ($meta.node | shell), "end"
+              end
+        end' "${metadataFile}" --args "${keyArr[@]}")" || Die "cannot read preflight metadata ${metadataFile} as JSON"
+    mapfile -t lineArr <<<"${output}"
+    case "${lineArr[0]}" in
+      (ok) ;;
+      ('documents '*) Die "preflight metadata ${metadataFile} must hold exactly one JSON document (found ${lineArr[0]#documents })";;
+      ('field '*) Die "missing or invalid \`.${lineArr[0]#field }\` in preflight metadata ${metadataFile}";;
+      (*) Die "cannot read preflight metadata ${metadataFile} as JSON";;
+    esac
+    [[ ${#lineArr[@]} -ge $((${#keyArr[@]} + 4)) && "${lineArr[-1]}" == end ]] || Die "cannot read preflight metadata ${metadataFile} as JSON"
+    for key in "${keyArr[@]}" guestPvc; do metaArr[${key}]="${lineArr[++i]}"; done
+    printf -v 'metaArr[node]' '%s\n' "${lineArr[@]:i + 1:${#lineArr[@]} - i - 2}"; metaArr[node]="${metaArr[node]%$'\n'}"
 }
 function RunPreflight () {
     # Creates a new run directory under the evidence mount and runs preflight-rhov.sh into it.
@@ -296,7 +306,7 @@ function CaptureDomainXml () {
     # a complete, non-empty capture: a failed attempt never truncates or removes a usable earlier copy.
     typeset target="${outDir}/domain-bsod.xml" temporary="${outDir}/.domain-bsod.xml.tmp"
     if oc --request-timeout=30s exec -n "${cfgArr[ns]}" "${metaArr[launcherPod]}" -- virsh dumpxml "${metaArr[domain]}" > "${temporary}" \
-        2>>"${pipelineLog}" && [[ -s "${temporary}" ]] && mv -f "${temporary}" "${target}"; then
+        2>>"${pipelineLog}" && [[ -s "${temporary}" ]] && mv -fT "${temporary}" "${target}"; then
         return 0
     fi
     rm -f "${temporary}"
@@ -534,38 +544,48 @@ function WaitForEventLogs () {
     done
     true
 }
+function ReleaseProbe () {
+    # ReleaseProbe DEADLINE oc-get-args...: `oc get` in the VM namespace within the time left before DEADLINE (a SECONDS value);
+    # returns 124 without a request when no time is left.
+    typeset -i left=$((${1:?} - SECONDS)); shift
+    ((left > 0)) || return 124
+    RunTimed "${left}" oc --request-timeout="${left}s" get "$@" -n "${cfgArr[ns]}" 2>>"${pipelineLog}"
+}
 function StopVMAndRecover () {
     # Stops the VM (never restarted), runs the offline guest OS crash extraction and writes the evidence summary. The extraction
-    # (virtctl guestfs) mounts the guest disk PVC directly and refuses a PVC that any pod still references, so it runs only after
-    # bounded affirmative checks: the VM reports Stopped, its virt-launcher pod no longer exists, and the guest PVC is Bound and
-    # not being deleted. A failed probe is never taken as proof. The checks are not a storage lock: another workload can still
-    # claim the PVC before the helper pod mounts it, and the extraction then fails on its own checks.
+    # requires the VM to report Stopped; its helper (virtctl guestfs) mounts the guest disk PVC directly and refuses it while any
+    # pod still references it. So within one 120s budget, which also bounds every probe and pause, the extraction waits until the
+    # VM reports Stopped (KubeVirt reports that also while a final VMI still exists), the exact-name virt-launcher pod no longer
+    # exists, and the guest PVC is Bound and not being deleted. A failed or timed-out probe is never taken as proof. These are
+    # readiness checks, not a storage lock: the helper's own in-use check (a pod list) remains the final gate.
     typeset recoveryBin="${scriptDir}/extract--guest-os--crash-info.sh"
     typeset vmStatus='' podRef='' pvcState='' pending=''
-    typeset -i deadline=0
+    typeset -i deadline=0 pause=0
     Log 'requesting VMI stop through virtctl'
     RunTimed 90 virtctl stop "${cfgArr[vm]}" -n "${cfgArr[ns]}" >>"${pipelineLog}" 2>&1 || Fatal stop 'virtctl stop failed or timed out'
     deadline=$((SECONDS + 120))
     while true; do
-        vmStatus="$(oc --request-timeout=30s get vm "${cfgArr[vm]}" -n "${cfgArr[ns]}" -o jsonpath='{.status.printableStatus}' \
-            2>>"${pipelineLog}")" || Fatal stop 'cannot verify that the VM stopped'
+        ((SECONDS < deadline)) || Fatal stop "VM stop and recovery readiness not confirmed within 120s (${pending})"
+        vmStatus="$(ReleaseProbe "${deadline}" vm "${cfgArr[vm]}" -o jsonpath='{.status.printableStatus}')" ||
+            Fatal stop 'cannot verify within 120s that the VM stopped'
         pending="VM status ${vmStatus:-unset}"
         if [[ "${vmStatus}" == Stopped ]]; then
-            podRef="$(oc --request-timeout=30s get pod "${metaArr[launcherPod]}" -n "${cfgArr[ns]}" --ignore-not-found -o name \
-                2>>"${pipelineLog}")" || Fatal stop 'cannot verify that the virt-launcher pod is gone'
+            podRef="$(ReleaseProbe "${deadline}" pod "${metaArr[launcherPod]}" --ignore-not-found -o name)" ||
+                Fatal stop 'cannot verify within 120s that the virt-launcher pod is gone'
             pending="${podRef} still exists"
             if [[ -z "${podRef}" ]]; then
                 [[ -n "${metaArr[guestPvc]:-}" ]] || Fatal recovery 'preflight metadata has no .guestPvc; cannot verify the guest PVC'
-                pvcState="$(oc --request-timeout=30s get pvc "${metaArr[guestPvc]}" -n "${cfgArr[ns]}" \
-                    -o jsonpath='{.status.phase}{"/"}{.metadata.deletionTimestamp}' 2>>"${pipelineLog}")" || Fatal stop 'cannot verify the guest PVC'
+                pvcState="$(ReleaseProbe "${deadline}" pvc "${metaArr[guestPvc]}" -o jsonpath='{.status.phase}{"/"}{.metadata.deletionTimestamp}')" ||
+                    Fatal stop 'cannot verify the guest PVC within 120s'
                 [[ "${pvcState}" == Bound/ ]] && break
                 pending="guest PVC ${metaArr[guestPvc]} is ${pvcState}"
             fi
         fi
-        ((SECONDS < deadline)) || Fatal stop "VM stop and guest PVC release not confirmed within 120s (${pending})"
-        sleep 3
+        pause=$((deadline - SECONDS)); ((pause <= 3)) || pause=3
+        ((pause <= 0)) || sleep "${pause}"
     done
-    Log "VM stopped, virt-launcher pod gone, guest PVC ${metaArr[guestPvc]} Bound"
+    ((SECONDS <= deadline)) || Fatal stop 'VM stop and recovery readiness confirmed only after the 120s deadline'
+    Log "VM stopped, virt-launcher pod gone, guest PVC ${metaArr[guestPvc]} Bound; starting the offline extraction"
     [[ -x "${recoveryBin}" ]] || Fatal recovery "recovery script missing: ${recoveryBin}"
     "${recoveryBin}" --metadata "${metadataFile}" >>"${pipelineLog}" 2>&1 || Fatal
     Log 'waiting for recovery artifacts to stabilize...'
