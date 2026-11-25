@@ -11,6 +11,11 @@
     golden-image-pre-reboot.ps1 configures these settings and golden-image-post-reboot.ps1
     verifies them before the image is sealed.
 
+    It replaces configure-dumps.ps1, which is removed without a compatibility stub: that script
+    changed the settings and could ask for a reboot, so callers must migrate to the result
+    contract under OUTPUTS. The removal may land only together with the compatible preflight
+    integration in pull request #39, which runs this validator instead.
+
     Runs on the guest VM. Only with -stageNotMyFault (intentional crash runs) does it also stage
     the current NotMyFault release; it never runs NotMyFault, crashes or reboots the guest.
 
@@ -49,10 +54,10 @@
                       "archiveSHA256": "...", "sha256": "...", "version": "...", "signer": "...", "stagedPath": "..." }
     }
     On failure: { "ok": false, "error": "...", "script": "validate-crash-settings.ps1" } with exit code
-    2 (unknown dump type) or 4 (NotMyFault could not be staged; the full result above is emitted with
-    ok = false and the error, so settings mismatches stay visible; callers should treat it as a failure).
-    A missing data file is a terminating error. A settings mismatch is reported in the JSON, not
-    through the exit code.
+    1 (crash-control.json is missing, unreadable, empty or not valid JSON), 2 (unknown dump type) or
+    4 (NotMyFault could not be staged; the full result above is emitted with ok = false and the error,
+    so settings mismatches stay visible; callers should treat it as a failure). A settings mismatch
+    is reported in the JSON, not through the exit code.
 #>
 [CmdletBinding()]
 param(
@@ -279,7 +284,15 @@ function Invoke-NotMyFaultStaging ([string]$source) {
     $record
 }
 
-$cfg = Read-CrashControlData $dataFile
+# A data file that is missing, unreadable, empty or not valid JSON is reported as failure JSON, not
+# as a raw PowerShell error, so callers that parse stdout still get one JSON document. PowerShell 7
+# turns an empty file into $null without an error, so that case is thrown here.
+try {
+    $cfg = Read-CrashControlData $dataFile
+    if ($null -eq $cfg) { throw 'Data file is empty or null' }
+} catch {
+    Fail "Cannot load crash-control.json: $($_.Exception.Message)" 1
+}
 
 $type = if ($dumpType) { $dumpType } else { $cfg.recommended.crashDumpType }
 $typeNames = $cfg.crashDumpTypes.PSObject.Properties.Name
