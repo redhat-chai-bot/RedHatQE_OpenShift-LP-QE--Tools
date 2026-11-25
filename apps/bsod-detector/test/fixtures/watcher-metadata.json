@@ -1,0 +1,1 @@
+{"schema":2,"runId":"20261125T000000Z-1-1","outputDir":"/synthetic/evidence/20261125T000000Z-1-1","namespace":"synthetic-ns","vm":"synthetic-vm","launcherPod":"virt-launcher-synthetic-vm-abcde","domain":"synthetic-ns_synthetic-vm","node":"synthetic-node","guestPvc":"synthetic-guest-pvc","diskName":"rootdisk","diskTarget":"vda","memoryDumpPvc":"synthetic-memdump-pvc"}

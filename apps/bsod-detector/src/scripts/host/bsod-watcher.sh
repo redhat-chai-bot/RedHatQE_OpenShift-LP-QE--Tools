@@ -40,6 +40,7 @@ typeset -A cfgArr=(
     [preflightTimeout]="${BSOD_DET__TIMEOUT__PREFLIGHT:-${BSOD_DET__PREFLIGHT__TIMEOUT:-300}}"  # (BSOD_DET__PREFLIGHT__TIMEOUT)
     [captureTimeout]="${BSOD_DET__TIMEOUT__CAPTURE:-${BSOD_DET__CAPTURE__TIMEOUT:-300}}"        # (BSOD_DET__CAPTURE__TIMEOUT)
     [memoryTimeout]="${BSOD_DET__TIMEOUT__MEMORY:-${BSOD_MEMORY_CAPTURE_TIMEOUT:-1800}}"        # (BSOD_MEMORY_CAPTURE_TIMEOUT)
+    [exportReadyTimeout]="${BSOD_DET__TIMEOUT__EXPORT_READY:-300}"                                # memory-dump export readiness
     # Helper override (tests); BSOD_DET__GUEST_AGENT__BIN likewise replaces guest-agent.py below.
     [hostSignalsBin]="${BSOD_DET__HOST_SIGNALS__BIN:-${scriptDir}/collect-host-signals.sh}"
 )
@@ -63,15 +64,29 @@ typeset createdExport=''            # VirtualMachineExport this run created, and
 typeset createdExportUid=''         # the only export the run ever deletes (see DeleteCreatedExport).
 typeset xmlTemporary=''             # Temporary files this invocation created (mktemp, unique) and has not yet renamed or removed:
 typeset memoryTemporary=''          # the only files Cleanup removes from the run output directory.
+typeset -i isLogSinkFailed=0        # watcher.log could not be written; reported once on stderr.
 
 # ==== Common helpers ====
 function Die () { echo "bsod-watcher: ERROR: $*" >&2; exit 1; }
 function RunTimed () { typeset seconds="${1:?}"; shift; timeout --signal=TERM --kill-after=5 "${seconds}" "$@"; }
-function Log () { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "${pipelineLog}"; true; }
+function Log () {
+    # Prints a timestamped line and appends it to watcher.log. A failed write (e.g. a full evidence volume) never stops the
+    # watcher under errexit/pipefail: it is reported once on stderr, not through Log, and Log still succeeds.
+    typeset line=''
+    line="[$(date -u +%H:%M:%S)] $*"
+    printf '%s\n' "${line}" 2>/dev/null || true
+    [[ -z "${pipelineLog}" ]] || printf '%s\n' "${line}" >>"${pipelineLog}" 2>/dev/null || {
+        ((isLogSinkFailed)) || echo "bsod-watcher: WARN: cannot append to ${pipelineLog}; continuing without it" >&2 || true
+        isLogSinkFailed=1
+    }
+    true
+}
 function RecordError () {
+    # Appends the error to stage-errors.jsonl (a failed write is reported on stderr and does not stop the watcher) and logs it.
     typeset stage="${1:?}"; shift
     jq -cn --arg stage "${stage}" --arg error "$*" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '{stage:$stage,error:$error,at:$at}' >> "${stageErrors}"
+        '{stage:$stage,error:$error,at:$at}' >> "${stageErrors}" 2>/dev/null ||
+        echo "bsod-watcher: WARN: cannot append to ${stageErrors}: [${stage}] $*" >&2 || true
     Log "ERROR [${stage}]: $*"
 }
 function WriteSummary () {
@@ -161,13 +176,13 @@ function ValidateConfig () {
     typeset key=''
     typeset -A settingArr=([interval]=--interval [miss]=--miss [quiesceWait]=--quiesce-wait [idleSamples]=--idle-samples
         [armedTimeout]='BSOD_DET__TIMEOUT__ARMED (or BSOD_DET__ARMED__TIMEOUT)'
-        [memoryTimeout]='BSOD_DET__TIMEOUT__MEMORY (or BSOD_MEMORY_CAPTURE_TIMEOUT)')
+        [memoryTimeout]='BSOD_DET__TIMEOUT__MEMORY (or BSOD_MEMORY_CAPTURE_TIMEOUT)' [exportReadyTimeout]=BSOD_DET__TIMEOUT__EXPORT_READY)
     [[ -n "${cfgArr[ns]}" && -n "${cfgArr[vm]}" && -n "${cfgArr[out]}" ]] || Die '--ns, --vm, and --out are required'
     [[ -n "${cfgArr[armedTimeout]}" ]] ||
         Die 'BSOD_DET__TIMEOUT__ARMED (or legacy BSOD_DET__ARMED__TIMEOUT) must be set by the caller, e.g. bsod-runner.sh'
     # Counts and the budgets used in shell arithmetic must be plain positive integers; the preflight and capture budgets only
     # reach timeout(1), which also accepts suffixed durations.
-    for key in interval miss quiesceWait idleSamples armedTimeout memoryTimeout; do
+    for key in interval miss quiesceWait idleSamples armedTimeout memoryTimeout exportReadyTimeout; do
         [[ "${cfgArr[${key}]}" =~ ^[1-9][0-9]*$ ]] || Die "${settingArr[${key}]} must be a positive integer (got '${cfgArr[${key}]}')"
     done
     if [[ -n "${cfgArr[metadata]}" ]]; then
@@ -371,21 +386,29 @@ function DeleteCreatedExport () {
     createdExport=''; createdExportUid=''
 }
 function WaitForExportReady () {
+    # Waits up to cfgArr[exportReadyTimeout] seconds (BSOD_DET__TIMEOUT__EXPORT_READY, default 300) for the export to report
+    # Ready; each probe gets at most 30 s and each pause at most 5 s, both within the time left.
     typeset exportName="${1:?}"
     typeset exportPhase=''
-    typeset -i deadline=$((SECONDS + 300))
-    while ((SECONDS < deadline)); do
-        exportPhase="$(oc --request-timeout=30s get virtualmachineexport "${exportName}" -n "${cfgArr[ns]}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    typeset -i deadline=$((SECONDS + cfgArr[exportReadyTimeout])) left=0
+    while ((left = deadline - SECONDS, left > 0)); do
+        ((left <= 30)) || left=30
+        exportPhase="$(RunTimed "${left}" oc --request-timeout="${left}s" get virtualmachineexport "${exportName}" -n "${cfgArr[ns]}" \
+            -o jsonpath='{.status.phase}' 2>/dev/null || true)"
         [[ "${exportPhase}" == Ready ]] && return 0
-        sleep 5
+        ((left = deadline - SECONDS, left > 0)) || break
+        sleep "$((left < 5 ? left : 5))"
     done
+    Log "VirtualMachineExport ${exportName} not Ready within ${cfgArr[exportReadyTimeout]}s (last phase: ${exportPhase:-unknown})"
     return 1
 }
 function DownloadMemoryDump () {
     # Exports the memory-dump PVC through a VirtualMachineExport created by this run and downloads it to the given file.
     typeset target="${1:?}"
     typeset exportName="bsod-memdump-${runId,,}"; exportName="${exportName:0:63}"; exportName="${exportName%-}"
-    typeset -i downloadPid=0 downloadStatus=0
+    # virtctl writes the export stream as it arrives: a transfer that adds no byte for downloadStallLimit seconds (the limit of
+    # the predecessor watch-crash.sh) is hung and is stopped, while a slow transfer that keeps growing is never cut off.
+    typeset -i downloadPid=0 downloadStatus=0 downloadStallLimit=300 size=0 lastSize=0 lastGrowth=0 grace=0 isStalled=0
     # `create`, not `apply`: an export of that name that already exists is not this run's, so it is neither changed nor deleted.
     # Only a successful create returns the UID that DeleteCreatedExport requires.
     createdExport="${exportName}"
@@ -400,19 +423,35 @@ function DownloadMemoryDump () {
     fi
     echo "created VirtualMachineExport ${exportName} (uid ${createdExportUid})" >>"${pipelineLog}"
     if ! WaitForExportReady "${exportName}"; then
-        RecordError memory 'VirtualMachineExport did not become ready'
+        RecordError memory "VirtualMachineExport did not become ready within ${cfgArr[exportReadyTimeout]}s"
         DeleteCreatedExport >>"${pipelineLog}" 2>&1
         return 1
     fi
-    Log 'downloading memory dump via virtctl vmexport (unlimited, no hard timeout)...'
+    Log "downloading memory dump via virtctl vmexport (no overall timeout; stopped after ${downloadStallLimit}s without progress)..."
     virtctl vmexport download "${exportName}" -n "${cfgArr[ns]}" --output "${target}" --format gzip --insecure --keep-vme >>"${pipelineLog}" 2>&1 &
-    downloadPid=$!
+    downloadPid=$!; lastGrowth=${SECONDS}
     while kill -0 "${downloadPid}" 2>/dev/null; do
         sleep 30
-        [[ -f "${target}" ]] && Log "download progress: $(numfmt --to=iec-i --suffix=B "$(stat -c%s "${target}" 2>/dev/null || echo 0)" 2>/dev/null)"
+        size="$(stat -c%s "${target}" 2>/dev/null || echo 0)"
+        if ((size > lastSize)); then
+            lastSize=${size}; lastGrowth=${SECONDS}
+            Log "download progress: $(numfmt --to=iec-i --suffix=B "${size}" 2>/dev/null || echo "${size} bytes")"
+        elif ((SECONDS - lastGrowth >= downloadStallLimit)); then
+            # Stop the stalled download: TERM, then KILL if it is still running after 10 s. It is only reaped by the wait below,
+            # so its PID cannot be reused in between.
+            isStalled=1; Log "WARN: memory dump download added no data for ${downloadStallLimit}s — stopping it"
+            kill -TERM "${downloadPid}" 2>/dev/null || true
+            for ((grace = 10; grace > 0; grace--)); do kill -0 "${downloadPid}" 2>/dev/null || break; sleep 1; done
+            kill -KILL "${downloadPid}" 2>/dev/null || true
+            break
+        fi
     done
     wait "${downloadPid}" 2>/dev/null || downloadStatus=$?
     DeleteCreatedExport >>"${pipelineLog}" 2>&1
+    # A download that completed on its own just as it was being stopped (status 0) is kept.
+    if ((isStalled && downloadStatus != 0)); then
+        RecordError memory "virtctl vmexport download stalled (no data for ${downloadStallLimit}s) and was stopped"; return 1
+    fi
     ((downloadStatus == 0)) || { RecordError memory 'virtctl vmexport download failed'; return 1; }
 }
 function CaptureMemory () {
@@ -537,26 +576,52 @@ function WaitForDumpMonitor () {
 
 # ==== Phase: respond (event logs, stop and recovery) ====
 function EvtxSize () {
-    typeset logName="${1:?}"
-    oc --request-timeout=30s exec -n "${cfgArr[ns]}" "${metaArr[launcherPod]}" -- powershell.exe -NoProfile -Command \
-        "(Get-Item 'C:\Windows\System32\winevt\Logs\\${logName}.evtx' -ErrorAction SilentlyContinue).Length" 2>/dev/null || echo 0
+    # EvtxSize LOG: prints the size in bytes of guest event log LOG. Returns 1 when the probe fails and 2 when its answer is not a
+    # plain byte count; PowerShell output through oc exec may end in CRLF, which is removed first.
+    typeset logName="${1:?}" answer=''
+    answer="$(oc --request-timeout=30s exec -n "${cfgArr[ns]}" "${metaArr[launcherPod]}" -- powershell.exe -NoProfile -Command \
+        "(Get-Item 'C:\Windows\System32\winevt\Logs\\${logName}.evtx' -ErrorAction SilentlyContinue).Length" 2>/dev/null)" || return 1
+    [[ "${answer//$'\r'/}" =~ ^[[:space:]]*([0-9]+)[[:space:]]*$ ]] || return 2
+    printf '%s' "$((10#${BASH_REMATCH[1]}))"
+}
+# shellcheck disable=SC2034 # systemRef, appRef and stateRef are namerefs to the caller's variables.
+function EvtxSizes () {
+    # EvtxSizes SYSTEM_REF APP_REF STATE_REF: reads both event log sizes. Succeeds only when both are positive byte counts;
+    # otherwise STATE_REF says what was seen (a failed probe, a malformed answer or a zero size).
+    typeset -n systemRef="${1:?}" appRef="${2:?}" stateRef="${3:?}"
+    typeset logName='' size=''
+    typeset -i status=0
+    for logName in System Application; do
+        status=0; size="$(EvtxSize "${logName}")" || status=$?
+        case "${status}" in
+          (0) ;;
+          (1) stateRef="${logName} probe failed"; return 1;;
+          (*) stateRef="${logName} answer is not a byte count"; return 1;;
+        esac
+        ((size > 0)) || { stateRef="${logName} size is 0"; return 1; }
+        if [[ "${logName}" == System ]]; then systemRef="${size}"; else appRef="${size}"; fi
+    done
+    stateRef="System ${systemRef} bytes, Application ${appRef} bytes"
 }
 function WaitForEventLogs () {
-    typeset systemSize='' appSize=''
-    typeset systemSize2='' appSize2=''
+    # Waits up to 600 s for the System and Application event logs to report the same positive sizes in consecutive samples. A
+    # failed probe, an empty or malformed answer or a zero size never signals readiness; the last state is logged on timeout.
+    typeset systemSize='' appSize='' systemSize2='' appSize2='' state='no answer yet'
     typeset -i stableCount=0 deadline=0
     Log 'waiting for Windows event logs to flush and stabilize...'
     deadline=$((SECONDS + 600))
     while ((SECONDS < deadline)); do
-        systemSize="$(EvtxSize System)"; appSize="$(EvtxSize Application)"
-        if [[ "${systemSize}" != 0 && "${appSize}" != 0 ]]; then
+        if EvtxSizes systemSize appSize state; then
             sleep 5
-            systemSize2="$(EvtxSize System)"; appSize2="$(EvtxSize Application)"
-            if [[ "${systemSize}" != "${systemSize2}" || "${appSize}" != "${appSize2}" ]]; then stableCount=0
-            elif ((++stableCount >= 2)); then Log "event logs stable (System: ${systemSize} bytes, Application: ${appSize} bytes)"; break; fi
+            if ! EvtxSizes systemSize2 appSize2 state || [[ "${systemSize}" != "${systemSize2}" || "${appSize}" != "${appSize2}" ]]; then
+                stableCount=0
+            elif ((++stableCount >= 2)); then
+                Log "event logs stable (System: ${systemSize} bytes, Application: ${appSize} bytes)"; return 0
+            fi
         fi
         sleep 3
     done
+    Log "WARN: Windows event log sizes not confirmed stable within 600s (${state})"
     true
 }
 function ReleaseProbe () {

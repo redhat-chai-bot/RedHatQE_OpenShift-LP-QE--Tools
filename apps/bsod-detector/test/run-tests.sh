@@ -26,6 +26,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
 # Keep the default suite explicit: list every active Bats file here.
 bats \
   "${testDir}/test-cross-references.bats" \
+  "${testDir}/test-bsod-watcher.bats" \
   "${testDir}/test-host-signals.bats" \
   "${testDir}/test-json-validation.bats" \
   "${testDir}/test-parse-dump-header.bats" \
