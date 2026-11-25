@@ -58,6 +58,8 @@ typeset progressFile=''             # State of the dump progress monitor.
 typeset pvpanicPid=''               # Event watch (process group leader).
 typeset progressPid=''              # Background dump progress monitor.
 typeset -i isMemoryAssociated=0     # A KubeVirt memory dump is associated with the VM; removed on exit.
+typeset createdExport=''            # VirtualMachineExport this run created, and the UID the API server assigned to it:
+typeset createdExportUid=''         # the only export the run ever deletes (see DeleteCreatedExport).
 
 # ==== Common helpers ====
 function Die () { echo "bsod-watcher: ERROR: $*" >&2; exit 1; }
@@ -92,6 +94,7 @@ function Fatal () {
 function Cleanup () {
     StopProgressMonitor
     StopEventWatch
+    DeleteCreatedExport 1>&2
     if ((isMemoryAssociated)) && [[ -n "${cfgArr[vm]}" && -n "${cfgArr[ns]}" ]]; then
         RunTimed 60 virtctl memory-dump remove "${cfgArr[vm]}" -n "${cfgArr[ns]}" >/dev/null 2>&1 || true
         isMemoryAssociated=0
@@ -316,19 +319,17 @@ function RequestMemoryDump () {
     RecordError memory "KubeVirt memory-dump phase timed out (last=${phase:-unset})"
     return 1
 }
-function DeleteExport () {
-    typeset exportName="${1:?}"
-    oc --request-timeout=30s delete virtualmachineexport "${exportName}" -n "${cfgArr[ns]}" --ignore-not-found >>"${pipelineLog}" 2>&1 || true
-}
-function DeleteStaleExports () {
-    # Deletes VirtualMachineExports that earlier runs left on the memory-dump PVC.
-    typeset memoryPvc="${metaArr[memoryDumpPvc]}"
-    typeset staleExports='' staleName=''
-    staleExports="$(oc --request-timeout=30s get virtualmachineexport -n "${cfgArr[ns]}" -o json 2>/dev/null |
-        jq -r --arg pvc "${memoryPvc}" '.items[] | select(.spec.source.name==$pvc) | .metadata.name' || true)"
-    [[ -n "${staleExports}" ]] || return 0
-    Log "cleaning up stale VirtualMachineExport(s) on PVC ${memoryPvc}: ${staleExports}"
-    while IFS= read -r staleName; do DeleteExport "${staleName}"; done <<< "${staleExports}"
+function DeleteCreatedExport () {
+    # Deletes the VirtualMachineExport this run created, and nothing else: by its exact name, with its UID as a precondition, so
+    # an export that replaced it under the same name is refused (409 Conflict) rather than deleted. KubeVirt makes the export the
+    # controller owner of its exporter pod, service and token secret; background cascading deletion removes them. Output goes to
+    # the caller's stdout/stderr. A failed delete keeps the identity for one more attempt at exit; the export's TTL is 12h.
+    [[ -n "${createdExport}" && -n "${createdExportUid}" ]] || return 0
+    jq -cn --arg uid "${createdExportUid}" '{kind:"DeleteOptions",apiVersion:"v1",propagationPolicy:"Background",preconditions:{uid:$uid}}' |
+        oc --request-timeout=30s delete -f - --raw "/apis/export.kubevirt.io/v1beta1/namespaces/${cfgArr[ns]}/virtualmachineexports/${createdExport}" \
+        >/dev/null || return 0
+    echo "deleted VirtualMachineExport ${createdExport} (uid ${createdExportUid})"
+    createdExport=''; createdExportUid=''
 }
 function WaitForExportReady () {
     typeset exportName="${1:?}"
@@ -342,18 +343,26 @@ function WaitForExportReady () {
     return 1
 }
 function DownloadMemoryDump () {
-    # Exports the memory-dump PVC through a VirtualMachineExport and downloads it to the given file.
+    # Exports the memory-dump PVC through a VirtualMachineExport created by this run and downloads it to the given file.
     typeset target="${1:?}"
     typeset exportName="bsod-memdump-${runId,,}"; exportName="${exportName:0:63}"; exportName="${exportName%-}"
     typeset -i downloadPid=0 downloadStatus=0
-    DeleteStaleExports
-    jq -n --arg name "${exportName}" --arg ns "${cfgArr[ns]}" --arg pvc "${metaArr[memoryDumpPvc]}" \
+    # `create`, not `apply`: an export of that name that already exists is not this run's, so it is neither changed nor deleted.
+    # Only a successful create returns the UID that DeleteCreatedExport requires.
+    createdExport="${exportName}"
+    createdExportUid="$(jq -n --arg name "${exportName}" --arg ns "${cfgArr[ns]}" --arg pvc "${metaArr[memoryDumpPvc]}" \
         '{apiVersion:"export.kubevirt.io/v1beta1",kind:"VirtualMachineExport",metadata:{name:$name,namespace:$ns},
           spec:{source:{apiGroup:"",kind:"PersistentVolumeClaim",name:$pvc},ttlDuration:"12h"}}' |
-        oc --request-timeout=30s apply -f - >>"${pipelineLog}" 2>&1
+        oc --request-timeout=30s create -f - -o jsonpath='{.metadata.uid}' 2>>"${pipelineLog}")" || createdExportUid=''
+    if [[ -z "${createdExportUid}" ]]; then
+        createdExport=''
+        RecordError memory "VirtualMachineExport ${exportName} could not be created (see watcher.log)"
+        return 1
+    fi
+    echo "created VirtualMachineExport ${exportName} (uid ${createdExportUid})" >>"${pipelineLog}"
     if ! WaitForExportReady "${exportName}"; then
         RecordError memory 'VirtualMachineExport did not become ready'
-        DeleteExport "${exportName}"
+        DeleteCreatedExport >>"${pipelineLog}" 2>&1
         return 1
     fi
     Log 'downloading memory dump via virtctl vmexport (unlimited, no hard timeout)...'
@@ -364,8 +373,7 @@ function DownloadMemoryDump () {
         [[ -f "${target}" ]] && Log "download progress: $(numfmt --to=iec-i --suffix=B "$(stat -c%s "${target}" 2>/dev/null || echo 0)" 2>/dev/null)"
     done
     wait "${downloadPid}" 2>/dev/null || downloadStatus=$?
-    DeleteExport "${exportName}"
-    oc --request-timeout=30s delete pod -n "${cfgArr[ns]}" --field-selector metadata.name~=virt-export- --ignore-not-found >>"${pipelineLog}" 2>&1 || true
+    DeleteCreatedExport >>"${pipelineLog}" 2>&1
     ((downloadStatus == 0)) || { RecordError memory 'virtctl vmexport download failed'; return 1; }
 }
 function CaptureMemory () {
