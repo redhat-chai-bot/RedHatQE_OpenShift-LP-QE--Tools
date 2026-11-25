@@ -11,12 +11,6 @@ function Get-PagefileSizeMB ([int64]$memoryBytes) {
     [int64][math]::Round(($memoryBytes + 257MB) / 1MB, 0)
 }
 
-# True only when the file exists and its SHA-256 equals the expected digest (case-insensitive).
-function Test-ISOhash ([string]$path, [string]$expectedSHA256) {
-    if (-not (Test-Path -LiteralPath $path)) { return $false }
-    (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -eq $expectedSHA256
-}
-
 # Windows Installer success codes: 0, 1641 (restart initiated) and 3010 (restart required);
 # pnputil uses 0 and 3010. A missing exit code is not treated as success.
 function Test-InstallerSuccess ([Nullable[int]]$exitCode) {
@@ -61,12 +55,15 @@ function Save-HTTPSdownload ([string]$url, [string]$path) {
 }
 
 # Turns an HTTP(S) redirect location into the HTTPS URL on the same official host, or nothing when
-# it points elsewhere. Official download aliases may redirect to plain http://; only the host and
-# path are taken from such a location, and the request is always made over HTTPS.
+# it points elsewhere. Official download aliases may redirect to plain http://, which is never
+# requested: the location is parsed as a URI and only its path and query are reused over HTTPS.
+# A relative location, another scheme or host, user information, a non-default port or a fragment
+# is refused.
 function Get-HTTPSredirectTarget ([string]$location, [string]$officialHost) {
-    if ($location -notmatch '^https?://([^/?#]+)(/[^#]*)$') { return }
-    if ($Matches[1] -ne $officialHost) { return }
-    "https://$($Matches[1])$($Matches[2])"
+    $uri = $location -as [uri]
+    if (-not $uri -or -not $uri.IsAbsoluteUri -or $uri.Scheme -notin 'http', 'https' -or $uri.Host -ne $officialHost -or
+        $uri.UserInfo -or -not $uri.IsDefaultPort -or $uri.Fragment) { return }
+    "https://${officialHost}$($uri.PathAndQuery)"
 }
 
 # Returns the status code and Location header of one HTTPS HEAD request without following redirects.
@@ -102,17 +99,40 @@ function Resolve-OfficialHTTPS ([string]$url, [string]$officialHost) {
     throw "too many redirects from ${url}"
 }
 
-# Returns a stored artifact record (JSON), or nothing when it is missing or unreadable.
-function Read-ArtifactRecord ([string]$path) {
-    if (-not (Test-Path -LiteralPath $path)) { return }
-    try { Get-Content -Raw -LiteralPath $path | ConvertFrom-Json } catch { return }
+# The administrator's TEMP directory, where this run creates its own directory for the ISO.
+function Get-TempDirectory {
+    $env:TEMP
 }
 
-# Stores an artifact record as JSON, adding the UTC time it was recorded.
-function Write-ArtifactRecord ([string]$path, $record) {
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) -ErrorAction Stop | Out-Null
-    $record['recordedUTC'] = [DateTime]::UtcNow.ToString('o')
-    $record | ConvertTo-Json | Set-Content -LiteralPath $path -Encoding ASCII -ErrorAction Stop
+# Unmounts the ISO this run downloaded and removes it and the directory this run created for it.
+# Only that file and that directory are removed: a directory that still holds anything else is
+# reported and left in place. Returns a message when something is left, or nothing when all is gone.
+function Remove-ISOworkspace ([string]$dirPath, [string]$isoPath) {
+    try {
+        if ($isoPath -and (Test-Path -LiteralPath $isoPath)) {
+            $image = Get-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue
+            if ($image -and $image.Attached) { Dismount-DiskImage -ImagePath $isoPath -ErrorAction Stop | Out-Null }
+            Remove-Item -LiteralPath $isoPath -Force -ErrorAction Stop
+        }
+        if (Get-ChildItem -LiteralPath $dirPath -Force -ErrorAction Stop) { return "${dirPath} is not empty and was left in place" }
+        Remove-Item -LiteralPath $dirPath -Force -ErrorAction Stop
+    } catch {
+        return "cannot unmount and remove the virtio-win ISO in ${dirPath}: $($_.Exception.Message)"
+    }
+    if (Test-Path -LiteralPath $dirPath) { return "${dirPath} still exists after its removal" }
+}
+
+# Removes the exact dedicated dump file an older preparation created, only when CrashControl names
+# no dedicated dump file and the path is a plain file (not a directory, link or other reparse
+# point). Returns 'absent', 'removed', or why the file is still there.
+function Remove-LegacyDedicatedDump ([string]$path, [string]$configuredTarget) {
+    if (-not (Test-Path -LiteralPath $path)) { return 'absent' }
+    if ($configuredTarget) { return "CrashControl still names DedicatedDumpFile '${configuredTarget}'" }
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if (-not $item -or $item.PSIsContainer -or "$($item.Attributes)" -like '*ReparsePoint*') { return 'it is not a plain file' }
+    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $path) { return 'it could not be removed (it may stay locked until the next reboot)' }
+    'removed'
 }
 
 # The memory size is read before any change: an unreadable, missing or non-positive size stops the
@@ -130,19 +150,14 @@ if (-not ($ramBytes -gt 0)) {
 $pagefileSizeMB = Get-PagefileSizeMB $ramBytes
 Write-Host "OK: physical memory read; the page file will be ${pagefileSizeMB} MB (RAM + 257 MB)"
 
-# C:\Temp is a fixed location on purpose: the ISO cache must survive the reboot and be found by
-# golden-image-post-reboot.ps1, which may run under another account (per-user $env:TEMP differs).
-New-Item -ItemType Directory -Force -Path 'C:\Temp' | Out-Null
 Enable-TLS12
 # virtio-win: the current official release behind the latest-virtio alias, with no hardcoded
 # version or digest. The alias is resolved hop by hop over HTTPS on fedorapeople.org (it
 # redirects to plain http://, which is never requested). No checksum or signature is published
-# for the ISO, so its SHA-256 is calculated from the downloaded file and recorded, with the
-# source, resolved source and version, in an audit record that stays in the image after
-# golden-image-post-reboot.ps1 removes the ISO cache. The record is not a publisher attestation.
-$isoAliasURL   = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso'
-$isoPath = 'C:\Temp\virtio-win.iso'
-$isoRecordPath = 'C:\ProgramData\bsod-detector\virtio-win-iso.json'
+# for the ISO. It is downloaded into a new directory this run creates under the administrator's
+# TEMP directory and removed again before the reboot, so nothing of it is left for
+# golden-image-post-reboot.ps1 or the sealed image.
+$isoAliasURL = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso'
 try {
     $isoURL = Resolve-OfficialHTTPS $isoAliasURL 'fedorapeople.org'
 } catch {
@@ -152,88 +167,76 @@ try {
 $isoVersion = if ($isoURL -match '/virtio-win-([0-9][0-9.]*)\.iso$') { $Matches[1] } else { $null }
 Write-Host "Latest virtio-win ISO: ${isoURL} (version $(if ($isoVersion) { $isoVersion } else { 'not in the file name' }))"
 
-# A cached ISO is reused only when it is that same latest release and still matches the SHA-256
-# recorded when it was downloaded; otherwise the latest ISO is downloaded to a temporary name and
-# only then moved over the cache. A failed download stops the script before anything is installed.
-$isoRecord = Read-ArtifactRecord $isoRecordPath
-if ($isoRecord -and $isoRecord.resolvedSource -eq $isoURL -and (Test-ISOhash $isoPath $isoRecord.sha256)) {
-    Write-Host "OK: cached virtio-win ISO is the latest release and matches its recorded SHA-256 $($isoRecord.sha256)"
-} else {
-    $isoTmpPath = "${isoPath}.download"
-    try {
-        # The old record no longer describes the cache once a new download starts.
-        if (Test-Path -LiteralPath $isoRecordPath) { Remove-Item -LiteralPath $isoRecordPath -Force -ErrorAction Stop }
-        Write-Host "Downloading ${isoURL} ..."
-        Save-HTTPSdownload $isoURL $isoTmpPath
-        $isoSHA256 = (Get-FileHash -LiteralPath $isoTmpPath -Algorithm SHA256 -ErrorAction Stop).Hash
-        # An older cache can still be mounted by an interrupted earlier run; detach it first.
-        if ((Test-Path -LiteralPath $isoPath) -and (Get-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue).Attached) {
-            Dismount-DiskImage -ImagePath $isoPath -ErrorAction Stop | Out-Null
-        }
-        Move-Item -Path $isoTmpPath -Destination $isoPath -Force -ErrorAction Stop
-        Write-ArtifactRecord $isoRecordPath ([ordered]@{
-            schema = 1; artifact = 'virtio-win.iso'; source = $isoAliasURL; resolvedSource = $isoURL; version = $isoVersion
-            sha256 = $isoSHA256; sizeBytes = (Get-Item $isoPath).Length
-            verification = 'No checksum or signature is published for this ISO; sha256 was calculated from the downloaded file (audit record, not publisher verification).'
-        })
-        Write-Host "OK: downloaded virtio-win ${isoVersion}; SHA-256 ${isoSHA256} recorded in ${isoRecordPath}"
-    } catch {
-        Remove-Item -Path $isoTmpPath -Force -ErrorAction SilentlyContinue
-        Write-Error "FAIL: the latest virtio-win ISO could not be downloaded and recorded: $($_.Exception.Message)"
-        exit 1
-    }
-}
-
-# An ISO left mounted by an interrupted run is reused. A failed mount or a missing drive letter
-# stops the script before anything is installed.
-$drive = $null
+# Every step that needs the ISO runs inside this try block. The finally block always unmounts the
+# ISO and removes the directory this run created (and nothing that existed before); a failure in
+# the steps or in that cleanup stops the script here, before any registry write or reboot.
+$isoDir = $null
+$isoPath = $null
+$isoFailure = $null
+$isoCleanupProblem = $null
 try {
-    $iso = Get-DiskImage -ImagePath $isoPath -ErrorAction Stop
-    if (-not $iso.Attached) { $iso = Mount-DiskImage -ImagePath $isoPath -PassThru -ErrorAction Stop }
-    $drive = ($iso | Get-Volume -ErrorAction Stop).DriveLetter
-} catch {
-    Write-Error "FAIL: cannot mount ${isoPath}: $($_.Exception.Message)"
-    exit 1
-}
-if (-not $drive) {
-    Write-Error "FAIL: ${isoPath} is mounted without a drive letter"
-    exit 1
-}
-Write-Host "OK: ISO mounted at ${drive}:\"
-
-Write-Host "`n--- Installing QEMU Guest Agent ---"
-$msiProcess = Start-Process msiexec.exe -ArgumentList "/i ${drive}:\guest-agent\qemu-ga-x86_64.msi /quiet /norestart" -Wait -PassThru
-if (Test-InstallerSuccess $msiProcess.ExitCode) {
-    Write-Host "OK: QEMU Guest Agent MSI installed (exit code $($msiProcess.ExitCode))"
-} else {
-    Write-Host "WARN: QEMU Guest Agent MSI exited with code $($msiProcess.ExitCode); the service check below decides"
-}
-
-# A driver missing from its expected path is searched for recursively; still missing is a warning.
-Write-Host "`n--- Installing VirtIO storage drivers ---"
-$storageDrivers = @(
-    @{ Name = 'viostor (VirtIO block)'; Inf = 'viostor\w11\amd64\viostor.inf' },
-    @{ Name = 'vioscsi (VirtIO SCSI)';  Inf = 'vioscsi\w11\amd64\vioscsi.inf' }
-)
-foreach ($drv in $storageDrivers) {
-    $inf = Get-Item "${drive}:\$($drv.Inf)" -ErrorAction SilentlyContinue
-    if (-not $inf) {
-        Write-Host "WARN: $($drv.Name) inf not found at ${drive}:\$($drv.Inf) - trying recursive search"
-        $inf = Get-ChildItem "${drive}:\" -Recurse -Filter ($drv.Inf -split '\\')[-1] -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -like '*amd64*' } | Select-Object -First 1
+    $tempDir = Get-TempDirectory
+    if (-not $tempDir -or -not (Test-Path -LiteralPath $tempDir -PathType Container)) { throw "TEMP ('${tempDir}') is not an existing directory" }
+    $newDir = Join-Path $tempDir "bsod-virtio-win-$((New-Guid).Guid)"
+    New-Item -ItemType Directory -Path $newDir -ErrorAction Stop | Out-Null
+    $isoDir = $newDir
+    $isoPath = Join-Path $isoDir 'virtio-win.iso'
+    Write-Host "Downloading ${isoURL} to ${isoPath} ..."
+    try { Save-HTTPSdownload $isoURL $isoPath } catch { throw "the latest virtio-win ISO could not be downloaded: $($_.Exception.Message)" }
+    Write-Host 'OK: virtio-win ISO downloaded'
+    try {
+        $iso = Mount-DiskImage -ImagePath $isoPath -PassThru -ErrorAction Stop
+        $drive = ($iso | Get-Volume -ErrorAction Stop).DriveLetter
+    } catch {
+        throw "cannot mount ${isoPath}: $($_.Exception.Message)"
     }
-    if ($inf) {
-        pnputil /add-driver $inf.FullName /install | Out-Null
-        if (Test-InstallerSuccess $LASTEXITCODE) {
-            Write-Host "OK: $($drv.Name) installed from $($inf.FullName)"
-        } else {
-            Write-Host "WARN: pnputil exited with code ${LASTEXITCODE} for $($inf.FullName) - golden-image-post-reboot.ps1 checks the driver store"
-        }
+    if (-not $drive) { throw "${isoPath} is mounted without a drive letter" }
+    Write-Host "OK: ISO mounted at ${drive}:\"
+
+    Write-Host "`n--- Installing QEMU Guest Agent ---"
+    $msiProcess = Start-Process msiexec.exe -ArgumentList "/i ${drive}:\guest-agent\qemu-ga-x86_64.msi /quiet /norestart" -Wait -PassThru
+    if (Test-InstallerSuccess $msiProcess.ExitCode) {
+        Write-Host "OK: QEMU Guest Agent MSI installed (exit code $($msiProcess.ExitCode))"
     } else {
-        Write-Host "WARN: $($drv.Name) not found in ISO - skip"
+        Write-Host "WARN: QEMU Guest Agent MSI exited with code $($msiProcess.ExitCode); the service check below decides"
     }
+
+    # A driver missing from its expected path is searched for recursively; still missing is a warning.
+    Write-Host "`n--- Installing VirtIO storage drivers ---"
+    $storageDrivers = @(
+        @{ Name = 'viostor (VirtIO block)'; Inf = 'viostor\w11\amd64\viostor.inf' },
+        @{ Name = 'vioscsi (VirtIO SCSI)';  Inf = 'vioscsi\w11\amd64\vioscsi.inf' }
+    )
+    foreach ($drv in $storageDrivers) {
+        $inf = Get-Item "${drive}:\$($drv.Inf)" -ErrorAction SilentlyContinue
+        if (-not $inf) {
+            Write-Host "WARN: $($drv.Name) inf not found at ${drive}:\$($drv.Inf) - trying recursive search"
+            $inf = Get-ChildItem "${drive}:\" -Recurse -Filter ($drv.Inf -split '\\')[-1] -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -like '*amd64*' } | Select-Object -First 1
+        }
+        if ($inf) {
+            pnputil /add-driver $inf.FullName /install | Out-Null
+            if (Test-InstallerSuccess $LASTEXITCODE) {
+                Write-Host "OK: $($drv.Name) installed from $($inf.FullName)"
+            } else {
+                Write-Host "WARN: pnputil exited with code ${LASTEXITCODE} for $($inf.FullName) - golden-image-post-reboot.ps1 checks the driver store"
+            }
+        } else {
+            Write-Host "WARN: $($drv.Name) not found in ISO - skip"
+        }
+    }
+    Write-Host 'NOTE: storahci.sys (SATA) is an inbox Windows driver - no installation needed'
+} catch {
+    $isoFailure = $_.Exception.Message
+} finally {
+    if ($isoDir) { $isoCleanupProblem = Remove-ISOworkspace $isoDir $isoPath }
 }
-Write-Host 'NOTE: storahci.sys (SATA) is an inbox Windows driver - no installation needed'
+if ($isoFailure) { Write-Error "FAIL: ${isoFailure}" }
+if ($isoCleanupProblem) { Write-Error "FAIL: ${isoCleanupProblem}" }
+if ($isoFailure -or $isoCleanupProblem) {
+    exit 1
+}
+Write-Host "OK: ISO unmounted and ${isoDir} removed"
 
 # pvpanic: no guest pvpanic driver is installed here (golden-image-post-reboot.ps1 does not check
 # one). The pipeline entry script attempts, best effort and non-fatal, to hot-add the pvpanic
@@ -246,11 +249,6 @@ Write-Host 'NOTE: storahci.sys (SATA) is an inbox Windows driver - no installati
 # intentionally left at their Windows defaults: the intended flow does not restart a VM after a
 # simulated crash. The current src/scripts/host/watch-crash.sh still starts the VM again unless it
 # runs with --no-restart (a watcher change is planned separately); a restarted VM is not verified.
-
-# The ISO stays on disk for re-runs (reused only while it is the latest release and matches its
-# recorded SHA-256); golden-image-post-reboot.ps1 removes it once every check has passed.
-Dismount-DiskImage -ImagePath $isoPath
-Write-Host "OK: ISO unmounted (kept on disk at ${isoPath} until golden-image-post-reboot.ps1 passes)"
 
 Write-Host "`n--- Verifying QEMU Guest Agent ---"
 $svc = Get-Service QEMU-GA -ErrorAction SilentlyContinue
@@ -291,10 +289,17 @@ try {
     exit 1
 }
 Write-Host 'OK: Crash dump registry set (CrashDumpEnabled=7, no DedicatedDumpFile)'
-# A dedicated dump file from an older preparation is no longer used. It is not deleted here;
-# golden-image-post-reboot.ps1 refuses to seal while it exists.
-if (Test-Path -LiteralPath 'C:\DedicatedDump.sys') {
-    Write-Host 'WARN: C:\DedicatedDump.sys from an older preparation is no longer used - delete it before sealing'
+# The dedicated dump file older preparations created at this fixed path is no longer used once
+# DedicatedDumpFile is unset. Only that exact file is removed (see Remove-LegacyDedicatedDump);
+# Windows can keep it locked until the reboot, and golden-image-post-reboot.ps1 then removes it or
+# refuses to seal.
+$legacyDumpPath = 'C:\DedicatedDump.sys'
+$configuredDump = (Get-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction SilentlyContinue).DedicatedDumpFile
+$legacyDumpResult = Remove-LegacyDedicatedDump $legacyDumpPath $configuredDump
+if ($legacyDumpResult -eq 'removed') {
+    Write-Host "OK: removed ${legacyDumpPath} from an older preparation"
+} elseif ($legacyDumpResult -ne 'absent') {
+    Write-Host "WARN: ${legacyDumpPath} from an older preparation was not removed: ${legacyDumpResult} - golden-image-post-reboot.ps1 checks it after the reboot"
 }
 
 # Fixed-size C:\pagefile.sys of RAM + 257 MB (computed above) with automatic management off,
@@ -307,6 +312,5 @@ try {
     exit 1
 }
 
-Write-Host "`n=== All steps complete. Rebooting in 5 seconds... ==="
-Start-Sleep -Seconds 5
+Write-Host "`n=== All steps complete. Rebooting now... ==="
 Restart-Computer -Force
