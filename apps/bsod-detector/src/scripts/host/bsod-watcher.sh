@@ -171,13 +171,25 @@ function ValidateConfig () {
 
 # ==== Phase: preflight ====
 function ReadMetadata () {
-    # Fields the watcher relies on must be non-empty strings; .node is informational only and read as is.
-    typeset key=''
-    for key in runId outputDir namespace vm launcherPod domain diskTarget memoryDumpPvc; do
-        metaArr[${key}]="$(jq -er --arg key "${key}" '.[$key] | select((type == "string") and (length > 0))' "${metadataFile}")" ||
-            Die "missing or invalid \`.${key}\` in preflight metadata ${metadataFile}"
-    done
-    metaArr[node]="$(jq -r .node "${metadataFile}")"
+    # Fields the watcher relies on must be non-empty strings; .node is informational only and read as is; .guestPvc (checked
+    # before recovery) is kept only if it is a non-empty string. One jq run prints the first invalid field (empty if none), then
+    # NUL-terminated name/value pairs shaped as `$(jq -r ...)` returns them (NUL bytes dropped, trailing newlines removed).
+    typeset -a keyArr=(runId outputDir namespace vm launcherPod domain diskTarget memoryDumpPvc) fieldArr=()
+    typeset -i i=0
+    mapfile -d '' -t fieldArr < <(jq -j '
+        def shell: if type == "string" then gsub("\u0000"; "") | until(endswith("\n") | not; .[:-1]) else . end;
+        def valid: type == "string" and length > 0;
+        . as $meta | (first($ARGS.positional[] | select($meta[.] | valid | not)) // "") as $invalid
+        | $invalid, "\u0000",
+          if $invalid == "" then
+              ($ARGS.positional[] | ., "\u0000", ($meta[.] | shell), "\u0000"),
+              "guestPvc", "\u0000", ($meta.guestPvc | if valid then shell else "" end), "\u0000",
+              "node", "\u0000", ($meta.node | shell), "\u0000"
+          else empty end' "${metadataFile}" --args "${keyArr[@]}")
+    # Expected: the empty "first invalid field", then the name/value pairs of the fields, .guestPvc and .node.
+    [[ ${#fieldArr[@]} -eq $((1 + 2 * (${#keyArr[@]} + 2))) && -z "${fieldArr[0]}" ]] ||
+        Die "missing or invalid \`.${fieldArr[0]:-runId}\` in preflight metadata ${metadataFile}"
+    for ((i = 1; i < ${#fieldArr[@]}; i += 2)); do metaArr[${fieldArr[i]}]="${fieldArr[i + 1]}"; done
 }
 function RunPreflight () {
     # Creates a new run directory under the evidence mount and runs preflight-rhov.sh into it.
@@ -280,12 +292,14 @@ function IsPodTerminated () {
     [[ "${phaseRef}" == Failed || "${phaseRef}" == Succeeded ]]
 }
 function CaptureDomainXml () {
-    typeset target="${outDir}/domain-bsod.xml"
-    if oc --request-timeout=30s exec -n "${cfgArr[ns]}" "${metaArr[launcherPod]}" -- virsh dumpxml "${metaArr[domain]}" > "${target}" \
-        2>>"${pipelineLog}" && [[ -s "${target}" ]]; then
+    # Captures the live domain XML into a temporary file in the same directory and atomically replaces domain-bsod.xml only with
+    # a complete, non-empty capture: a failed attempt never truncates or removes a usable earlier copy.
+    typeset target="${outDir}/domain-bsod.xml" temporary="${outDir}/.domain-bsod.xml.tmp"
+    if oc --request-timeout=30s exec -n "${cfgArr[ns]}" "${metaArr[launcherPod]}" -- virsh dumpxml "${metaArr[domain]}" > "${temporary}" \
+        2>>"${pipelineLog}" && [[ -s "${temporary}" ]] && mv -f "${temporary}" "${target}"; then
         return 0
     fi
-    rm -f "${target}"
+    rm -f "${temporary}"
     return 1
 }
 function CaptureScreenshot () {
@@ -433,13 +447,13 @@ function CaptureCrashEvidence () {
     if CaptureDomainXml; then
         Log "domain-bsod.xml captured at crash time ($(wc -c < "${outDir}/domain-bsod.xml") bytes)"
     else
-        Log 'WARN: domain-bsod.xml crash-time capture failed — pre-crash copy (if any) will be used by CaptureHostSignals'
+        Log 'WARN: domain-bsod.xml crash-time capture failed — an earlier copy is kept; without one, CaptureHostSignals retries once'
     fi
     Log 'waiting 60 seconds for VNC to become responsive...'
     sleep 60
     StartDumpMonitor || hasFailed=1
     CaptureScreenshot || hasFailed=1
-    CaptureMemory || Log 'WARN: memory dump capture failed — recovery will extract from ODF snapshot'
+    CaptureMemory || Log 'WARN: memory dump capture failed — offline recovery still copies pagefile.sys from the guest disk PVC (no snapshot)'
     CaptureHostSignals || hasFailed=1
     ((hasFailed == 0)) || Fatal
 }
@@ -520,24 +534,38 @@ function WaitForEventLogs () {
     done
     true
 }
-function StopVM () {
-    typeset phase=''
+function StopVMAndRecover () {
+    # Stops the VM (never restarted), runs the offline guest OS crash extraction and writes the evidence summary. The extraction
+    # (virtctl guestfs) mounts the guest disk PVC directly and refuses a PVC that any pod still references, so it runs only after
+    # bounded affirmative checks: the VM reports Stopped, its virt-launcher pod no longer exists, and the guest PVC is Bound and
+    # not being deleted. A failed probe is never taken as proof. The checks are not a storage lock: another workload can still
+    # claim the PVC before the helper pod mounts it, and the extraction then fails on its own checks.
+    typeset recoveryBin="${scriptDir}/extract--guest-os--crash-info.sh"
+    typeset vmStatus='' podRef='' pvcState='' pending=''
     typeset -i deadline=0
     Log 'requesting VMI stop through virtctl'
-    RunTimed 90 virtctl stop "${cfgArr[vm]}" -n "${cfgArr[ns]}" >>"${pipelineLog}" 2>&1 || { RecordError stop 'virtctl stop failed or timed out'; return 1; }
+    RunTimed 90 virtctl stop "${cfgArr[vm]}" -n "${cfgArr[ns]}" >>"${pipelineLog}" 2>&1 || Fatal stop 'virtctl stop failed or timed out'
     deadline=$((SECONDS + 120))
-    while ((SECONDS < deadline)); do
-        phase="$(oc --request-timeout=30s get vmi "${cfgArr[vm]}" -n "${cfgArr[ns]}" --ignore-not-found -o jsonpath='{.status.phase}' 2>>"${pipelineLog}")" ||
-            { RecordError stop 'cannot verify VMI stop'; return 1; }
-        [[ -z "${phase}" || "${phase}" == Succeeded || "${phase}" == Failed ]] && break
+    while true; do
+        vmStatus="$(oc --request-timeout=30s get vm "${cfgArr[vm]}" -n "${cfgArr[ns]}" -o jsonpath='{.status.printableStatus}' \
+            2>>"${pipelineLog}")" || Fatal stop 'cannot verify that the VM stopped'
+        pending="VM status ${vmStatus:-unset}"
+        if [[ "${vmStatus}" == Stopped ]]; then
+            podRef="$(oc --request-timeout=30s get pod "${metaArr[launcherPod]}" -n "${cfgArr[ns]}" --ignore-not-found -o name \
+                2>>"${pipelineLog}")" || Fatal stop 'cannot verify that the virt-launcher pod is gone'
+            pending="${podRef} still exists"
+            if [[ -z "${podRef}" ]]; then
+                [[ -n "${metaArr[guestPvc]:-}" ]] || Fatal recovery 'preflight metadata has no .guestPvc; cannot verify the guest PVC'
+                pvcState="$(oc --request-timeout=30s get pvc "${metaArr[guestPvc]}" -n "${cfgArr[ns]}" \
+                    -o jsonpath='{.status.phase}{"/"}{.metadata.deletionTimestamp}' 2>>"${pipelineLog}")" || Fatal stop 'cannot verify the guest PVC'
+                [[ "${pvcState}" == Bound/ ]] && break
+                pending="guest PVC ${metaArr[guestPvc]} is ${pvcState}"
+            fi
+        fi
+        ((SECONDS < deadline)) || Fatal stop "VM stop and guest PVC release not confirmed within 120s (${pending})"
         sleep 3
     done
-    [[ -z "${phase}" || "${phase}" == Succeeded || "${phase}" == Failed ]] || { RecordError stop "offline deadline exceeded (phase=${phase})"; return 1; }
-}
-function StopVMAndRecover () {
-    # Stops the VM (never restarted), runs the offline guest OS crash extraction and writes the evidence summary.
-    typeset recoveryBin="${scriptDir}/extract--guest-os--crash-info.sh"
-    StopVM || Fatal
+    Log "VM stopped, virt-launcher pod gone, guest PVC ${metaArr[guestPvc]} Bound"
     [[ -x "${recoveryBin}" ]] || Fatal recovery "recovery script missing: ${recoveryBin}"
     "${recoveryBin}" --metadata "${metadataFile}" >>"${pipelineLog}" 2>&1 || Fatal
     Log 'waiting for recovery artifacts to stabilize...'
