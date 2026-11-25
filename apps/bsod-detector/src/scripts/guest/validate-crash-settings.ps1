@@ -54,10 +54,11 @@
                       "archiveSHA256": "...", "sha256": "...", "version": "...", "signer": "...", "stagedPath": "..." }
     }
     On failure: { "ok": false, "error": "...", "script": "validate-crash-settings.ps1" } with exit code
-    1 (crash-control.json is missing, unreadable, empty or not valid JSON), 2 (unknown dump type) or
-    4 (NotMyFault could not be staged; the full result above is emitted with ok = false and the error,
-    so settings mismatches stay visible; callers should treat it as a failure). A settings mismatch
-    is reported in the JSON, not through the exit code.
+    1 (crash-control.json is missing, unreadable, empty, not valid JSON or lacks a value the checks
+    read; nothing is checked or staged), 2 (unknown dump type) or 4 (NotMyFault could not be staged;
+    the full result above is emitted with ok = false and the error, so settings mismatches stay
+    visible; callers should treat it as a failure). A settings mismatch is reported in the JSON, not
+    through the exit code.
 #>
 [CmdletBinding()]
 param(
@@ -92,6 +93,19 @@ function Read-CrashControlData ([string]$path) {
     if (-not $path) { throw 'No explicit data path is configured for crash-control.json' }
     if (-not (Test-Path $path)) { throw "Data file not found: ${path}" }
     Get-Content -Raw -Path $path | ConvertFrom-Json
+}
+
+# Throws when a member the checks always read is missing, null or an empty string, so incomplete data
+# stops before anything is checked instead of failing later with a raw StrictMode error.
+function Assert-CrashControlData ($data) {
+    foreach ($member in 'registryPath', 'crashDumpTypes', 'recommended.values', 'pageFile.path', 'pageFile.value') {
+        $node = $data
+        foreach ($name in $member.Split('.')) {
+            $property = if ($null -ne $node) { $node.PSObject.Properties[$name] }
+            $node = if ($property) { $property.Value }
+            if ($null -eq $node -or ($node -is [string] -and -not $node)) { throw "it has no ${member}" }
+        }
+    }
 }
 
 # Returns nothing when the key or value is absent. The property check keeps StrictMode from
@@ -284,20 +298,25 @@ function Invoke-NotMyFaultStaging ([string]$source) {
     $record
 }
 
-# A data file that is missing, unreadable, empty or not valid JSON is reported as failure JSON, not
-# as a raw PowerShell error, so callers that parse stdout still get one JSON document. PowerShell 7
-# turns an empty file into $null without an error, so that case is thrown here.
+# A data file that is missing, unreadable, empty, not valid JSON or without a value the checks read is
+# reported as failure JSON, not as a raw PowerShell error, so callers that parse stdout still get one
+# JSON document, and nothing is checked or staged. PowerShell 7 turns an empty file into $null without
+# an error, so that case is thrown here.
 try {
     $cfg = Read-CrashControlData $dataFile
     if ($null -eq $cfg) { throw 'Data file is empty or null' }
+    Assert-CrashControlData $cfg
+    $type = if ($dumpType) { $dumpType } else { $cfg.recommended.crashDumpType }
+    $typeNames = $cfg.crashDumpTypes.PSObject.Properties.Name
 } catch {
     Fail "Cannot load crash-control.json: $($_.Exception.Message)" 1
 }
-
-$type = if ($dumpType) { $dumpType } else { $cfg.recommended.crashDumpType }
-$typeNames = $cfg.crashDumpTypes.PSObject.Properties.Name
 if ($typeNames -notcontains $type) { Fail "Unknown dump type '${type}'. Valid: $($typeNames -join ', ')." 2 }
-$crashDumpEnabled = [int]$cfg.crashDumpTypes.$type.CrashDumpEnabled
+try {
+    $crashDumpEnabled = [int]$cfg.crashDumpTypes.$type.CrashDumpEnabled
+} catch {
+    Fail "Cannot load crash-control.json: crashDumpTypes.${type}.CrashDumpEnabled: $($_.Exception.Message)" 1
+}
 
 $regPath = $cfg.registryPath
 $desired = Get-DesiredCrashControl $cfg.recommended.values $crashDumpEnabled
