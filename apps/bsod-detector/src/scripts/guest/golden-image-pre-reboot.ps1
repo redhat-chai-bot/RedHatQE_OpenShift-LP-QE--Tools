@@ -2,8 +2,14 @@
 # Afterwards run golden-image-post-reboot.ps1 and seal only if it passes.
 # Both VirtIO storage drivers are staged so the image boots on a virtio (viostor),
 # scsi (vioscsi) or sata (storahci, inbox) disk bus.
-# The page file is sized from this VM's RAM (RAM + 257 MB). validate-crash-settings.ps1 checks it
-# against the RAM of the VM it runs on, so VMs cloned from this image must not have more RAM than this VM.
+# The page file is sized from this VM's RAM (RAM + 257 MB) and keeps that fixed size in VMs cloned
+# from this image, so those VMs must not have more RAM than this VM: a page file smaller than a VM's
+# RAM + 257 MB may be too small for its crash dump.
+
+# Undefined variables, missing properties and unhandled errors stop the script. FAIL lines are
+# written with -ErrorAction Continue so that every diagnostic is shown before the explicit exit 1.
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
 # Fixed pagefile size in MB: physical RAM plus 257 MB, rounded once to a whole MB.
 # golden-image-post-reboot.ps1 checks the active pagefile against the same calculation.
@@ -39,18 +45,39 @@ function Enable-TLS12 {
 }
 
 # Downloads an already resolved HTTPS URL to a file without following redirects: a redirect or any
-# status other than 200 throws instead of being followed, so the download cannot leave HTTPS.
+# status other than 200 throws instead of being followed, so the download cannot leave HTTPS. The
+# file, the response stream and the response are always disposed; a failure while disposing is
+# raised only when nothing failed before it, so it never hides a download or copy failure.
 function Save-HTTPSdownload ([string]$url, [string]$path) {
     if ($url -notlike 'https://*') { throw "not an HTTPS URL: ${url}" }
     $request = [System.Net.HttpWebRequest]::Create($url)
     $request.AllowAutoRedirect = $false
-    $response = $request.GetResponse()
+    try {
+        $response = $request.GetResponse()
+    } catch [System.Net.WebException] {
+        # An error status arrives as an exception that carries the response; it is released before rethrowing.
+        if ($_.Exception.Response) { ([System.IDisposable]$_.Exception.Response).Dispose() }
+        throw
+    }
+    $stream = $null
+    $file = $null
+    $hasFailed = $false
     try {
         if ([int]$response.StatusCode -ne 200) { throw "HTTP $([int]$response.StatusCode) from ${url}" }
+        $stream = $response.GetResponseStream()
         $file = [System.IO.File]::Create($path)
-        try { $response.GetResponseStream().CopyTo($file) } finally { $file.Close() }
+        $stream.CopyTo($file)
+    } catch {
+        $hasFailed = $true
+        throw
     } finally {
-        $response.Close()
+        $disposeError = $null
+        foreach ($resource in @($file, $stream, $response)) {
+            if ($null -ne $resource) {
+                try { ([System.IDisposable]$resource).Dispose() } catch { if ($null -eq $disposeError) { $disposeError = $_ } }
+            }
+        }
+        if (-not $hasFailed -and $null -ne $disposeError) { throw $disposeError }
     }
 }
 
@@ -138,13 +165,14 @@ function Remove-LegacyDedicatedDump ([string]$path, [string]$configuredTarget) {
 # The memory size is read before any change: an unreadable, missing or non-positive size stops the
 # script before the ISO download, installations, registry writes, page file change or reboot.
 try {
-    $ramBytes = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory -as [int64]
+    $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
 } catch {
-    Write-Error "FAIL: cannot read the physical memory size: $($_.Exception.Message)"
+    Write-Error "FAIL: cannot read the physical memory size: $($_.Exception.Message)" -ErrorAction Continue
     exit 1
 }
+$ramBytes = if ($computerSystem) { $computerSystem.TotalPhysicalMemory -as [int64] } else { $null }
 if (-not ($ramBytes -gt 0)) {
-    Write-Error "FAIL: physical memory size is missing or not positive (TotalPhysicalMemory = '${ramBytes}')"
+    Write-Error "FAIL: physical memory size is missing or not positive (TotalPhysicalMemory = '${ramBytes}')" -ErrorAction Continue
     exit 1
 }
 $pagefileSizeMB = Get-PagefileSizeMB $ramBytes
@@ -161,7 +189,7 @@ $isoAliasURL = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads
 try {
     $isoURL = Resolve-OfficialHTTPS $isoAliasURL 'fedorapeople.org'
 } catch {
-    Write-Error "FAIL: cannot resolve the latest virtio-win ISO over HTTPS: $($_.Exception.Message)"
+    Write-Error "FAIL: cannot resolve the latest virtio-win ISO over HTTPS: $($_.Exception.Message)" -ErrorAction Continue
     exit 1
 }
 $isoVersion = if ($isoURL -match '/virtio-win-([0-9][0-9.]*)\.iso$') { $Matches[1] } else { $null }
@@ -179,7 +207,7 @@ try {
     $isoPath = Join-Path $isoDir 'virtio-win.iso'
     New-Item -ItemType Directory -Path $isoDir -ErrorAction Stop | Out-Null
 } catch {
-    Write-Error "FAIL: $($_.Exception.Message)"
+    Write-Error "FAIL: $($_.Exception.Message)" -ErrorAction Continue
     exit 1
 }
 
@@ -193,7 +221,8 @@ try {
     Write-Host 'OK: virtio-win ISO downloaded'
     try {
         $iso = Mount-DiskImage -ImagePath $isoPath -PassThru -ErrorAction Stop
-        $drive = ($iso | Get-Volume -ErrorAction Stop).DriveLetter
+        $volume = $iso | Get-Volume -ErrorAction Stop
+        $drive = if ($volume) { $volume.DriveLetter } else { $null }
     } catch {
         throw "cannot mount ${isoPath}: $($_.Exception.Message)"
     }
@@ -222,7 +251,9 @@ try {
                 Where-Object { $_.FullName -like '*amd64*' } | Select-Object -First 1
         }
         if ($inf) {
-            pnputil /add-driver $inf.FullName /install | Out-Null
+            # pnputil reports through its exit code. Windows PowerShell 5.1 hosts that capture native stderr
+            # (ISE, remoting) turn its stderr lines into errors, so it runs with the Continue preference.
+            & { $ErrorActionPreference = 'Continue'; pnputil /add-driver $inf.FullName /install | Out-Null }
             if (Test-InstallerSuccess $LASTEXITCODE) {
                 Write-Host "OK: $($drv.Name) installed from $($inf.FullName)"
             } else {
@@ -234,12 +265,13 @@ try {
     }
     Write-Host 'NOTE: storahci.sys (SATA) is an inbox Windows driver - no installation needed'
 } catch {
-    $isoFailure = $_.Exception.Message
+    # An error without a message still counts as a failure.
+    $isoFailure = if ($_.Exception.Message) { $_.Exception.Message } else { $_.Exception.GetType().FullName }
 } finally {
     $isoCleanupProblem = Remove-ISOworkspace $isoDir $isoPath
 }
-if ($isoFailure) { Write-Error "FAIL: ${isoFailure}" }
-if ($isoCleanupProblem) { Write-Error "FAIL: ${isoCleanupProblem}" }
+if ($isoFailure) { Write-Error "FAIL: ${isoFailure}" -ErrorAction Continue }
+if ($isoCleanupProblem) { Write-Error "FAIL: ${isoCleanupProblem}" -ErrorAction Continue }
 if ($isoFailure -or $isoCleanupProblem) {
     exit 1
 }
@@ -260,10 +292,16 @@ Write-Host "OK: ISO unmounted and ${isoDir} removed"
 Write-Host "`n--- Verifying QEMU Guest Agent ---"
 $svc = Get-Service QEMU-GA -ErrorAction SilentlyContinue
 if (-not $svc) {
-    Write-Error 'FAIL: QEMU-GA service not installed - abort'
+    Write-Error 'FAIL: QEMU-GA service not installed - abort' -ErrorAction Continue
     exit 1
 }
-Set-Service QEMU-GA -StartupType Automatic
+# A startup type that cannot be set stops the script here, before the registry writes and the reboot.
+try {
+    Set-Service QEMU-GA -StartupType Automatic -ErrorAction Stop
+} catch {
+    Write-Error "FAIL: cannot set QEMU-GA to start automatically: $($_.Exception.Message) - abort" -ErrorAction Continue
+    exit 1
+}
 if ($svc.Status -ne 'Running') {
     Write-Host 'QEMU-GA is stopped - starting...'
     Start-Service QEMU-GA -ErrorAction SilentlyContinue
@@ -271,7 +309,7 @@ if ($svc.Status -ne 'Running') {
     $svc = Get-Service QEMU-GA -ErrorAction SilentlyContinue
 }
 if (-not $svc -or $svc.Status -ne 'Running') {
-    Write-Error "FAIL: QEMU-GA could not be started (Status: $(if ($svc) { $svc.Status } else { 'not installed' })) - abort"
+    Write-Error "FAIL: QEMU-GA could not be started (Status: $(if ($svc) { $svc.Status } else { 'not installed' })) - abort" -ErrorAction Continue
     exit 1
 }
 Write-Host 'OK: QEMU-GA is Running and set to Automatic'
@@ -292,7 +330,7 @@ try {
         Remove-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction Stop
     }
 } catch {
-    Write-Error "FAIL: crash dump registry write failed: $($_.Exception.Message)"
+    Write-Error "FAIL: crash dump registry write failed: $($_.Exception.Message)" -ErrorAction Continue
     exit 1
 }
 Write-Host 'OK: Crash dump registry set (CrashDumpEnabled=7, no DedicatedDumpFile)'
@@ -301,7 +339,8 @@ Write-Host 'OK: Crash dump registry set (CrashDumpEnabled=7, no DedicatedDumpFil
 # Windows can keep it locked until the reboot, and golden-image-post-reboot.ps1 then removes it or
 # refuses to seal.
 $legacyDumpPath = 'C:\DedicatedDump.sys'
-$configuredDump = (Get-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction SilentlyContinue).DedicatedDumpFile
+$dumpSettings = Get-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction SilentlyContinue
+$configuredDump = if ($dumpSettings) { $dumpSettings.DedicatedDumpFile } else { $null }
 $legacyDumpResult = Remove-LegacyDedicatedDump $legacyDumpPath $configuredDump
 if ($legacyDumpResult -eq 'removed') {
     Write-Host "OK: removed ${legacyDumpPath} from an older preparation"
@@ -315,7 +354,7 @@ Write-Host "`n--- Configuring pagefile.sys ---"
 try {
     Set-FixedPagefile $pagefileSizeMB
 } catch {
-    Write-Error "FAIL: pagefile configuration failed: $($_.Exception.Message)"
+    Write-Error "FAIL: pagefile configuration failed: $($_.Exception.Message)" -ErrorAction Continue
     exit 1
 }
 
