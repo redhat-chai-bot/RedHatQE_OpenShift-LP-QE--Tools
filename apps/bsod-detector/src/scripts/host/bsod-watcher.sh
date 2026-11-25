@@ -324,10 +324,17 @@ function DeleteCreatedExport () {
     # an export that replaced it under the same name is refused (409 Conflict) rather than deleted. KubeVirt makes the export the
     # controller owner of its exporter pod, service and token secret; background cascading deletion removes them. Output goes to
     # the caller's stdout/stderr. A failed delete keeps the identity for one more attempt at exit; the export's TTL is 12h.
+    # No request is sent unless both path components are DNS-1123 names (URL-safe; never "/", "." or "..") and the complete
+    # DeleteOptions with the UID precondition were serialized beforehand: a DELETE with an empty body deletes unconditionally.
+    typeset deleteOptions=''
     [[ -n "${createdExport}" && -n "${createdExportUid}" ]] || return 0
-    jq -cn --arg uid "${createdExportUid}" '{kind:"DeleteOptions",apiVersion:"v1",propagationPolicy:"Background",preconditions:{uid:$uid}}' |
-        oc --request-timeout=30s delete -f - --raw "/apis/export.kubevirt.io/v1beta1/namespaces/${cfgArr[ns]}/virtualmachineexports/${createdExport}" \
-        >/dev/null || return 0
+    [[ "${cfgArr[ns]}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && "${createdExport}" =~ ^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$ ]] ||
+        { echo "bsod-watcher: WARN: not deleting VirtualMachineExport '${createdExport}': invalid namespace or name"; return 0; }
+    deleteOptions="$(jq -cn --arg uid "${createdExportUid}" \
+        '{kind:"DeleteOptions",apiVersion:"v1",propagationPolicy:"Background",preconditions:{uid:$uid}}')" || return 0
+    [[ "${deleteOptions}" == *"\"preconditions\":{\"uid\":\"${createdExportUid}\"}"* ]] || return 0
+    oc --request-timeout=30s delete -f - --raw "/apis/export.kubevirt.io/v1beta1/namespaces/${cfgArr[ns]}/virtualmachineexports/${createdExport}" \
+        <<<"${deleteOptions}" >/dev/null || return 0
     echo "deleted VirtualMachineExport ${createdExport} (uid ${createdExportUid})"
     createdExport=''; createdExportUid=''
 }
