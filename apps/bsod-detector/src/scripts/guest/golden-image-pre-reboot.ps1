@@ -52,12 +52,21 @@ function Save-HTTPSdownload ([string]$url, [string]$path) {
     if ($url -notlike 'https://*') { throw "not an HTTPS URL: ${url}" }
     $request = [System.Net.HttpWebRequest]::Create($url)
     $request.AllowAutoRedirect = $false
+    $requestError = $null
     try {
         $response = $request.GetResponse()
     } catch [System.Net.WebException] {
-        # An error status arrives as an exception that carries the response; it is released before rethrowing.
-        if ($_.Exception.Response) { ([System.IDisposable]$_.Exception.Response).Dispose() }
-        throw
+        $requestError = $_
+    }
+    if ($requestError) {
+        # An error status arrives as an exception that carries the response. The response is released first;
+        # a failure to release it is ignored, so the request error itself is what is reported.
+        $webException = $requestError.Exception
+        while ($webException -and $webException -isnot [System.Net.WebException]) { $webException = $webException.InnerException }
+        if ($webException -and $webException.Response) {
+            try { ([System.IDisposable]$webException.Response).Dispose() } catch { }
+        }
+        throw $requestError
     }
     $stream = $null
     $file = $null
@@ -326,7 +335,8 @@ try {
     Set-ItemProperty -Path $cc -Name Overwrite            -Value 1                         -Type DWord        -ErrorAction Stop
     Set-ItemProperty -Path $cc -Name LogEvent             -Value 1                         -Type DWord        -ErrorAction Stop
     Set-ItemProperty -Path $cc -Name DumpFile             -Value '%SystemRoot%\MEMORY.DMP' -Type ExpandString -ErrorAction Stop
-    if (Get-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction SilentlyContinue) {
+    # The whole key is read so that an absent value and a key that cannot be read are told apart.
+    if ((Get-ItemProperty -Path $cc -ErrorAction Stop).PSObject.Properties['DedicatedDumpFile']) {
         Remove-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction Stop
     }
 } catch {
@@ -337,11 +347,21 @@ Write-Host 'OK: Crash dump registry set (CrashDumpEnabled=7, no DedicatedDumpFil
 # The dedicated dump file older preparations created at this fixed path is no longer used once
 # DedicatedDumpFile is unset. Only that exact file is removed (see Remove-LegacyDedicatedDump);
 # Windows can keep it locked until the reboot, and golden-image-post-reboot.ps1 then removes it or
-# refuses to seal.
+# refuses to seal. If CrashControl cannot be read, the file is left in place: it might still be the
+# configured dump file.
 $legacyDumpPath = 'C:\DedicatedDump.sys'
-$dumpSettings = Get-ItemProperty -Path $cc -Name DedicatedDumpFile -ErrorAction SilentlyContinue
-$configuredDump = if ($dumpSettings) { $dumpSettings.DedicatedDumpFile } else { $null }
-$legacyDumpResult = Remove-LegacyDedicatedDump $legacyDumpPath $configuredDump
+$dumpValue = $null
+try {
+    $dumpValue = (Get-ItemProperty -Path $cc -ErrorAction Stop).PSObject.Properties['DedicatedDumpFile']
+    $canReadCrashControl = $true
+} catch {
+    $canReadCrashControl = $false
+}
+$legacyDumpResult = if ($canReadCrashControl) {
+    Remove-LegacyDedicatedDump $legacyDumpPath $(if ($dumpValue) { $dumpValue.Value } else { $null })
+} else {
+    'CrashControl could not be read to confirm that no dedicated dump file is configured'
+}
 if ($legacyDumpResult -eq 'removed') {
     Write-Host "OK: removed ${legacyDumpPath} from an older preparation"
 } elseif ($legacyDumpResult -ne 'absent') {
