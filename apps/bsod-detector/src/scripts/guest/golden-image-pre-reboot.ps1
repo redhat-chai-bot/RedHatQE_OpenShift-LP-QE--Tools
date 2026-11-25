@@ -167,20 +167,27 @@ try {
 $isoVersion = if ($isoURL -match '/virtio-win-([0-9][0-9.]*)\.iso$') { $Matches[1] } else { $null }
 Write-Host "Latest virtio-win ISO: ${isoURL} (version $(if ($isoVersion) { $isoVersion } else { 'not in the file name' }))"
 
-# Every step that needs the ISO runs inside this try block. The finally block always unmounts the
-# ISO and removes the directory this run created (and nothing that existed before); a failure in
-# the steps or in that cleanup stops the script here, before any registry write or reboot.
-$isoDir = $null
-$isoPath = $null
+# The ISO directory is new and belongs to this run: its name is unique, and New-Item without -Force
+# refuses a path that already exists. A TEMP that is unset or not an existing directory, or a
+# failed creation, stops the script here, before the download, with nothing created or removed.
 $isoFailure = $null
 $isoCleanupProblem = $null
 try {
     $tempDir = Get-TempDirectory
     if (-not $tempDir -or -not (Test-Path -LiteralPath $tempDir -PathType Container)) { throw "TEMP ('${tempDir}') is not an existing directory" }
-    $newDir = Join-Path $tempDir "bsod-virtio-win-$((New-Guid).Guid)"
-    New-Item -ItemType Directory -Path $newDir -ErrorAction Stop | Out-Null
-    $isoDir = $newDir
+    $isoDir = Join-Path $tempDir "bsod-virtio-win-$((New-Guid).Guid)"
     $isoPath = Join-Path $isoDir 'virtio-win.iso'
+    New-Item -ItemType Directory -Path $isoDir -ErrorAction Stop | Out-Null
+} catch {
+    Write-Error "FAIL: $($_.Exception.Message)"
+    exit 1
+}
+
+# Every step that needs the ISO runs inside this try block, which starts right after this run
+# created its directory. The finally block always unmounts the ISO and removes that directory (and
+# nothing that existed before); a failure in the steps or in that cleanup stops the script here,
+# before any registry write or reboot.
+try {
     Write-Host "Downloading ${isoURL} to ${isoPath} ..."
     try { Save-HTTPSdownload $isoURL $isoPath } catch { throw "the latest virtio-win ISO could not be downloaded: $($_.Exception.Message)" }
     Write-Host 'OK: virtio-win ISO downloaded'
@@ -229,7 +236,7 @@ try {
 } catch {
     $isoFailure = $_.Exception.Message
 } finally {
-    if ($isoDir) { $isoCleanupProblem = Remove-ISOworkspace $isoDir $isoPath }
+    $isoCleanupProblem = Remove-ISOworkspace $isoDir $isoPath
 }
 if ($isoFailure) { Write-Error "FAIL: ${isoFailure}" }
 if ($isoCleanupProblem) { Write-Error "FAIL: ${isoCleanupProblem}" }
