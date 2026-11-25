@@ -305,13 +305,18 @@ function Invoke-NotMyFaultStaging ([string]$source) {
 try {
     $cfg = Read-CrashControlData $dataFile
     if ($null -eq $cfg) { throw 'Data file is empty or null' }
-    Assert-CrashControlData $cfg
     $type = if ($dumpType) { $dumpType } else { $cfg.recommended.crashDumpType }
     $typeNames = $cfg.crashDumpTypes.PSObject.Properties.Name
 } catch {
     Fail "Cannot load crash-control.json: $($_.Exception.Message)" 1
 }
 if ($typeNames -notcontains $type) { Fail "Unknown dump type '${type}'. Valid: $($typeNames -join ', ')." 2 }
+# The other values are verified after the dump type, so an unknown dump type is still reported first.
+try {
+    Assert-CrashControlData $cfg
+} catch {
+    Fail "Cannot load crash-control.json: $($_.Exception.Message)" 1
+}
 try {
     $crashDumpEnabled = [int]$cfg.crashDumpTypes.$type.CrashDumpEnabled
 } catch {
