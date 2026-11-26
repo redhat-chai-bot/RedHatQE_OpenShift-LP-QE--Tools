@@ -417,5 +417,5 @@ RunWatcher() {
   grep -q 'virtctl vnc screenshot' "$hostDir/watch-crash.sh"
   grep -q 'virtctl memory-dump get' "$hostDir/watch-crash.sh"
   grep -q 'extract--guest-os--crash-info.sh' "$hostDir/watch-crash.sh"
-  grep -q 'exec-crash' "$REPO_ROOT/src/scripts/crash-injector/trigger-bsod-intentional.sh"
+  grep -q 'exec-crash' "$REPO_ROOT/src/scripts/bsod-pipeline/bsod-runner.sh"
 }
