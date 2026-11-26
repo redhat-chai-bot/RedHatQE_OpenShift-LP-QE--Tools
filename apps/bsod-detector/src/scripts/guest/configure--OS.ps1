@@ -212,7 +212,7 @@ try {
         LogEvent             = @(1, 'DWord')
         DumpFile             = @(
             '%SystemRoot%\MEMORY.DMP',
-            'ExpandString',
+            'ExpandString'
         )
     }
     $crashChanged = $false
