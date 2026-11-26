@@ -224,15 +224,13 @@ try {
                 -Name $name `
                 -ErrorAction SilentlyContinue
         ).$name
-        if (
-            if ($type -eq 'ExpandString') {
-                (
-                    $have -eq
-                    [Environment]::ExpandEnvironmentVariables($want)
-                ) -or
-                ($have -eq $want)
-            } else {($have -eq $want)}
-        ) {
+        $match = if ($type -eq 'ExpandString') {
+            ($have -eq $want) -or
+                ($have -eq [Environment]::ExpandEnvironmentVariables($want))
+        } else {
+            $have -eq $want
+        }
+        if ($match) {
             Write-Host "OK: ${name} == ${want}"
         } else {
             Set-ItemProperty -Path $cc `
