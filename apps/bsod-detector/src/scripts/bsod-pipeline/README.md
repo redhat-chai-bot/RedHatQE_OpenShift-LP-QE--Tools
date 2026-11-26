@@ -10,7 +10,7 @@ This README describes the newly uploaded runner supplied in this conversation: S
 - No local `notmyfaultc64.exe` file is required next to the runner.
 - Intentional mode does not upload, replace, unblock, or compare the guest binary with a host copy.
 - The guest hash result is checked only for nonemptiness; it is not compared to an expected trusted digest.
-- Guest download during preflight is an expectation in comments, not a behavior implemented by this runner. The deployed helper combination must satisfy it.
+- Guest download during preflight is an expectation in the runner's comments and diagnostic; neither this runner nor the referenced helpers implement it.
 - All examples and validation statements below describe this upload; earlier test counts have been removed.
 
 ## 1. Purpose and boundaries
@@ -32,7 +32,7 @@ Both modes pass `--no-restart` to the watcher. A successful run requires the VM 
 
 - **A digest-pinned recovery image must be supplied.** The runner has no default recovery image: it stops before creating a run directory unless `BSOD_DET__RECOVERY__IMAGE` is set, and the referenced preflight accepts only a reference ending in `@sha256:` followed by a 64-character hexadecimal digest. Look up the current digest as the application README describes (`skopeo inspect docker://quay.io/konveyor/oadp-vmfr-access:latest | jq -r '.Digest'`) and review it before use. A syntactically valid digest alone does not prove the image exists or is compatible.
 
-> **NotMyFault provisioning compatibility:** the uploaded runner comments assume that `configure-dumps.ps1` downloads NotMyFault during preflight. However, the previously supplied PowerShell script defaults to `-Mode watch` and stages NotMyFault only for `-Mode intentional`; the referenced preflight invokes it with `-DataFile` but does not pass `-Mode intentional`. This newly uploaded runner also does not forward its mode to preflight. If those helpers are still in use and the guest executable is absent, intentional mode will stop at the guest hash check. A new matching PowerShell/preflight pair was not supplied with this upload, so automatic download cannot be confirmed. Provision the reviewed guest executable separately or verify a compatible helper combination before running intentional mode.
+> **NotMyFault download assumption:** the runner's comments and missing-binary diagnostic assume that `configure-dumps.ps1` downloads NotMyFault during preflight. The referenced `configure-dumps.ps1` handles only crash-dump settings and does not download NotMyFault (see section 3). If the guest executable is absent, intentional mode stops at the guest hash check.
 
 - **Watch mode is not unlimited.** The unchanged watcher defaults to 3,600 seconds of armed observation. Zero is rejected, not interpreted as infinity.
 - **Artifact completeness is not guaranteed.** Screenshot, memory capture, host capture, dump generation, and extraction can fail. The final evidence summary and process status determine whether the runner reports success; directory existence alone is insufficient.
@@ -42,11 +42,11 @@ Both modes pass `--no-restart` to the watcher. A successful run requires the VM 
 
 The runner resolves its own directory as `scrDir` and helpers as `${scrDir}/../host`. Keep it within a compatible project layout; copying only the runner into an arbitrary directory is not sufficient.
 
-Intentional mode requires `notmyfaultc64.exe` to be present and readable at `C:\Temp\nmf\notmyfaultc64.exe` inside the Windows guest. No host-side copy is required: this runner no longer uploads or replaces the executable. The source comments expect `configure-dumps.ps1` to download it during preflight, but that expectation depends on the actual helper versions deployed; see the compatibility warning below.
+Intentional mode requires `notmyfaultc64.exe` to be present and readable at `C:\Temp\nmf\notmyfaultc64.exe` inside the Windows guest. No host-side copy is required: this runner no longer uploads or replaces the executable. The source comments expect `configure-dumps.ps1` to download it during preflight, but the referenced `configure-dumps.ps1` does not download it; see the NotMyFault note in section 2.
 
 Key dependencies:
 
-- `preflight-rhov.sh`: validates target, storage, permissions, recovery image, and guest dump configuration; writes recovery metadata.
+- `preflight-rhov.sh`: validates target, storage, permissions, recovery image, and guest dump configuration; writes recovery metadata. The preflight on the `feat/bsod-detector-script-simplification` branch (`amp-rh/OpenShift-LP-QE--Tools`) validates existing Windows crash-dump settings without changing them. That read-only validator is not part of the referenced `feat/add-bsod-detector` branch: the preflight this runner calls still runs the legacy `configure-dumps.ps1` helper to apply the recommended settings before checking them.
 - `guest-agent.py`: guest connectivity, file upload, PowerShell execution, and intentional crash command execution.
 - `watch-crash.sh`: arms detection, evaluates crash evidence, coordinates capture, stops the VM, invokes extraction, and writes the evidence summary.
 - `reliability.py`: detection decisions and summary-related processing used by the helpers.
@@ -137,14 +137,14 @@ For scheduled tests, schedule the actual crash after readiness and before the ar
 
 ## 7. Quick start: intentional crash
 
-Prepare the same namespace, VM, image, and storage settings as watch mode. Ensure a reviewed `notmyfaultc64.exe` is installed at `C:\Temp\nmf\notmyfaultc64.exe` inside the guest, either by a verified compatible preflight/configuration flow or by separate preparation. No binary beside the runner is needed. Explicitly confirm the target:
+Prepare the same namespace, VM, image, and storage settings as watch mode. Ensure a reviewed `notmyfaultc64.exe` is installed at `C:\Temp\nmf\notmyfaultc64.exe` inside the guest. No binary beside the runner is needed. Explicitly confirm the target:
 
 ```sh
 export BSOD_DET__CONFIRM_TARGET="${BSOD_DET__VM__NAME}"
 bash ./bsod-runner.sh --mode intentional 0x01
 ```
 
-The runner calls `GuestNmfHash` and requires only a nonempty result. The helper runs PowerShell `Get-FileHash -Algorithm SHA256`, removes whitespace, and lowercases its output. If the guest command fails, it discards the result. There is no comparison with a local binary, allowlisted checksum, or expected digest, and the caller does not validate a 64-character hash format. This is a guest availability/readability check, not binary integrity or provenance verification. If the executable is missing or the hash result is empty, the run aborts before clearing old dumps and before launching the watcher. The diagnostic is `notmyfaultc64.exe not found on guest — configure-dumps.ps1 download may have failed`; guest-command failure can produce the same diagnostic.
+The runner calls `GuestNmfHash` and requires only a nonempty result. The helper runs PowerShell `Get-FileHash -Algorithm SHA256`, removes whitespace, and lowercases its output. If the guest command fails, it discards the result. There is no comparison with a local binary, allowlisted checksum, or expected digest, and the caller does not validate a 64-character hash format. This is a guest availability/readability check, not binary integrity or provenance verification. If the executable is missing or the hash result is empty, the run aborts before clearing old dumps and before launching the watcher. The diagnostic is `notmyfaultc64.exe not found on guest — configure-dumps.ps1 download may have failed`; its download wording does not apply to the referenced helpers (see section 2), and guest-command failure can produce the same diagnostic.
 
 It then deletes old Windows full/minidump files and checks that cleanup succeeded. Injection happens only after the watcher publishes a readiness marker containing this run's ID. The crash command is `/accepteula /crash <crashType>`.
 
@@ -153,7 +153,7 @@ It then deletes old Windows full/minidump files and checks that cleanup succeede
 1. Enable strict shell behavior and restrictive file-creation permissions (`umask 077`); resolve paths and defaults.
 2. Parse arguments, prompt when appropriate, validate target, timeout, and recovery-image inputs, and enforce intentional-mode target authorization.
 3. Generate a run ID using UTC time, mode, process ID, and a random component; create a unique evidence directory.
-4. Run shared preflight and load `launcherPod` and `domain` from `recovery-metadata.json`. The runner does not pass `--require-trigger` or propagate its `--mode` value to preflight. It relies on guest provisioning having made NotMyFault available when intentional mode reaches the later hash check. The nearby staging comment in the uploaded source is stale; the staging implementation has been removed.
+4. Run shared preflight and load `launcherPod` and `domain` from `recovery-metadata.json`. The runner does not pass `--require-trigger` to preflight. It relies on guest provisioning having made NotMyFault available when intentional mode reaches the later hash check. The nearby staging comment in the uploaded source is stale; the staging implementation has been removed.
 5. Attempt to hot-add `pvpanic` and redefine domain `on_crash` as `preserve`. This is best effort, not guaranteed persistent KubeVirt configuration. Failure is nonfatal and may limit capture.
 6. Attempt pre-crash `domain.xml` and `vmi-spec.json` fallback copies; remove a failed copy rather than leave a misleading partial file.
 7. In intentional mode only, require a nonempty guest NotMyFault hash, then clear/verify old guest dumps. No executable upload, replacement, host hash comparison, or `Unblock-File` is performed by this runner.
@@ -248,7 +248,7 @@ Supply `--mode watch` or `--mode intentional 0x01`. Do not supply a crash type i
 
 ### Confirmation or guest NotMyFault error
 
-For intentional mode, set `BSOD_DET__CONFIRM_TARGET` to the exact VM name. Verify that `C:\Temp\nmf\notmyfaultc64.exe` exists inside Windows and can be hashed, and inspect guest-agent failures. A local copy beside the runner does not satisfy this new check. The download-failed message is not proof that a download was actually attempted: verify the installed preflight and PowerShell mode behavior. Do not disable target authorization or the guest check to bypass the failure.
+For intentional mode, set `BSOD_DET__CONFIRM_TARGET` to the exact VM name. Verify that `C:\Temp\nmf\notmyfaultc64.exe` exists inside Windows and can be hashed, and inspect guest-agent failures. A local copy beside the runner does not satisfy this new check. The download-failed message is not proof that a download was attempted: the referenced preflight and `configure-dumps.ps1` do not download NotMyFault. Do not disable target authorization or the guest check to bypass the failure.
 
 ### Preflight fails before arming
 
