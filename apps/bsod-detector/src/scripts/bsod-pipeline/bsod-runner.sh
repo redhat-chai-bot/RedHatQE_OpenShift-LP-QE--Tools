@@ -17,10 +17,11 @@ Where:
 
 Environment:
     BSOD_DET__NAMESPACE, BSOD_DET__VM__NAME  Target VM (required).
+    BSOD_DET__RECOVERY__IMAGE                Digest-pinned recovery image, <image>@sha256:<digest> (required, no default).
     BSOD_DET__CONFIRM_TARGET                 Must equal BSOD_DET__VM__NAME (intentional mode only).
     BSOD_DET__EVIDENCE__DIR                  Evidence mount (default: /mnt/persistent-bsod-evidence).
     BSOD_EVIDENCE_VOLUME_KIND, BSOD_DET__EVIDENCE__STORAGE_ID, BSOD_DET__MEMORY__DUMP_PVC,
-    BSOD_DET__SNAPSHOT__CLASS, BSOD_DET__RECOVERY__IMAGE,
+    BSOD_DET__SNAPSHOT__CLASS,
     BSOD_DET__READY__TIMEOUT (300), BSOD_DET__PREFLIGHT__TIMEOUT (1800)  Optional overrides.
     The watcher's own settings (e.g. BSOD_DET__ARMED__TIMEOUT, default 3600) still apply.
 useMsg-EOF
@@ -37,7 +38,7 @@ typeset evidenceKind="${BSOD_EVIDENCE_VOLUME_KIND:-pvc}"
 typeset evidenceId="${BSOD_DET__EVIDENCE__STORAGE_ID:-shared-bsod-evidence}"
 typeset memoryPvc="${BSOD_DET__MEMORY__DUMP_PVC:-${vm}-memdump}"
 typeset snapClass="${BSOD_DET__SNAPSHOT__CLASS:-ocs-storagecluster-rbdplugin-snapclass}"
-typeset recoveryImage="${BSOD_DET__RECOVERY__IMAGE:-quay.io/konveyor/oadp-vmfr-access:latest}"
+typeset recoveryImage="${BSOD_DET__RECOVERY__IMAGE:-}"
 typeset readyTimeout="${BSOD_DET__READY__TIMEOUT:-300}"
 typeset preflightTimeout="${BSOD_DET__PREFLIGHT__TIMEOUT:-1800}"
 typeset nmfGuest='C:\Temp\nmf\notmyfaultc64.exe'
@@ -102,6 +103,9 @@ esac
 [[ -n "${vm}" && -n "${ns}" ]] || Die 'BSOD_DET__VM__NAME and BSOD_DET__NAMESPACE must identify the disposable RHOV test VM'
 [[ "${readyTimeout}" =~ ^[1-9][0-9]*$ && "${preflightTimeout}" =~ ^[1-9][0-9]*$ ]] ||
     Die 'BSOD_DET__READY__TIMEOUT and BSOD_DET__PREFLIGHT__TIMEOUT must be positive integers'
+# No default image: preflight-rhov.sh accepts only a digest-pinned reference and validates its format.
+[ -n "${recoveryImage}" ] ||
+    Die 'BSOD_DET__RECOVERY__IMAGE must name the digest-pinned recovery image (<image>@sha256:<digest>) that preflight requires; there is no default'
 if [ "${mode}" = intentional ]; then
     # The target location is not authorization: the operator must name the VM again.
     [ "${BSOD_DET__CONFIRM_TARGET:-}" = "${vm}" ] ||

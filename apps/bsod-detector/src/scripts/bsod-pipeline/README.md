@@ -2,7 +2,7 @@
 
 A guided crash-test and evidence-collection runner for a disposable Windows VM on OpenShift Virtualization (RHOV).
 
-This README describes the newly uploaded runner supplied in this conversation: SHA-256 `391c3ded7d30fa8d2943974e0e7657607f7e02a68d0e82f8b465c329795cc56d` (198 lines; 10,857 bytes). This supersedes the README for the earlier 205-line runner. Dependency behavior was checked against the referenced `feat/add-bsod-detector` branch. Different helper versions can change prerequisites, artifacts, and timeouts.
+This README describes the newly uploaded runner supplied in this conversation: SHA-256 `3c481c27a08b9659cf3a484ddf8b97ab4043a2350bfbc105eb1cd24d004b4a64` (202 lines; 11,195 bytes). This supersedes the README for the earlier 205-line runner. Dependency behavior was checked against the referenced `feat/add-bsod-detector` branch. Different helper versions can change prerequisites, artifacts, and timeouts.
 
 
 ### What changed from the previous README
@@ -30,7 +30,7 @@ Both modes pass `--no-restart` to the watcher. A successful run requires the VM 
 
 ## 2. Important current limitations
 
-- **The recovery-image default is not usable with the referenced preflight.** The runner defaults to `quay.io/konveyor/oadp-vmfr-access:latest`, but preflight requires a reference ending in `@sha256:` followed by a 64-character hexadecimal digest. Set `BSOD_DET__RECOVERY__IMAGE` to a known-good digest-pinned image before running. A syntactically valid digest alone does not prove the image exists or is compatible.
+- **A digest-pinned recovery image must be supplied.** The runner has no default recovery image: it stops before creating a run directory unless `BSOD_DET__RECOVERY__IMAGE` is set, and the referenced preflight accepts only a reference ending in `@sha256:` followed by a 64-character hexadecimal digest. Look up the current digest as the application README describes (`skopeo inspect docker://quay.io/konveyor/oadp-vmfr-access:latest | jq -r '.Digest'`) and review it before use. A syntactically valid digest alone does not prove the image exists or is compatible.
 
 > **NotMyFault provisioning compatibility:** the uploaded runner comments assume that `configure-dumps.ps1` downloads NotMyFault during preflight. However, the previously supplied PowerShell script defaults to `-Mode watch` and stages NotMyFault only for `-Mode intentional`; the referenced preflight invokes it with `-DataFile` but does not pass `-Mode intentional`. This newly uploaded runner also does not forward its mode to preflight. If those helpers are still in use and the guest executable is absent, intentional mode will stop at the guest hash check. A new matching PowerShell/preflight pair was not supplied with this upload, so automatic download cannot be confirmed. Provision the reviewed guest executable separately or verify a compatible helper combination before running intentional mode.
 
@@ -91,7 +91,7 @@ When standard input is a terminal, omitted mode is prompted for. Intentional mod
 - `BSOD_DET__EVIDENCE__STORAGE_ID`: stable evidence storage identifier; default `shared-bsod-evidence`.
 - `BSOD_DET__MEMORY__DUMP_PVC`: dedicated memory-dump PVC name; default `${VM_NAME}-memdump`, where `VM_NAME` is the selected VM name.
 - `BSOD_DET__SNAPSHOT__CLASS`: snapshot class; default `ocs-storagecluster-rbdplugin-snapclass`. Set a class suitable for the actual storage.
-- `BSOD_DET__RECOVERY__IMAGE`: recovery image; runner default `quay.io/konveyor/oadp-vmfr-access:latest`. **Override with a known-good digest-pinned reference to pass the referenced preflight.**
+- `BSOD_DET__RECOVERY__IMAGE`: required; no default. **Set it to a known-good digest-pinned reference (`<image>@sha256:<64-hex digest>`); the referenced preflight rejects anything else.**
 
 ### Timeouts and advanced overrides
 
@@ -151,7 +151,7 @@ It then deletes old Windows full/minidump files and checks that cleanup succeede
 ## 8. Execution flow, step by step
 
 1. Enable strict shell behavior and restrictive file-creation permissions (`umask 077`); resolve paths and defaults.
-2. Parse arguments, prompt when appropriate, validate target and timeout inputs, and enforce intentional-mode target authorization.
+2. Parse arguments, prompt when appropriate, validate target, timeout, and recovery-image inputs, and enforce intentional-mode target authorization.
 3. Generate a run ID using UTC time, mode, process ID, and a random component; create a unique evidence directory.
 4. Run shared preflight and load `launcherPod` and `domain` from `recovery-metadata.json`. The runner does not pass `--require-trigger` or propagate its `--mode` value to preflight. It relies on guest provisioning having made NotMyFault available when intentional mode reaches the later hash check. The nearby staging comment in the uploaded source is stale; the staging implementation has been removed.
 5. Attempt to hot-add `pvpanic` and redefine domain `on_crash` as `preserve`. This is best effort, not guaranteed persistent KubeVirt configuration. Failure is nonfatal and may limit capture.
@@ -238,9 +238,9 @@ The runner does not delete shared evidence PVCs or the memory-dump PVC as routin
 
 ## 13. Troubleshooting
 
-### `recovery image must be digest-pinned`
+### `BSOD_DET__RECOVERY__IMAGE must name the digest-pinned recovery image` or `recovery image must be digest-pinned`
 
-Set `BSOD_DET__RECOVERY__IMAGE` to a reviewed, available, compatible digest-pinned image. Removing the digest to use only `:latest` does not work with this preflight. Digest pinning and image availability are separate checks.
+The runner reports the first message when `BSOD_DET__RECOVERY__IMAGE` is unset or empty; preflight reports the second when the value is not digest-pinned. Set `BSOD_DET__RECOVERY__IMAGE` to a reviewed, available, compatible digest-pinned image. Removing the digest to use only `:latest` does not work with this preflight. Digest pinning and image availability are separate checks.
 
 ### Missing mode or invalid crash type
 
