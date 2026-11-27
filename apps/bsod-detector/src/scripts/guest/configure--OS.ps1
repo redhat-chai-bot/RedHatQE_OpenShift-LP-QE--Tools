@@ -67,8 +67,9 @@ function Set-FixedPagefile ([int64]$sizeMB) {
     }
     Set-ItemProperty `
         -LiteralPath $mmKey `
-        -Name PagingFiles `
-        -Type MultiString -Value @($want) `
+        -Name 'PagingFiles' `
+        -Type 'MultiString' `
+        -Value @($want) `
         -ErrorAction Stop
     return $true
 }
@@ -235,10 +236,11 @@ try {
         if ($match) {
             Write-Host "OK: ${name} == ${want}"
         } else {
-            Set-ItemProperty -Path $cc `
+            Set-ItemProperty `
+                -Path $cc `
                 -Name $name `
-                -Value $want `
                 -Type $type `
+                -Value $want `
                 -ErrorAction Stop
             Write-Host "OK: ${name} := ${want}"
             $crashChanged = $true
