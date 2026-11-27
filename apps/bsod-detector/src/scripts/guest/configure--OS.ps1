@@ -413,12 +413,7 @@ try {
             Start-Service -Name 'QEMU-GA' -ErrorAction SilentlyContinue
             $svc.WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
         }
-        if ($svc.Status -eq 'Running') {
-            Write-Host 'OK: Service `QEMU-GA` is Running and set to Automatic.'
-        } else {Write-Host (
-            "WARN: Service ``QEMU-GA`` status is ``$($svc.Status)`` after " +
-            'start attempt.'
-        )}
+        Write-Host 'OK: Service `QEMU-GA` is Running and set to Automatic.'
     }
 
     if ($needReboot) {
