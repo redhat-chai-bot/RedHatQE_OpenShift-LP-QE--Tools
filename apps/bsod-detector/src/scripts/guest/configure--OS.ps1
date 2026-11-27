@@ -26,51 +26,50 @@ function Get-PageFileSizeMB ([int64]$memoryBytes) {
     [int64][math]::Round((($memoryBytes + 257MB) / 1MB), 0)
 }
 
-# Configure a fixed `${env:SystemDrive}\pagefile.sys`.
+# Configure `${env:SystemDrive}\pagefile.sys` with a minimum of `$sizeMB` MiB.
 # Returns `$true` when a reboot is needed.
 function Set-FixedPagefile ([int64]$sizeMB) {
-    $changed = $false
-    $comp = Get-CimInstance `
-        -ClassName Win32_ComputerSystem `
-        -ErrorAction Stop
-    if ($comp.AutomaticManagedPagefile) {
-        Set-CimInstance `
-            -InputObject $comp `
-            -Property @{AutomaticManagedPagefile = $false} `
-            -ErrorAction Stop
-        Write-Host 'OK: Automatic PageFile management disabled.'
-        $changed = $true
-    }
     $mmKey = (
         'HKLM:\SYSTEM\CurrentControlSet' +
         '\Control\Session Manager\Memory Management'
     )
-    $want = "${env:SystemDrive}\pagefile.sys ${sizeMB} ${sizeMB}"
-    $have = (
-        Get-ItemProperty `
-            -Path $mmKey `
-            -Name PagingFiles `
-            -ErrorAction SilentlyContinue
-    ).PagingFiles
-    if ($have -is [array]) {$have = $have -join ';'}
-    if ($have -ne $want) {
-        Set-ItemProperty `
-            -Path $mmKey `
-            -Name PagingFiles `
-            -Type MultiString `
-            -Value @($want) `
-            -ErrorAction Stop
-        Write-Host (
-            "OK: PagingFile is set to '${want}' (RAM + 257 MiB), " +
-            'active after reboot.'
-        )
-        $changed = $true
-    } else {
-        Write-Host (
-            "OK: PagingFile is already set to '${want}' (RAM + 257 MiB)."
-        )
+    $have = @((
+        Get-Item -LiteralPath $mmKey -ErrorAction Stop
+    ).GetValue('PagingFiles', [string[]]@()))
+    $pfPath = "${env:SystemDrive}\pagefile.sys"
+    $pfRgx = '^{0}\s+([0-9]+)\s+([0-9]+)\s*$' -f [regex]::Escape($pfPath)
+    $initMB = $sizeMB
+    $maxMB = $sizeMB
+
+    foreach ($entry in $have) {
+        if ($entry -notmatch $pfRgx) {continue}
+        $initMB = [math]::Max($sizeMB, [int64]$Matches[1])
+        $maxMB = [math]::Max($initMB, [int64]$Matches[2])
+        break
     }
-    $changed
+    $want = "$pfPath $initMB $maxMB"
+
+    $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+    $auto = $cs.AutomaticManagedPagefile
+    if (
+        -not $auto -and
+        ($have.Count -eq 1) -and
+        ($have[0] -eq $want)
+    ) {
+        return $false
+    }
+
+    if ($auto) {
+        Set-CimInstance `
+            -InputObject $cs `
+            -Property @{AutomaticManagedPagefile = $false} `
+            -ErrorAction Stop
+    }
+    Set-ItemProperty `
+        -LiteralPath $mmKey -Name PagingFiles `
+        -Type MultiString -Value @($want) `
+        -ErrorAction Stop
+    return $true
 }
 
 function Save-HTTPSdl ([string]$url, [string]$path) {
@@ -224,12 +223,14 @@ try {
                 -Name $name `
                 -ErrorAction SilentlyContinue
         ).$name
-        $match = if ($type -eq 'ExpandString') {
-            ($have -eq $want) -or
+        $match = $(
+            if ($type -eq 'ExpandString') {
+                ($have -eq $want) -or
                 ($have -eq [Environment]::ExpandEnvironmentVariables($want))
-        } else {
-            $have -eq $want
-        }
+            } else {
+                $have -eq $want
+            }
+        )
         if ($match) {
             Write-Host "OK: ${name} == ${want}"
         } else {
@@ -276,7 +277,7 @@ try {
     if ($crashChanged) { $needReboot = $true }
 
     # PageFile.
-    Write-Host "`n--- Configuring ``pagefile.sys`` ---"
+    Write-Host "`n--- Configuring PageFile ---"
     try {
         if (Set-FixedPagefile $pfSzMB) {$needReboot = $true}
     } catch {
