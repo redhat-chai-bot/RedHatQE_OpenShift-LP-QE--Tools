@@ -300,7 +300,7 @@ try {
             ($actPF.AllocatedBaseSize -ge $pfSzMB)
         ) {
             Write-Host (
-                "OK: The ``${env:SystemDrive}\pagefile.sys`` is active at " +
+                "OK: The ``${env:SystemDrive}\pagefile.sys`` is active " +
                 "($($actPF.AllocatedBaseSize) MiB)."
             )
         } else {
