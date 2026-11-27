@@ -297,16 +297,16 @@ try {
         )
         if (
             $actPF -and
-            ($actPF.AllocatedBaseSize -gt 0)
+            ($actPF.AllocatedBaseSize -ge $pfSzMB)
         ) {
             Write-Host (
-                'OK: The ``pagefile.sys`` is active ' +
+                "OK: The ``${env:SystemDrive}\pagefile.sys`` is active at " +
                 "($($actPF.AllocatedBaseSize) MiB)."
             )
         } else {
             Write-Host (
-                'WARN: pagefile.sys not active;' +
-                ' reboot needed'
+                "WARN: The ``${env:SystemDrive}\pagefile.sys`` is active. " +
+                'Reboot is needed.'
             )
             $needReboot = $true
         }
