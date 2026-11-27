@@ -411,8 +411,7 @@ try {
         Set-Service -Name QEMU-GA -StartupType Automatic
         if ($svc.Status -ne 'Running') {
             Start-Service -Name 'QEMU-GA' -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
-            $svc.Refresh()
+            $svc.WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
         }
         if ($svc.Status -eq 'Running') {
             Write-Host 'OK: Service `QEMU-GA` is Running and set to Automatic.'
@@ -423,7 +422,7 @@ try {
     }
 
     if ($needReboot) {
-        $note = 'Reboot and re-run to verify.'
+        $note = 'Reboot and re-run WITHOUT `-task TASK` to verify.'
     } else {
         $note = 'All settings verified.'
     }
