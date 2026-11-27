@@ -66,7 +66,8 @@ function Set-FixedPagefile ([int64]$sizeMB) {
             -ErrorAction Stop
     }
     Set-ItemProperty `
-        -LiteralPath $mmKey -Name PagingFiles `
+        -LiteralPath $mmKey `
+        -Name PagingFiles `
         -Type MultiString -Value @($want) `
         -ErrorAction Stop
     return $true
